@@ -1,0 +1,68 @@
+# =============================================================================
+# Claude Note Configuration (Docker)
+# =============================================================================
+
+# Vault root — set via env var in docker-compose.yml
+# vault_root = "/vault"
+
+# Where synthesized knowledge lands
+inbox_file = "claude-note-inbox.md"
+
+# Open questions tracker
+open_questions_file = "open-questions.md"
+
+# -----------------------------------------------------------------------------
+# Synthesis
+# -----------------------------------------------------------------------------
+[synthesis]
+# Mode: log | inbox | route
+mode = "route"
+
+# Claude model for synthesis
+model = "claude-sonnet-4-5-20250929"
+
+# Max tokens in synthesis response
+max_tokens = 4096
+
+# Synthesis timeout (seconds)
+timeout = 120
+
+# CLIProxyAPI — set via env vars in docker-compose.yml
+# api_base = "http://cliproxy:8317"
+# api_key = "claude-note-proxy-key"
+
+# -----------------------------------------------------------------------------
+# Timing
+# -----------------------------------------------------------------------------
+
+# Seconds to wait after last event before writing notes
+debounce_seconds = 15
+
+# Queue poll interval (seconds)
+poll_interval = 2
+
+# Lock timeout (seconds)
+lock_timeout = 30
+
+# Max timeline entries per session note
+timeline_max_entries = 100
+
+# -----------------------------------------------------------------------------
+# QMD Semantic Search
+# -----------------------------------------------------------------------------
+[qmd]
+# Enable qmd integration (uses QMD HTTP service)
+enabled = true
+
+# Related notes to include as context during synthesis
+synth_max_notes = 5
+
+# Minimum similarity score for routing
+min_score = 0.3
+
+# Enable link enhancement
+link_enhance_enabled = true
+
+# Deduplicate during ingestion
+ingest_dedup_enabled = true
+ingest_dedup_threshold = 0.75

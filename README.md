@@ -11,6 +11,17 @@ Claude Note runs as a background service, watching your Claude Code sessions and
 - **Smart Routing**: Routes synthesized knowledge to your inbox, specific notes, or creates new ones
 - **Open Questions Tracking**: Detects and tracks questions that come up during sessions
 - **Vault Integration**: Understands your existing notes for better context
+- **Transcript Upload**: Hook script uploads transcripts on session end — no host filesystem mounts needed in Docker
+- **Semantic Search Context**: QMD vector search provides related vault notes during synthesis
+- **Lightweight Docker Stack**: Micro images — full stack under 400MB total
+
+| Image | Size |
+|-------|------|
+| claude-note (API + worker) | 96 MB |
+| emb-service (embeddings) | 41 MB |
+| rerank-service (reranker) | 41 MB |
+| obsidian (Perlite viewer) | 47 MB |
+| qmd (semantic search) | 155 MB |
 
 ## Requirements
 
@@ -21,10 +32,10 @@ Claude Note runs as a background service, watching your Claude Code sessions and
 ## Quick Start
 
 ```bash
-# Clone and install
-git clone https://github.com/crimeacs/claude-note.git
-cd claude-note
-./install.sh
+make up
+# Follow auth flow to log in to your Claude account
+make cliproxy-login
+make install-hooks
 ```
 
 The installer will:
@@ -35,9 +46,9 @@ The installer will:
 
 ## How It Works
 
-1. **Hook Integration**: Claude Code hooks notify claude-note when sessions start/stop
+1. **Hook Integration**: A hook script (`claude-note-hook.sh`) posts events to the API on every hook, and uploads the full transcript on Stop
 2. **Queue Processing**: Events are queued and processed by the background worker
-3. **Synthesis**: When a session ends, Claude analyzes the transcript
+3. **Synthesis**: When a session ends, Claude analyzes the transcript (read from the local transcript store)
 4. **Note Routing**: Extracted knowledge is written to your vault
 
 ```
@@ -64,21 +75,9 @@ Claude Code Session
                        └─────────────┘
 ```
 
-## Commands
-
-```bash
-claude-note status       # Check worker and queue status
-claude-note update       # Check for and apply updates
-claude-note drain        # Process all pending sessions now
-claude-note clean        # Cleanup duplicate sessions, old locks
-claude-note index        # Rebuild vault index for synthesis context
-claude-note resynth <id> # Re-synthesize a specific session
-claude-note ingest <file> # Ingest PDF/DOCX into literature notes
-```
-
 ## Configuration
 
-Config file: `~/.config/claude-note/config.toml`
+Config file: `~/claude-note/docker/claude-note/config.toml`
 
 ```toml
 vault_root = "/path/to/your/vault"
@@ -104,35 +103,18 @@ See [docs/configuration.md](docs/configuration.md) for full reference.
 
 ## Claude Code Hook Setup
 
-Add to your Claude Code settings (`~/.claude/settings.json`):
+Use the installer to add hooks to `~/.claude/settings.json`:
 
-```json
-{
-  "hooks": {
-    "PostToolUse": [
-      {
-        "hooks": [
-          { "type": "command", "command": "claude-note enqueue", "timeout": 5000 }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          { "type": "command", "command": "claude-note enqueue", "timeout": 5000 }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          { "type": "command", "command": "claude-note enqueue", "timeout": 5000 }
-        ]
-      }
-    ]
-  }
-}
+```bash
+make install-hooks    # Install hooks (backs up settings.json first)
+make remove-hooks     # Remove hooks
 ```
+
+This installs `claude-note-hook.sh` which:
+- Posts all hook events (PostToolUse, UserPromptSubmit, Stop) to `POST /events`
+- On Stop: uploads the session transcript to `POST /transcripts/{session_id}`
+
+The API URL defaults to `http://localhost:8000` and can be overridden with the `CLAUDE_NOTE_API` environment variable.
 
 See [docs/hook-setup.md](docs/hook-setup.md) for detailed instructions.
 
@@ -141,31 +123,15 @@ See [docs/hook-setup.md](docs/hook-setup.md) for detailed instructions.
 ### macOS (launchd)
 
 ```bash
-# Status
-launchctl list | grep claude-note
-
-# Stop
-launchctl unload ~/Library/LaunchAgents/com.claude-note.worker.plist
-
-# Start
-launchctl load ~/Library/LaunchAgents/com.claude-note.worker.plist
-
-# Logs
-tail -f /path/to/vault/.claude-note/logs/worker-*.log
+make up                # Start the service
+make down              # Stop the service
 ```
 
 ### Linux (systemd)
 
 ```bash
-# Status
-systemctl --user status claude-note
-
-# Stop/Start
-systemctl --user stop claude-note
-systemctl --user start claude-note
-
-# Logs
-journalctl --user -u claude-note -f
+make up                # Start the service
+make down              # Stop the service
 ```
 
 ## Vault Structure
@@ -177,6 +143,7 @@ your-vault/
 ├── .claude-note/           # Internal data (gitignore this)
 │   ├── queue/              # Event queue
 │   ├── state/              # Session state
+│   ├── transcripts/        # Uploaded transcript files
 │   ├── logs/               # Worker logs
 │   └── vault_index.json    # Note index for context
 ├── claude-note-inbox.md    # Synthesized knowledge lands here
@@ -187,7 +154,8 @@ your-vault/
 ## Uninstall
 
 ```bash
-./uninstall.sh
+make down              # Stop the service
+make remove-hooks     # Remove hooks from Claude Code settings
 ```
 
 This removes the service, CLI, and source files. Your vault data is preserved.

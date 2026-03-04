@@ -327,6 +327,63 @@ def parse_knowledge_pack(output: str) -> knowledge_pack.KnowledgePack:
         raise ValueError(f"Failed to parse JSON: {e}\nOutput was: {output[:500]}")
 
 
+def _call_cli(prompt: str, model: str, timeout: int) -> str:
+    """Call Claude CLI subprocess (original code path)."""
+    env = os.environ.copy()
+    env["CLAUDE_CODE_HOOKS_ENABLED"] = "false"
+
+    try:
+        result = subprocess.run(
+            ["claude", "-p", prompt, "--model", model],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Claude CLI failed: {result.stderr}")
+        return result.stdout
+
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Synthesis timed out after {timeout}s")
+    except FileNotFoundError:
+        raise RuntimeError("Claude CLI not found. Is it installed?")
+
+
+def _call_api(prompt: str, model: str, timeout: int) -> str:
+    """Call OpenAI-compatible API (CLIProxyAPI, etc.) via stdlib urllib."""
+    import urllib.request
+    import urllib.error
+
+    url = config.SYNTH_API_BASE.rstrip("/") + "/v1/chat/completions"
+
+    body = json.dumps({
+        "model": model,
+        "max_tokens": config.SYNTH_MAX_TOKENS,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode()
+
+    headers = {"Content-Type": "application/json"}
+    if config.SYNTH_API_KEY:
+        headers["Authorization"] = f"Bearer {config.SYNTH_API_KEY}"
+
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode(errors="replace")[:500]
+        raise RuntimeError(f"Synthesis API HTTP {e.code}: {err_body}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Synthesis API unreachable: {e.reason}")
+
+    try:
+        return data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError):
+        raise RuntimeError(f"Unexpected API response: {json.dumps(data)[:500]}")
+
+
 def synthesize_session(
     transcript: transcript_reader.TranscriptContent,
     vault_index: vault_indexer.VaultIndex,
@@ -355,41 +412,22 @@ def synthesize_session(
     time_str = now.strftime("%H:%M:%S")
     prompt = build_synthesis_prompt(transcript, vault_index, cwd=cwd, date=date)
 
-    # Call claude CLI in print mode
-    # Disable hooks to prevent recursion
-    env = os.environ.copy()
-    env["CLAUDE_CODE_HOOKS_ENABLED"] = "false"
+    # Choose backend: HTTP API (CLIProxyAPI etc.) or Claude CLI subprocess
+    if config.SYNTH_API_BASE:
+        raw_output = _call_api(prompt, model, timeout)
+    else:
+        raw_output = _call_cli(prompt, model, timeout)
 
-    try:
-        result = subprocess.run(
-            ["claude", "-p", prompt, "--model", model],
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=timeout,
-        )
+    pack = parse_knowledge_pack(raw_output)
 
-        if result.returncode != 0:
-            raise RuntimeError(f"Claude CLI failed: {result.stderr}")
+    if not pack.time:
+        pack.time = time_str
 
-        pack = parse_knowledge_pack(result.stdout)
+    warnings = knowledge_pack.validate_knowledge_pack(pack)
+    if warnings:
+        pass  # Log warnings but don't fail
 
-        # Set the time (Claude doesn't return this, we set it ourselves)
-        if not pack.time:
-            pack.time = time_str
-
-        # Validate
-        warnings = knowledge_pack.validate_knowledge_pack(pack)
-        if warnings:
-            # Log warnings but don't fail
-            pass
-
-        return pack
-
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"Synthesis timed out after {timeout}s")
-    except FileNotFoundError:
-        raise RuntimeError("Claude CLI not found. Is it installed?")
+    return pack
 
 
 def synthesize_from_state(state, vault_index: vault_indexer.VaultIndex = None, model: str = None) -> Optional[knowledge_pack.KnowledgePack]:
@@ -437,11 +475,14 @@ def resynthesize_session(session_id: str, model: str = None) -> Optional[knowled
     if not state:
         raise ValueError(f"Session not found: {session_id}")
 
-    if not state.transcript_path:
+    # Check local transcript store first (uploaded by Stop hook)
+    local = config.TRANSCRIPTS_DIR / f"{session_id}.jsonl"
+    if local.exists():
+        transcript = transcript_reader.read_transcript(local)
+    elif state.transcript_path:
+        transcript = transcript_reader.read_transcript(state.transcript_path)
+    else:
         raise ValueError(f"Session has no transcript: {session_id}")
-
-    # Read transcript
-    transcript = transcript_reader.read_transcript(state.transcript_path)
 
     # Get fresh vault index
     vault_index = vault_indexer.build_index()

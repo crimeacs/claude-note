@@ -1,12 +1,13 @@
 """
 QMD semantic search integration for claude-note.
 
-Provides semantic search capabilities using the qmd MCP tool if available.
-Falls back gracefully if qmd is not available.
+Provides semantic search capabilities via the QMD HTTP API.
+Falls back gracefully if the QMD service is not available.
 """
 
-import subprocess
 import json
+import urllib.request
+import urllib.error
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -21,18 +22,62 @@ class SearchResult:
     snippet: str = ""
 
 
-def is_qmd_available() -> bool:
-    """Check if qmd command-line tool is available."""
+def _api_base() -> Optional[str]:
+    """Get QMD API base URL from config (lazy import to avoid circular deps)."""
+    from claude_note.config import QMD_API_BASE
+    return QMD_API_BASE
+
+
+def _get(path: str, timeout: int = 10) -> Optional[dict]:
+    """HTTP GET returning parsed JSON, or None on failure."""
+    base = _api_base()
+    if not base:
+        return None
     try:
-        result = subprocess.run(
-            ["qmd", "status"],
-            capture_output=True,
-            text=True,
-            timeout=5,
+        req = urllib.request.Request(f"{base}{path}")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
+    except (urllib.error.URLError, json.JSONDecodeError, OSError):
+        return None
+
+
+def _post(path: str, body: dict, timeout: int = 30) -> Optional[dict]:
+    """HTTP POST with JSON body returning parsed JSON, or None on failure."""
+    base = _api_base()
+    if not base:
+        return None
+    try:
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(
+            f"{base}{path}",
+            data=data,
+            headers={"Content-Type": "application/json"},
         )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
+    except (urllib.error.URLError, json.JSONDecodeError, OSError):
+        return None
+
+
+def _parse_results(data: Optional[dict]) -> list[SearchResult]:
+    """Extract SearchResult list from QMD API response."""
+    if not data:
+        return []
+    results = []
+    for item in data.get("results", []):
+        results.append(SearchResult(
+            path=item.get("path", ""),
+            title=item.get("title", Path(item.get("path", "")).stem),
+            score=float(item.get("score", 0)),
+            snippet=item.get("snippet", ""),
+        ))
+    return results
+
+
+def is_qmd_available() -> bool:
+    """Check if the QMD HTTP service is reachable."""
+    data = _get("/health", timeout=5)
+    return data is not None and data.get("ok", False)
 
 
 def search_vector(
@@ -41,7 +86,7 @@ def search_vector(
     min_score: float = 0.3,
 ) -> list[SearchResult]:
     """
-    Perform semantic (vector) search using qmd vsearch.
+    Perform semantic (vector) search using QMD vsearch.
 
     Args:
         query: Natural language query
@@ -51,41 +96,8 @@ def search_vector(
     Returns:
         List of SearchResult objects
     """
-    if not is_qmd_available():
-        return []
-
-    try:
-        result = subprocess.run(
-            [
-                "qmd", "vsearch",
-                query,
-                "--limit", str(limit),
-                "--min-score", str(min_score),
-                "--json",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-
-        if result.returncode != 0:
-            return []
-
-        data = json.loads(result.stdout)
-        results = []
-
-        for item in data.get("results", []):
-            results.append(SearchResult(
-                path=item.get("path", ""),
-                title=item.get("title", Path(item.get("path", "")).stem),
-                score=float(item.get("score", 0)),
-                snippet=item.get("snippet", ""),
-            ))
-
-        return results
-
-    except (json.JSONDecodeError, subprocess.TimeoutExpired, FileNotFoundError):
-        return []
+    data = _post("/vsearch", {"query": query, "limit": limit, "min_score": min_score})
+    return _parse_results(data)
 
 
 def search_keyword(
@@ -93,7 +105,7 @@ def search_keyword(
     limit: int = 10,
 ) -> list[SearchResult]:
     """
-    Perform keyword (BM25) search using qmd search.
+    Perform keyword (BM25) search using QMD search.
 
     Args:
         query: Keywords to search for
@@ -102,40 +114,8 @@ def search_keyword(
     Returns:
         List of SearchResult objects
     """
-    if not is_qmd_available():
-        return []
-
-    try:
-        result = subprocess.run(
-            [
-                "qmd", "search",
-                query,
-                "--limit", str(limit),
-                "--json",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-
-        if result.returncode != 0:
-            return []
-
-        data = json.loads(result.stdout)
-        results = []
-
-        for item in data.get("results", []):
-            results.append(SearchResult(
-                path=item.get("path", ""),
-                title=item.get("title", Path(item.get("path", "")).stem),
-                score=float(item.get("score", 0)),
-                snippet=item.get("snippet", ""),
-            ))
-
-        return results
-
-    except (json.JSONDecodeError, subprocess.TimeoutExpired, FileNotFoundError):
-        return []
+    data = _post("/search", {"query": query, "limit": limit})
+    return _parse_results(data)
 
 
 def find_similar_content(
@@ -179,15 +159,10 @@ def find_related_notes(
     Returns:
         List of SearchResult objects
     """
-    if not is_qmd_available():
-        return []
-
-    # Build query from keywords and tags
     query_parts = []
     if keywords:
         query_parts.extend(keywords)
     if tags:
-        # Tags are often descriptive, include them
         query_parts.extend(tags)
 
     if not query_parts:
@@ -211,21 +186,8 @@ def get_document(file_path: str) -> Optional[str]:
     Returns:
         Document content, or None if not found
     """
-    if not is_qmd_available():
-        return None
-
-    try:
-        result = subprocess.run(
-            ["qmd", "get", file_path],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-
-        if result.returncode != 0:
-            return None
-
-        return result.stdout
-
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return None
+    from urllib.parse import quote
+    data = _get(f"/document?path={quote(file_path, safe='')}", timeout=10)
+    if data and "content" in data:
+        return data["content"]
+    return None

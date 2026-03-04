@@ -153,6 +153,7 @@ CLAUDE_NOTE_DIR = VAULT_ROOT / ".claude-note"
 QUEUE_DIR = CLAUDE_NOTE_DIR / "queue"
 STATE_DIR = CLAUDE_NOTE_DIR / "state"
 LOGS_DIR = CLAUDE_NOTE_DIR / "logs"
+TRANSCRIPTS_DIR = CLAUDE_NOTE_DIR / "transcripts"
 
 # Ingestion output directories
 LITERATURE_DIR = VAULT_ROOT / "literature"
@@ -190,9 +191,12 @@ QUESTION_PATTERNS = [
 # =============================================================================
 
 RECURSION_MARKERS = [
-    ".claude-note",
+    ".claude-note/",
     "extracting durable knowledge",
-    "claude-note",
+    "claude-note worker",
+    "claude-note status",
+    "claude-note drain",
+    "localhost:8000/events",
 ]
 
 # =============================================================================
@@ -217,6 +221,11 @@ SYNTH_MODEL = _get_config_value("model", section="synthesis", default="claude-so
 SYNTH_MAX_TOKENS = int(_get_config_value("max_tokens", section="synthesis", default=4096))
 SYNTH_TIMEOUT = int(_get_config_value("timeout", section="synthesis", default=120))
 
+# OpenAI-compatible API for synthesis (e.g. CLIProxyAPI)
+# When set, uses HTTP API instead of Claude CLI subprocess
+SYNTH_API_BASE = _get_config_value("api_base", section="synthesis", default=None)
+SYNTH_API_KEY = _get_config_value("api_key", section="synthesis", default=None)
+
 # =============================================================================
 # Cleanup Configuration
 # =============================================================================
@@ -233,6 +242,9 @@ INBOX_DEDUP_LOOKBACK = int(_get_config_value("inbox_dedup_lookback", default=50)
 _qmd_enabled = _get_config_value("enabled", section="qmd", default=True)
 if isinstance(_qmd_enabled, str):
     _qmd_enabled = _qmd_enabled.lower() == "true"
+
+QMD_API_BASE = os.environ.get("CLAUDE_NOTE_QMD_API_BASE") or \
+    _get_config_value("api_base", section="qmd", default=None)
 
 QMD_SYNTH_ENABLED = _qmd_enabled
 QMD_SYNTH_MAX_NOTES = int(_get_config_value("synth_max_notes", section="qmd", default=5))
@@ -255,6 +267,7 @@ def ensure_dirs():
     QUEUE_DIR.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def get_config_summary() -> dict:

@@ -25,6 +25,9 @@ classifiers = [
 ]
 dependencies = []  # Pure stdlib, no dependencies
 
+[project.optional-dependencies]
+api = ["fastapi>=0.100", "uvicorn[standard]>=0.20"]
+
 [project.scripts]
 claude-note = "claude_note.cli:main"
 

@@ -1,0 +1,1860 @@
+#!/usr/bin/env python3
+"""
+claude-note benchmark suite.
+
+Tests system health, quality, speed, reliability, and token consumption
+across all services: claude-note API, QMD semantic search, and synthesis.
+
+Usage:
+    ./benchmark                  # Run all benchmarks
+    ./benchmark --suite system   # Run one suite
+    ./benchmark --suite quality speed  # Run multiple suites
+    ./benchmark --compare        # Show latest comparison only
+    ./benchmark --api-url http://host:8000  # Override API URL
+    ./benchmark --qmd-url http://host:8686  # Override QMD URL
+    ./benchmark --json           # Machine-readable output
+    ./benchmark --runs 20        # Override iteration count
+
+Suites: system, speed, reliability, quality, tokens
+"""
+
+import argparse
+import http.client
+import json
+import math
+import os
+import random
+import re
+import shutil
+import statistics
+import sys
+import textwrap
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+# ── Configuration ────────────────────────────────────────────────────────────
+
+API_URL = os.environ.get("CLAUDE_NOTE_API_URL", "http://localhost:8000")
+QMD_URL = os.environ.get("CLAUDE_NOTE_QMD_URL", "http://localhost:8686")
+REPORTS_DIR = Path(__file__).parent / ".benchmark"
+DEFAULT_RUNS = 10
+WARMUP_RUNS = 2
+CONCURRENCY_LEVELS = [1, 5, 10, 25]
+TIMEOUT = 30
+
+# Test queries for QMD search quality benchmarks
+SEARCH_QUERIES = [
+    "Docker container networking and port mapping",
+    "Python async programming patterns",
+    "Git branching strategy and merge conflicts",
+    "API authentication with JWT tokens",
+    "Database schema migration strategies",
+    "Error handling and retry patterns",
+    "CI/CD pipeline configuration",
+    "File system monitoring and events",
+    "Markdown parsing and processing",
+    "Configuration management best practices",
+]
+
+
+# ── Data structures ──────────────────────────────────────────────────────────
+
+
+@dataclass
+class Timing:
+    """Collected latency measurements for a single benchmark."""
+    name: str
+    values_ms: list = field(default_factory=list)
+    errors: list = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)
+
+    @property
+    def success_count(self) -> int:
+        return len(self.values_ms)
+
+    @property
+    def error_count(self) -> int:
+        return len(self.errors)
+
+    @property
+    def total(self) -> int:
+        return self.success_count + self.error_count
+
+    def add(self, ms: float):
+        self.values_ms.append(ms)
+
+    def add_error(self, err: str):
+        self.errors.append(err)
+
+
+@dataclass
+class BenchmarkResult:
+    """Result of a single benchmark."""
+    name: str
+    passed: bool
+    timing: Optional[Timing] = None
+    details: dict = field(default_factory=dict)
+    sub_results: list = field(default_factory=list)
+
+
+# ── Progress display ────────────────────────────────────────────────────────
+
+# ANSI color codes
+DIM = "\033[2m"
+RESET = "\033[0m"
+GREEN = "\033[32m"
+RED = "\033[31m"
+CYAN = "\033[36m"
+YELLOW = "\033[33m"
+BOLD = "\033[1m"
+CLEAR_LINE = "\033[2K"
+
+_quiet = False  # set True for --json mode
+
+
+class Progress:
+    """Live progress bar and per-test logging for benchmark suites."""
+
+    def __init__(self, suite_name, total_steps):
+        self.suite = suite_name
+        self.total = total_steps
+        self.current = 0
+        self.t_start = time.monotonic()
+        self._cols = shutil.get_terminal_size((80, 24)).columns
+
+    def _bar(self, width=30):
+        filled = int(width * self.current / self.total) if self.total else 0
+        bar = "█" * filled + "░" * (width - filled)
+        pct = int(100 * self.current / self.total) if self.total else 0
+        return f"{bar} {pct:3d}%"
+
+    def _elapsed(self):
+        s = time.monotonic() - self.t_start
+        if s < 60:
+            return f"{s:.0f}s"
+        return f"{int(s)//60}m{int(s)%60:02d}s"
+
+    def step(self, label=""):
+        """Advance progress counter by one major step."""
+        self.current = min(self.current + 1, self.total)
+        self.spin(label)
+
+    def spin(self, label):
+        """Update display label without advancing counter (for sub-iterations)."""
+        if _quiet:
+            return
+        line = f"  {CYAN}{self.suite}{RESET} {self._bar()} {DIM}{self.current}/{self.total}{RESET} {label}"
+        # truncate to terminal width
+        if len(line) > self._cols + 30:  # account for ANSI codes
+            line = line[:self._cols + 26] + "…"
+        sys.stderr.write(f"\r{CLEAR_LINE}{line}")
+        sys.stderr.flush()
+
+    def update(self, label):
+        """Alias for step() — advances counter and shows label."""
+        self.step(label)
+
+    def log(self, msg):
+        """Print a log line (clears progress bar, then redraws)."""
+        if _quiet:
+            return
+        sys.stderr.write(f"\r{CLEAR_LINE}  {DIM}│{RESET} {msg}\n")
+        sys.stderr.flush()
+
+    def log_result(self, name, passed, detail=""):
+        """Log a single test result inline."""
+        if _quiet:
+            return
+        icon = f"{GREEN}✓{RESET}" if passed else f"{RED}✗{RESET}"
+        suffix = f"  {DIM}{detail}{RESET}" if detail else ""
+        sys.stderr.write(f"\r{CLEAR_LINE}  {icon} {name}{suffix}\n")
+        sys.stderr.flush()
+
+    def done(self):
+        """Clear progress bar when suite is complete."""
+        if _quiet:
+            return
+        sys.stderr.write(f"\r{CLEAR_LINE}  {CYAN}{self.suite}{RESET} done ({self._elapsed()})\n")
+        sys.stderr.flush()
+
+    def iter(self, label, n, callback):
+        """Run callback n times with inline progress counter."""
+        if _quiet:
+            for i in range(n):
+                callback(i)
+            return
+        for i in range(n):
+            line = f"  {CYAN}{self.suite}{RESET} {self._bar()} {label} {DIM}[{i+1}/{n}]{RESET}"
+            sys.stderr.write(f"\r{CLEAR_LINE}{line}")
+            sys.stderr.flush()
+            callback(i)
+
+
+# ── Statistics helpers ───────────────────────────────────────────────────────
+
+
+def percentile(data, p):
+    """Compute p-th percentile (0-100) using linear interpolation."""
+    if not data:
+        return 0.0
+    s = sorted(data)
+    n = len(s)
+    k = (p / 100.0) * (n - 1)
+    f = int(k)
+    c = min(f + 1, n - 1)
+    return s[f] + (k - f) * (s[c] - s[f])
+
+
+def iqr_outliers(data):
+    """Split data into (clean, outliers) using IQR method."""
+    if len(data) < 4:
+        return list(data), []
+    q1 = percentile(data, 25)
+    q3 = percentile(data, 75)
+    iqr = q3 - q1
+    lo = q1 - 1.5 * iqr
+    hi = q3 + 1.5 * iqr
+    clean = [x for x in data if lo <= x <= hi]
+    outliers = [x for x in data if x < lo or x > hi]
+    return clean, outliers
+
+
+def confidence_interval_95(data):
+    """95% CI for the mean (normal approximation)."""
+    if len(data) < 2:
+        return (0.0, 0.0)
+    n = len(data)
+    mean = statistics.mean(data)
+    se = statistics.stdev(data) / math.sqrt(n)
+    return (mean - 1.96 * se, mean + 1.96 * se)
+
+
+def format_stats(data):
+    """Compute full stats dict for a list of ms values."""
+    if not data:
+        return {"n": 0}
+    clean, outliers = iqr_outliers(data)
+    ci_lo, ci_hi = confidence_interval_95(clean) if len(clean) >= 2 else (0, 0)
+    cv = (statistics.stdev(clean) / statistics.mean(clean) * 100) if len(clean) >= 2 and statistics.mean(clean) > 0 else 0
+    return {
+        "n": len(data),
+        "n_clean": len(clean),
+        "outliers": len(outliers),
+        "min": round(min(data), 2),
+        "p50": round(percentile(data, 50), 2),
+        "p90": round(percentile(data, 90), 2),
+        "p95": round(percentile(data, 95), 2),
+        "p99": round(percentile(data, 99), 2),
+        "max": round(max(data), 2),
+        "mean": round(statistics.mean(clean), 2),
+        "stdev": round(statistics.stdev(clean), 2) if len(clean) >= 2 else 0,
+        "ci95": [round(ci_lo, 2), round(ci_hi, 2)],
+        "cv_pct": round(cv, 1),
+    }
+
+
+def estimate_tokens(text):
+    """Estimate token count using segmented char-based heuristic.
+
+    Approximation tuned for cl100k_base-family tokenizers (Claude / GPT-4).
+    Code tokenizes at ~3.2 chars/token, prose at ~4.0, newlines ~0.5 each.
+    """
+    code_blocks = re.findall(r"```[\s\S]*?```", text)
+    code_chars = sum(len(b) for b in code_blocks)
+    prose_chars = len(text) - code_chars
+    newlines = text.count("\n")
+    return int(code_chars / 3.2 + prose_chars / 4.0 + newlines * 0.5)
+
+
+# ── HTTP helpers ─────────────────────────────────────────────────────────────
+
+
+def http_get(url, timeout=TIMEOUT):
+    """GET request. Returns (status, body, elapsed_ms)."""
+    t0 = time.monotonic()
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            elapsed = (time.monotonic() - t0) * 1000
+            try:
+                return resp.status, json.loads(raw), elapsed
+            except json.JSONDecodeError:
+                return resp.status, raw.decode(errors="replace"), elapsed
+    except urllib.error.HTTPError as e:
+        elapsed = (time.monotonic() - t0) * 1000
+        body = e.read().decode(errors="replace")[:500]
+        return e.code, {"error": body}, elapsed
+    except Exception as e:
+        elapsed = (time.monotonic() - t0) * 1000
+        return 0, {"error": str(e)}, elapsed
+
+
+def http_post(url, body, timeout=TIMEOUT):
+    """POST JSON request. Returns (status, body, elapsed_ms)."""
+    t0 = time.monotonic()
+    try:
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            elapsed = (time.monotonic() - t0) * 1000
+            try:
+                return resp.status, json.loads(raw), elapsed
+            except json.JSONDecodeError:
+                return resp.status, raw.decode(errors="replace"), elapsed
+    except urllib.error.HTTPError as e:
+        elapsed = (time.monotonic() - t0) * 1000
+        body_str = e.read().decode(errors="replace")[:500]
+        return e.code, {"error": body_str}, elapsed
+    except Exception as e:
+        elapsed = (time.monotonic() - t0) * 1000
+        return 0, {"error": str(e)}, elapsed
+
+
+# ── Suite: System Health ─────────────────────────────────────────────────────
+
+
+def bench_system(api_url, qmd_url):
+    """Check that all services are up and responding correctly."""
+    results = []
+    p = Progress("system", 6)
+
+    # 1. claude-note API health
+    p.update("GET /health")
+    status, body, ms = http_get(f"{api_url}/health")
+    ok = status == 200 and isinstance(body, dict) and body.get("status") == "ok"
+    r = BenchmarkResult(
+        name="api_health",
+        passed=ok,
+        details={
+            "status_code": status,
+            "response": body,
+            "latency_ms": round(ms, 2),
+        },
+    )
+    results.append(r)
+    p.log_result("api_health", ok, f"{ms:.0f}ms")
+
+    # 2. claude-note worker alive
+    p.update("worker thread")
+    worker_alive = isinstance(body, dict) and body.get("worker_alive", False)
+    results.append(BenchmarkResult(
+        name="api_worker_alive",
+        passed=worker_alive,
+        details={"worker_alive": worker_alive},
+    ))
+    p.log_result("api_worker_alive", worker_alive)
+
+    # 3. claude-note API /status
+    p.update("GET /status")
+    status, body, ms = http_get(f"{api_url}/status")
+    ok = status == 200 and isinstance(body, dict) and "sessions" in body
+    results.append(BenchmarkResult(
+        name="api_status",
+        passed=ok,
+        details={
+            "status_code": status,
+            "response": body if ok else str(body)[:200],
+            "latency_ms": round(ms, 2),
+        },
+    ))
+    p.log_result("api_status", ok, f"{ms:.0f}ms")
+
+    # 4. QMD health
+    p.update("QMD /health")
+    status, body, ms = http_get(f"{qmd_url}/health")
+    qmd_ok = status == 200 and isinstance(body, dict) and body.get("ok", False)
+    results.append(BenchmarkResult(
+        name="qmd_health",
+        passed=qmd_ok,
+        details={
+            "status_code": status,
+            "response": body,
+            "latency_ms": round(ms, 2),
+        },
+    ))
+    p.log_result("qmd_health", qmd_ok, f"{ms:.0f}ms")
+
+    # 5. QMD status (index info)
+    p.update("QMD /status")
+    status, body, ms = http_get(f"{qmd_url}/status")
+    results.append(BenchmarkResult(
+        name="qmd_status",
+        passed=status == 200,
+        details={
+            "status_code": status,
+            "response": body if status == 200 else str(body)[:200],
+            "latency_ms": round(ms, 2),
+        },
+    ))
+    p.log_result("qmd_status", status == 200, f"{ms:.0f}ms")
+
+    # 6. Event enqueue round-trip
+    p.update("POST /events")
+    test_sid = f"bench-system-{int(time.time())}"
+    status, body, ms = http_post(f"{api_url}/events", {
+        "session_id": test_sid,
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": "/tmp/benchmark",
+        "transcript_path": "",
+    })
+    ok = status == 200 and isinstance(body, dict) and "event_id" in body
+    results.append(BenchmarkResult(
+        name="api_event_enqueue",
+        passed=ok,
+        details={
+            "status_code": status,
+            "response": body,
+            "latency_ms": round(ms, 2),
+        },
+    ))
+    p.log_result("api_event_enqueue", ok, f"{ms:.0f}ms")
+
+    p.done()
+    return results
+
+
+# ── Suite: Speed ─────────────────────────────────────────────────────────────
+
+
+def _run_latency_bench(timing, method, url, body, runs, p, label):
+    """Run warmup + measured iterations for a latency benchmark with progress."""
+    p.step(f"{label} (warmup)")
+    for _ in range(WARMUP_RUNS):
+        if method == "GET":
+            http_get(url)
+        else:
+            http_post(url, body)
+
+    for i in range(runs):
+        p.spin(f"{label} [{i+1}/{runs}]")
+        if method == "GET":
+            status, _, ms = http_get(url)
+        else:
+            status, _, ms = http_post(url, body)
+        if 200 <= status < 300:
+            timing.add(ms)
+        else:
+            timing.add_error(f"HTTP {status}")
+
+    stats = format_stats(timing.values_ms)
+    p50 = stats.get("p50", "?")
+    p.log_result(label, timing.error_count == 0, f"p50={p50}ms  n={stats.get('n', 0)}")
+    return stats
+
+
+def bench_speed(api_url, qmd_url, runs):
+    """Measure latency of all endpoints."""
+    results = []
+    # 2 API + 1 event + 5 QMD + 1 compare = 9 endpoint groups
+    p = Progress("speed", 9)
+
+    # ── API endpoints ────────────────────────────────────────
+    for endpoint_name, method, url, body in [
+        ("api_health", "GET", f"{api_url}/health", None),
+        ("api_status", "GET", f"{api_url}/status", None),
+    ]:
+        timing = Timing(name=endpoint_name)
+        stats = _run_latency_bench(timing, method, url, body, runs, p, endpoint_name)
+        results.append(BenchmarkResult(
+            name=f"speed_{endpoint_name}",
+            passed=timing.error_count == 0,
+            timing=timing,
+            details={"stats": stats, "errors": timing.errors[:5]},
+        ))
+
+    # ── Event enqueue latency ────────────────────────────────
+    timing = Timing(name="api_event_enqueue")
+    p.step("api_event_enqueue (warmup)")
+    for _ in range(WARMUP_RUNS):
+        http_post(f"{api_url}/events", {
+            "session_id": f"bench-warmup-{int(time.time())}",
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": "/tmp", "transcript_path": "",
+        })
+    for i in range(runs):
+        p.spin(f"api_event_enqueue [{i+1}/{runs}]")
+        sid = f"bench-speed-{int(time.time())}-{i}"
+        status, _, ms = http_post(f"{api_url}/events", {
+            "session_id": sid,
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": "/tmp/benchmark",
+            "transcript_path": "",
+        })
+        if status == 200:
+            timing.add(ms)
+        else:
+            timing.add_error(f"HTTP {status}")
+
+    stats = format_stats(timing.values_ms)
+    p.log_result("api_event_enqueue", timing.error_count == 0, f"p50={stats.get('p50', '?')}ms")
+    results.append(BenchmarkResult(
+        name="speed_api_event_enqueue",
+        passed=timing.error_count == 0,
+        timing=timing,
+        details={"stats": stats, "errors": timing.errors[:5]},
+    ))
+
+    # ── QMD endpoints ────────────────────────────────────────
+    query = SEARCH_QUERIES[0]
+
+    for endpoint_name, method, url, body in [
+        ("qmd_health", "GET", f"{qmd_url}/health", None),
+        ("qmd_status", "GET", f"{qmd_url}/status", None),
+        ("qmd_search_bm25", "POST", f"{qmd_url}/search", {"query": query, "limit": 5}),
+        ("qmd_search_vector", "POST", f"{qmd_url}/vsearch", {"query": query, "limit": 5, "min_score": 0.3}),
+        ("qmd_search_hybrid", "POST", f"{qmd_url}/query", {"query": query, "limit": 5}),
+    ]:
+        timing = Timing(name=endpoint_name)
+        stats = _run_latency_bench(timing, method, url, body, runs, p, endpoint_name)
+        results.append(BenchmarkResult(
+            name=f"speed_{endpoint_name}",
+            passed=timing.error_count == 0,
+            timing=timing,
+            details={"stats": stats, "errors": timing.errors[:5]},
+        ))
+
+    # ── QMD compare (all 3 searches in parallel) ─────────────
+    timing = Timing(name="qmd_compare")
+    encoded_q = urllib.parse.quote(query)
+    p.step("qmd_compare (warmup)")
+    for _ in range(WARMUP_RUNS):
+        http_get(f"{qmd_url}/compare?q={encoded_q}&limit=5")
+    for i in range(runs):
+        p.spin(f"qmd_compare [{i+1}/{runs}]")
+        status, _, ms = http_get(f"{qmd_url}/compare?q={encoded_q}&limit=5")
+        if 200 <= status < 300:
+            timing.add(ms)
+        else:
+            timing.add_error(f"HTTP {status}")
+
+    stats = format_stats(timing.values_ms)
+    p.log_result("qmd_compare", timing.error_count == 0, f"p50={stats.get('p50', '?')}ms")
+    results.append(BenchmarkResult(
+        name="speed_qmd_compare",
+        passed=timing.error_count == 0,
+        timing=timing,
+        details={"stats": stats, "errors": timing.errors[:5]},
+    ))
+
+    p.done()
+    return results
+
+
+# ── Suite: Reliability ───────────────────────────────────────────────────────
+
+
+def _concurrent_requests(url, method, body, concurrency, total, timeout=TIMEOUT):
+    """Fire concurrent requests and collect timing."""
+    timing = Timing(name=f"concurrent_{concurrency}")
+
+    def single():
+        if method == "GET":
+            return http_get(url, timeout=timeout)
+        else:
+            return http_post(url, body, timeout=timeout)
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = [pool.submit(single) for _ in range(total)]
+        for f in as_completed(futures):
+            status, _, ms = f.result()
+            if 200 <= status < 300:
+                timing.add(ms)
+            else:
+                timing.add_error(f"HTTP {status}")
+
+    return timing
+
+
+def bench_reliability(api_url, qmd_url, runs):
+    """Test reliability under concurrency, error handling, and edge cases."""
+    results = []
+    # 4 API conc + 3 QMD conc + 5 edge cases + 1 keepalive + 1 burst = 14
+    p = Progress("reliability", 14)
+
+    # ── 1. Concurrent API health checks at increasing load ───
+    for conc in CONCURRENCY_LEVELS:
+        total = max(runs, conc * 2)
+        p.update(f"API concurrent x{conc} ({total} reqs)")
+        timing = _concurrent_requests(
+            f"{api_url}/health", "GET", None, conc, total,
+        )
+        stats = format_stats(timing.values_ms)
+        rate = timing.success_count / timing.total * 100 if timing.total else 0
+        passed = rate >= 95
+        results.append(BenchmarkResult(
+            name=f"reliability_api_concurrent_{conc}",
+            passed=passed,
+            timing=timing,
+            details={
+                "concurrency": conc,
+                "total_requests": timing.total,
+                "success_rate_pct": round(rate, 1),
+                "stats": stats,
+                "errors": timing.errors[:5],
+            },
+        ))
+        p.log_result(f"api_concurrent x{conc}", passed, f"{rate:.0f}% ok")
+
+    # ── 2. Concurrent QMD searches ───────────────────────────
+    for conc in CONCURRENCY_LEVELS[:3]:  # cap at 10 for qmd
+        total = max(runs, conc * 2)
+        query = random.choice(SEARCH_QUERIES)
+        p.update(f"QMD concurrent x{conc} ({total} reqs)")
+        timing = _concurrent_requests(
+            f"{qmd_url}/search", "POST",
+            {"query": query, "limit": 5}, conc, total,
+        )
+        stats = format_stats(timing.values_ms)
+        rate = timing.success_count / timing.total * 100 if timing.total else 0
+        passed = rate >= 90
+        results.append(BenchmarkResult(
+            name=f"reliability_qmd_concurrent_{conc}",
+            passed=passed,
+            timing=timing,
+            details={
+                "concurrency": conc,
+                "total_requests": timing.total,
+                "success_rate_pct": round(rate, 1),
+                "stats": stats,
+                "errors": timing.errors[:5],
+            },
+        ))
+        p.log_result(f"qmd_concurrent x{conc}", passed, f"{rate:.0f}% ok")
+
+    # ── 3. Invalid input handling ────────────────────────────
+
+    # Missing session_id should return 422
+    p.update("invalid event (no session_id)")
+    status, body, ms = http_post(f"{api_url}/events", {"no_session": True})
+    passed = status == 422
+    results.append(BenchmarkResult(
+        name="reliability_api_invalid_event",
+        passed=passed,
+        details={"status_code": status, "response": body, "latency_ms": round(ms, 2)},
+    ))
+    p.log_result("api_invalid_event", passed, f"HTTP {status}")
+
+    # Empty query to QMD
+    p.update("QMD missing query")
+    status, body, ms = http_post(f"{qmd_url}/search", {"limit": 5})
+    passed = status == 400
+    results.append(BenchmarkResult(
+        name="reliability_qmd_missing_query",
+        passed=passed,
+        details={"status_code": status, "response": body, "latency_ms": round(ms, 2)},
+    ))
+    p.log_result("qmd_missing_query", passed, f"HTTP {status}")
+
+    # Empty string query
+    p.update("QMD empty query")
+    status, body, ms = http_post(f"{qmd_url}/vsearch", {"query": "", "limit": 5})
+    passed = status in (200, 400)
+    results.append(BenchmarkResult(
+        name="reliability_qmd_empty_query",
+        passed=passed,
+        details={"status_code": status, "response": str(body)[:200], "latency_ms": round(ms, 2)},
+    ))
+    p.log_result("qmd_empty_query", passed, f"HTTP {status}")
+
+    # Non-existent QMD document
+    p.update("QMD missing document")
+    status, body, ms = http_get(f"{qmd_url}/document?path=does-not-exist-12345.md")
+    passed = status in (404, 200)
+    results.append(BenchmarkResult(
+        name="reliability_qmd_missing_document",
+        passed=passed,
+        details={"status_code": status, "response": str(body)[:200], "latency_ms": round(ms, 2)},
+    ))
+    p.log_result("qmd_missing_document", passed, f"HTTP {status}")
+
+    # Non-existent API endpoint
+    p.update("API 404")
+    status, body, ms = http_get(f"{api_url}/nonexistent")
+    passed = status == 404 or status == 405
+    results.append(BenchmarkResult(
+        name="reliability_api_404",
+        passed=passed,
+        details={"status_code": status, "latency_ms": round(ms, 2)},
+    ))
+    p.log_result("api_404", passed, f"HTTP {status}")
+
+    # ── 4. Connection reuse (keep-alive) test ────────────────
+    p.update(f"keep-alive reuse ({runs} reqs)")
+    timing = Timing(name="connection_reuse")
+    parsed = urllib.parse.urlparse(api_url)
+    try:
+        conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=TIMEOUT)
+        for i in range(runs):
+            t0 = time.monotonic()
+            conn.request("GET", "/health")
+            resp = conn.getresponse()
+            resp.read()
+            elapsed = (time.monotonic() - t0) * 1000
+            timing.add(elapsed)
+        conn.close()
+
+        stats = format_stats(timing.values_ms)
+        first = timing.values_ms[0] if timing.values_ms else 0
+        rest_avg = statistics.mean(timing.values_ms[1:]) if len(timing.values_ms) > 1 else 0
+        speedup = round(first / rest_avg, 1) if rest_avg > 0 else 0
+        results.append(BenchmarkResult(
+            name="reliability_connection_reuse",
+            passed=timing.error_count == 0,
+            timing=timing,
+            details={
+                "stats": stats,
+                "first_request_ms": round(first, 2),
+                "subsequent_avg_ms": round(rest_avg, 2),
+                "reuse_speedup": speedup,
+            },
+        ))
+        p.log_result("connection_reuse", True, f"first={first:.0f}ms  avg={rest_avg:.0f}ms  {speedup}x")
+    except Exception as e:
+        results.append(BenchmarkResult(
+            name="reliability_connection_reuse",
+            passed=False,
+            details={"error": str(e)},
+        ))
+        p.log_result("connection_reuse", False, str(e)[:60])
+
+    # ── 5. Rapid-fire event burst ────────────────────────────
+    burst_size = 50
+    timing = Timing(name="event_burst")
+    burst_sid = f"bench-burst-{int(time.time())}"
+    p.update(f"event burst ({burst_size} events)")
+    for i in range(burst_size):
+        status, _, ms = http_post(f"{api_url}/events", {
+            "session_id": burst_sid,
+            "hook_event_name": "PostToolUse",
+            "cwd": "/tmp/benchmark",
+            "transcript_path": "",
+            "tool_name": "Read",
+        })
+        if status == 200:
+            timing.add(ms)
+        else:
+            timing.add_error(f"HTTP {status}")
+
+    stats = format_stats(timing.values_ms)
+    rate = timing.success_count / timing.total * 100 if timing.total else 0
+    passed = rate == 100
+    results.append(BenchmarkResult(
+        name="reliability_event_burst",
+        passed=passed,
+        timing=timing,
+        details={
+            "burst_size": burst_size,
+            "success_rate_pct": round(rate, 1),
+            "stats": stats,
+            "errors": timing.errors[:5],
+        },
+    ))
+    p.log_result("event_burst", passed, f"{rate:.0f}% ok  p50={stats.get('p50', '?')}ms")
+
+    p.done()
+    return results
+
+
+# ── Suite: Quality ───────────────────────────────────────────────────────────
+
+
+def _jaccard(a, b):
+    """Jaccard similarity between two sets."""
+    if not a and not b:
+        return 1.0
+    union = a | b
+    if not union:
+        return 0.0
+    return len(a & b) / len(union)
+
+
+def bench_quality(api_url, qmd_url, runs):
+    """Evaluate search quality: relevance, consistency, and mode comparison."""
+    results = []
+    query_count = min(runs, len(SEARCH_QUERIES))
+    # coverage + agreement + consistency + score dist + compare + hook flow + retrieval + context lift
+    p = Progress("quality", query_count + query_count + 1 + query_count + 1 + 1 + 1 + 1)
+
+    # ── 1. Search result non-emptiness ───────────────────────
+    empty_bm25 = 0
+    empty_vector = 0
+    empty_hybrid = 0
+
+    for i in range(query_count):
+        q = SEARCH_QUERIES[i % len(SEARCH_QUERIES)]
+        p.update(f"coverage: {q[:35]}...")
+        _, bm25, _ = http_post(f"{qmd_url}/search", {"query": q, "limit": 5})
+        _, vec, _ = http_post(f"{qmd_url}/vsearch", {"query": q, "limit": 5, "min_score": 0.1})
+        _, hyb, _ = http_post(f"{qmd_url}/query", {"query": q, "limit": 5})
+
+        if not _get_results(bm25):
+            empty_bm25 += 1
+        if not _get_results(vec):
+            empty_vector += 1
+        if not _get_results(hyb):
+            empty_hybrid += 1
+
+    bm25_rate = round((query_count - empty_bm25) / query_count * 100, 1)
+    vec_rate = round((query_count - empty_vector) / query_count * 100, 1)
+    hyb_rate = round((query_count - empty_hybrid) / query_count * 100, 1)
+    results.append(BenchmarkResult(
+        name="quality_result_coverage",
+        passed=True,  # informational
+        details={
+            "queries_tested": query_count,
+            "bm25_empty": empty_bm25,
+            "vector_empty": empty_vector,
+            "hybrid_empty": empty_hybrid,
+            "bm25_hit_rate_pct": bm25_rate,
+            "vector_hit_rate_pct": vec_rate,
+            "hybrid_hit_rate_pct": hyb_rate,
+        },
+    ))
+    p.log_result("result_coverage", True, f"bm25={bm25_rate}% vec={vec_rate}% hyb={hyb_rate}%")
+
+    # ── 2. Cross-mode agreement (do different modes find same docs?) ─────
+    agreements = []
+    for q in SEARCH_QUERIES[:query_count]:
+        p.update(f"agreement: {q[:35]}...")
+        _, bm25, _ = http_post(f"{qmd_url}/search", {"query": q, "limit": 10})
+        _, vec, _ = http_post(f"{qmd_url}/vsearch", {"query": q, "limit": 10, "min_score": 0.1})
+        _, hyb, _ = http_post(f"{qmd_url}/query", {"query": q, "limit": 10})
+
+        bm25_paths = set(_extract_paths(_get_results(bm25)))
+        vec_paths = set(_extract_paths(_get_results(vec)))
+        hyb_paths = set(_extract_paths(_get_results(hyb)))
+
+        if bm25_paths or vec_paths:
+            agreements.append({
+                "query": q,
+                "bm25_vs_vector": round(_jaccard(bm25_paths, vec_paths), 3),
+                "bm25_vs_hybrid": round(_jaccard(bm25_paths, hyb_paths), 3),
+                "vector_vs_hybrid": round(_jaccard(vec_paths, hyb_paths), 3),
+                "bm25_count": len(bm25_paths),
+                "vector_count": len(vec_paths),
+                "hybrid_count": len(hyb_paths),
+                "union_count": len(bm25_paths | vec_paths | hyb_paths),
+            })
+
+    avg_bm25_vec = statistics.mean([a["bm25_vs_vector"] for a in agreements]) if agreements else 0
+    avg_bm25_hyb = statistics.mean([a["bm25_vs_hybrid"] for a in agreements]) if agreements else 0
+    avg_vec_hyb = statistics.mean([a["vector_vs_hybrid"] for a in agreements]) if agreements else 0
+
+    results.append(BenchmarkResult(
+        name="quality_cross_mode_agreement",
+        passed=True,  # informational
+        details={
+            "avg_jaccard_bm25_vs_vector": round(avg_bm25_vec, 3),
+            "avg_jaccard_bm25_vs_hybrid": round(avg_bm25_hyb, 3),
+            "avg_jaccard_vector_vs_hybrid": round(avg_vec_hyb, 3),
+            "per_query": agreements,
+        },
+    ))
+    p.log_result("cross_mode_agreement", True,
+                 f"bm25/vec={avg_bm25_vec:.2f}  vec/hyb={avg_vec_hyb:.2f}")
+
+    # ── 3. Consistency: same query returns same results ──────
+    consistency_scores = []
+    test_query = SEARCH_QUERIES[0]
+    prev_paths = None
+    consistency_runs = min(runs, 5)
+    p.update(f"consistency ({consistency_runs} runs)")
+    for _ in range(consistency_runs):
+        _, body, _ = http_post(f"{qmd_url}/vsearch", {"query": test_query, "limit": 10, "min_score": 0.1})
+        paths = _extract_paths(_get_results(body))
+        current = set(paths)
+        if prev_paths is not None:
+            consistency_scores.append(_jaccard(prev_paths, current))
+        prev_paths = current
+
+    avg_consistency = statistics.mean(consistency_scores) if consistency_scores else 1.0
+    results.append(BenchmarkResult(
+        name="quality_result_consistency",
+        passed=avg_consistency >= 0.9,
+        details={
+            "query": test_query,
+            "runs": len(consistency_scores) + 1,
+            "avg_jaccard": round(avg_consistency, 3),
+            "scores": [round(s, 3) for s in consistency_scores],
+        },
+    ))
+    p.log_result("result_consistency", avg_consistency >= 0.9, f"jaccard={avg_consistency:.3f}")
+
+    # ── 4. Score distribution analysis ───────────────────────
+    score_analyses = []
+    for q in SEARCH_QUERIES[:query_count]:
+        p.update(f"scores: {q[:35]}...")
+        _, body, _ = http_post(f"{qmd_url}/vsearch", {"query": q, "limit": 20, "min_score": 0.0})
+        r = _get_results(body)
+        scores = [float(item.get("score", 0)) for item in r if "score" in item]
+        if scores:
+            score_analyses.append({
+                "query": q[:40],
+                "count": len(scores),
+                "min": round(min(scores), 3),
+                "max": round(max(scores), 3),
+                "mean": round(statistics.mean(scores), 3),
+                "spread": round(max(scores) - min(scores), 3),
+            })
+
+    results.append(BenchmarkResult(
+        name="quality_score_distribution",
+        passed=True,
+        details={"analyses": score_analyses},
+    ))
+    if score_analyses:
+        avg_spread = statistics.mean([s["spread"] for s in score_analyses])
+        p.log_result("score_distribution", True, f"{len(score_analyses)} queries  avg_spread={avg_spread:.3f}")
+
+    # ── 5. Full /compare endpoint quality snapshot ───────────
+    p.update("compare snapshot")
+    encoded_q = urllib.parse.quote(SEARCH_QUERIES[0])
+    status, body, ms = http_get(f"{qmd_url}/compare?q={encoded_q}&limit=5")
+    results.append(BenchmarkResult(
+        name="quality_compare_snapshot",
+        passed=status == 200,
+        details={
+            "query": SEARCH_QUERIES[0],
+            "status_code": status,
+            "latency_ms": round(ms, 2),
+            "response_preview": _truncate_compare(body) if isinstance(body, dict) else str(body)[:300],
+        },
+    ))
+    p.log_result("compare_snapshot", status == 200, f"{ms:.0f}ms")
+
+    # ── 6. Hook event flow: simulate a realistic session ──────
+    p.update("hook event flow")
+    hook_sid = f"bench-hook-{int(time.time())}"
+    hook_transcript = f"/tmp/bench/{hook_sid}.jsonl"
+
+    # Capture queue state before
+    _, before_status, _ = http_get(f"{api_url}/status")
+    events_before = before_status.get("queue", {}).get("events", 0) if isinstance(before_status, dict) else 0
+
+    # Send a realistic session: UserPromptSubmit → PostToolUse × 3 → Stop
+    hook_events = [
+        {
+            "session_id": hook_sid,
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": "/tmp/benchmark",
+            "transcript_path": hook_transcript,
+            "prompt": "Fix the bug in the login handler",
+        },
+        {
+            "session_id": hook_sid,
+            "hook_event_name": "PostToolUse",
+            "cwd": "/tmp/benchmark",
+            "transcript_path": hook_transcript,
+            "tool_name": "Read",
+            "tool_input": {"file_path": "src/auth.py"},
+        },
+        {
+            "session_id": hook_sid,
+            "hook_event_name": "PostToolUse",
+            "cwd": "/tmp/benchmark",
+            "transcript_path": hook_transcript,
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "src/auth.py", "old_string": "bug", "new_string": "fix"},
+        },
+        {
+            "session_id": hook_sid,
+            "hook_event_name": "PostToolUse",
+            "cwd": "/tmp/benchmark",
+            "transcript_path": hook_transcript,
+            "tool_name": "Bash",
+            "tool_input": {"command": "pytest tests/"},
+        },
+        {
+            "session_id": hook_sid,
+            "hook_event_name": "Stop",
+            "cwd": "/tmp/benchmark",
+            "transcript_path": hook_transcript,
+        },
+    ]
+
+    event_ids = []
+    hook_errors = []
+    hook_latencies = []
+    for evt in hook_events:
+        st, body, ms = http_post(f"{api_url}/events", evt)
+        hook_latencies.append(ms)
+        if st == 200 and isinstance(body, dict) and "event_id" in body:
+            event_ids.append(body["event_id"])
+        else:
+            hook_errors.append(f"{evt['hook_event_name']}: HTTP {st}")
+
+    # Verify queue state after
+    _, after_status, _ = http_get(f"{api_url}/status")
+    events_after = after_status.get("queue", {}).get("events", 0) if isinstance(after_status, dict) else 0
+    sessions_after = after_status.get("sessions", {}) if isinstance(after_status, dict) else {}
+
+    all_accepted = len(event_ids) == len(hook_events)
+    events_queued = events_after >= events_before + len(hook_events)
+    hook_ok = all_accepted and events_queued and not hook_errors
+
+    results.append(BenchmarkResult(
+        name="quality_hook_event_flow",
+        passed=hook_ok,
+        details={
+            "session_id": hook_sid,
+            "events_sent": len(hook_events),
+            "events_accepted": len(event_ids),
+            "events_queued": events_queued,
+            "queue_before": events_before,
+            "queue_after": events_after,
+            "latency_ms": round(statistics.mean(hook_latencies), 2) if hook_latencies else 0,
+            "errors": hook_errors,
+            "sessions": sessions_after,
+        },
+    ))
+    flow_msg = f"{len(event_ids)}/{len(hook_events)} accepted"
+    if events_queued:
+        flow_msg += f"  queued={events_after - events_before}"
+    p.log_result("hook_event_flow", hook_ok, flow_msg)
+
+    # ── 7. Vault self-retrieval: can search find existing knowledge notes? ──
+    p.update("vault retrieval")
+
+    # Discover knowledge notes: broad search → collect unique paths → filter
+    all_paths = set()
+    for q in SEARCH_QUERIES:
+        _, body, _ = http_post(f"{qmd_url}/vsearch", {"query": q, "limit": 20, "min_score": 0.0})
+        for r in _get_results(body):
+            p_ = r.get("path", "")
+            if p_:
+                all_paths.add(p_)
+
+    # Knowledge notes = not session logs, not inbox, not bench artifacts
+    knowledge_notes = sorted([
+        p_ for p_ in all_paths
+        if not p_.startswith("claude-session-")
+        and "inbox" not in p_.lower()
+        and "bench-" not in p_
+    ])
+
+    # Self-retrieval: query each note's title, check if it finds itself
+    retrieval = {"fts": [], "vector": [], "hybrid": []}
+    retrieval_details = []
+    for note_path in knowledge_notes:
+        stem = note_path.replace(".md", "").replace("-", " ").replace("_", " ")
+        encoded = urllib.parse.quote(stem)
+
+        _, cmp_body, _ = http_get(f"{qmd_url}/compare?q={encoded}&limit=5")
+        if not isinstance(cmp_body, dict):
+            continue
+
+        row = {"note": note_path, "query": stem}
+        for mode in ["fts", "vector", "hybrid"]:
+            mode_data = cmp_body.get(mode, {})
+            mode_results = mode_data.get("results", []) if isinstance(mode_data, dict) else []
+            found_paths = [r.get("path", "") for r in mode_results[:5]]
+            found = note_path in found_paths
+            rank = found_paths.index(note_path) + 1 if found else -1
+            retrieval[mode].append(found)
+            row[mode] = rank
+
+        retrieval_details.append(row)
+
+    n_notes = len(knowledge_notes)
+    recall = {}
+    for mode in ["fts", "vector", "hybrid"]:
+        hits = sum(retrieval[mode])
+        recall[mode] = round(hits / n_notes * 100, 1) if n_notes else 0
+
+    results.append(BenchmarkResult(
+        name="quality_vault_retrieval",
+        passed=True,
+        details={
+            "knowledge_notes": n_notes,
+            "recall_at_5_pct": recall,
+            "per_note": retrieval_details,
+        },
+    ))
+    p.log_result("vault_retrieval", True,
+                 f"{n_notes} notes  fts={recall.get('fts', 0)}%  vec={recall.get('vector', 0)}%  hyb={recall.get('hybrid', 0)}%")
+
+    # ── 8. Synthesis context lift: how much context does search add? ──────
+    p.update("synth context lift")
+
+    # Simulate what synthesizer._get_related_note_snippets does:
+    # Build query from user prompts, call vsearch with min_score=0.3, format results
+    lift_queries = [
+        # Mimic real session queries (prompts + file names)
+        "Fix bug in login handler auth.py middleware",
+        "Docker container optimization distroless multi-stage build",
+        "PostgreSQL full text search tsvector indexing",
+        "Python async background worker queue processing",
+        "Benchmark performance latency testing endpoints",
+    ]
+
+    with_search = {"notes": [], "chars": [], "scores": []}
+    without_chars = len("(Semantic search disabled)")
+
+    for q in lift_queries:
+        _, body, _ = http_post(f"{qmd_url}/vsearch", {"query": q, "limit": 5, "min_score": 0.3})
+        r = _get_results(body)
+        with_search["notes"].append(len(r))
+
+        # Measure context chars (like synthesizer formats snippets)
+        context_chars = 0
+        query_scores = []
+        for item in r:
+            snippet = item.get("snippet", "")
+            score = float(item.get("score", 0))
+            # Synthesizer truncates to 300 chars per snippet + header
+            context_chars += min(len(snippet), 300) + 50  # header overhead
+            query_scores.append(score)
+        with_search["chars"].append(context_chars)
+        if query_scores:
+            with_search["scores"].append(statistics.mean(query_scores))
+
+    avg_notes = statistics.mean(with_search["notes"]) if with_search["notes"] else 0
+    avg_chars = statistics.mean(with_search["chars"]) if with_search["chars"] else 0
+    avg_score = statistics.mean(with_search["scores"]) if with_search["scores"] else 0
+    lift_ratio = round(avg_chars / without_chars, 1) if without_chars else 0
+
+    results.append(BenchmarkResult(
+        name="quality_synth_context_lift",
+        passed=True,
+        details={
+            "queries_tested": len(lift_queries),
+            "with_search": {
+                "avg_notes": round(avg_notes, 1),
+                "avg_context_chars": round(avg_chars),
+                "avg_score": round(avg_score, 3),
+            },
+            "without_search": {
+                "avg_notes": 0,
+                "avg_context_chars": without_chars,
+            },
+            "context_lift_ratio": lift_ratio,
+            "per_query": [
+                {"query": q[:50], "notes": n, "chars": c}
+                for q, n, c in zip(lift_queries, with_search["notes"], with_search["chars"])
+            ],
+        },
+    ))
+    p.log_result("synth_context_lift", True,
+                 f"with={avg_notes:.1f} notes/{avg_chars:.0f} chars  without=0/{without_chars}  lift={lift_ratio}x")
+
+    p.done()
+    return results
+
+
+def _get_results(body):
+    """Extract results list from a QMD response body."""
+    if isinstance(body, dict):
+        return body.get("results", [])
+    return []
+
+
+def _extract_paths(results):
+    """Extract file paths from search results."""
+    return [r.get("path", r.get("file", "")) for r in results if isinstance(r, dict)]
+
+
+def _truncate_compare(body):
+    """Truncate compare response for display."""
+    out = {"query": body.get("query", "")}
+    for mode in ["bm25", "vector", "hybrid"]:
+        data = body.get(mode, {})
+        r = data.get("results", []) if isinstance(data, dict) else []
+        out[mode] = {
+            "count": len(r),
+            "top_3": [
+                {"path": item.get("path", "")[:60], "score": item.get("score", "?")}
+                for item in r[:3]
+            ],
+        }
+    return out
+
+
+# ── Suite: Token Consumption ─────────────────────────────────────────────────
+
+
+def bench_tokens(api_url, qmd_url):
+    """Estimate token consumption for synthesis prompts of various sizes."""
+    results = []
+    p = Progress("tokens", 4)  # 3 scenarios + 1 daily estimate
+
+    # Simulate prompts of different session sizes
+    scenarios = [
+        {
+            "name": "minimal_session",
+            "user_prompts": ["Fix the typo in README.md"],
+            "tool_uses": [{"name": "Read", "input": {"file_path": "README.md"}}],
+            "files": ["README.md"],
+            "errors": [],
+            "vault_notes": 10,
+        },
+        {
+            "name": "medium_session",
+            "user_prompts": [
+                "Implement user authentication with JWT tokens",
+                "Add middleware for route protection",
+                "Write tests for the auth module",
+            ],
+            "tool_uses": [
+                {"name": "Read", "input": {"file_path": f"src/{f}"}}
+                for f in ["auth.py", "middleware.py", "config.py", "models.py", "routes.py"]
+            ] + [
+                {"name": "Write", "input": {"file_path": f"src/{f}"}}
+                for f in ["auth.py", "middleware.py"]
+            ] + [
+                {"name": "Bash", "input": {"command": "pytest tests/ -v"}},
+            ],
+            "files": ["src/auth.py", "src/middleware.py", "src/config.py", "src/models.py",
+                       "src/routes.py", "tests/test_auth.py"],
+            "errors": [],
+            "vault_notes": 50,
+        },
+        {
+            "name": "large_session",
+            "user_prompts": [f"Prompt {i}: " + "x" * 400 for i in range(20)],
+            "tool_uses": [
+                {"name": "Read", "input": {"file_path": f"src/module_{i}.py"}}
+                for i in range(30)
+            ] + [
+                {"name": "Edit", "input": {"file_path": f"src/module_{i}.py"}}
+                for i in range(15)
+            ] + [
+                {"name": "Bash", "input": {"command": f"make test-{i}"}}
+                for i in range(10)
+            ],
+            "files": [f"src/module_{i}.py" for i in range(30)],
+            "errors": ["ImportError: no module named 'foo'", "TestFailure: assert 1 == 2"],
+            "vault_notes": 200,
+        },
+    ]
+
+    for scenario in scenarios:
+        p.update(f"estimating {scenario['name']}")
+        prompt = _build_mock_prompt(scenario)
+        prompt_tokens = estimate_tokens(prompt)
+        response_budget = 4096  # default SYNTH_MAX_TOKENS
+
+        results.append(BenchmarkResult(
+            name=f"tokens_{scenario['name']}",
+            passed=True,
+            details={
+                "prompt_chars": len(prompt),
+                "prompt_tokens_est": prompt_tokens,
+                "response_budget": response_budget,
+                "total_budget": prompt_tokens + response_budget,
+                "prompt_breakdown": {
+                    "user_prompts": len(scenario["user_prompts"]),
+                    "tool_uses": len(scenario["tool_uses"]),
+                    "files_touched": len(scenario["files"]),
+                    "errors": len(scenario["errors"]),
+                    "vault_notes": scenario["vault_notes"],
+                },
+                "cost_estimate_usd": _estimate_cost(prompt_tokens, response_budget),
+            },
+        ))
+        p.log_result(scenario["name"], True, f"~{prompt_tokens} tokens")
+
+    # Estimate for a typical day (e.g., 10 sessions)
+    p.update("daily/monthly estimate")
+    sessions_per_day = 10
+    avg_prompt_tokens = statistics.mean([
+        estimate_tokens(_build_mock_prompt(s)) for s in scenarios
+    ])
+    avg_response_tokens = 2000  # typical synthesis uses ~half budget
+    daily_input = int(avg_prompt_tokens * sessions_per_day)
+    daily_output = avg_response_tokens * sessions_per_day
+    daily_cost = _estimate_cost(daily_input, daily_output)
+
+    results.append(BenchmarkResult(
+        name="tokens_daily_estimate",
+        passed=True,
+        details={
+            "sessions_per_day": sessions_per_day,
+            "avg_prompt_tokens": int(avg_prompt_tokens),
+            "avg_response_tokens": avg_response_tokens,
+            "daily_input_tokens": daily_input,
+            "daily_output_tokens": daily_output,
+            "daily_total_tokens": daily_input + daily_output,
+            "daily_cost_usd": daily_cost,
+            "monthly_cost_usd": round(daily_cost["total"] * 30, 2) if isinstance(daily_cost, dict) else None,
+        },
+    ))
+    monthly = round(daily_cost["total"] * 30, 2) if isinstance(daily_cost, dict) else "?"
+    p.log_result("daily_estimate", True, f"~${monthly}/month (sonnet)")
+
+    p.done()
+    return results
+
+
+def _build_mock_prompt(scenario):
+    """Build a realistic synthesis prompt from a scenario description."""
+    user_section = "\n".join(
+        f"{i+1}. {p[:500]}" for i, p in enumerate(scenario["user_prompts"])
+    )
+
+    tool_counts = {}
+    for t in scenario["tool_uses"]:
+        name = t["name"]
+        tool_counts[name] = tool_counts.get(name, 0) + 1
+    tool_section = "Tool usage summary:\n" + "\n".join(
+        f"  - {name}: {count} uses" for name, count in tool_counts.items()
+    )
+
+    files_section = "\n".join(f"  - {f}" for f in scenario["files"][:30])
+    errors_section = "\n".join(scenario["errors"]) if scenario["errors"] else "(None)"
+
+    vault_section = f"Vault has {scenario['vault_notes']} notes.\n"
+    vault_section += "Existing notes: " + ", ".join(
+        f"note-{i}" for i in range(scenario["vault_notes"])
+    )
+
+    schema = """{
+    "session_id": "string", "date": "string", "title": "string",
+    "highlights": ["string"], "concepts": [{"name": "...", "summary": "...", "tags": [], "links_suggested": []}],
+    "decisions": [{"decision": "...", "rationale": "...", "evidence": []}],
+    "open_questions": [{"question": "...", "context": "...", "suggested_next_step": ""}],
+    "howtos": [{"title": "...", "steps": [], "gotchas": []}],
+    "note_ops": [{"op": "create|upsert_block|append", "path": "...", "body_markdown": "..."}]
+}"""
+
+    return f"""You are extracting durable knowledge from a Claude Code session.
+
+## Session Context
+Working directory: /home/user/project
+Date: 2026-03-02
+Session ID: bench-{int(time.time())}
+
+## User Prompts
+{user_section}
+
+## Key Tool Uses
+{tool_section}
+
+## Files Touched
+{files_section}
+
+## Errors Encountered
+{errors_section}
+
+## Related Notes (semantic matches)
+(Semantic search disabled)
+
+## Existing Vault Notes (for linking)
+{vault_section}
+
+## Your Task
+Extract knowledge into this exact JSON schema:
+{schema}
+
+Return ONLY valid JSON matching the schema.
+"""
+
+
+def _estimate_cost(input_tokens, output_tokens):
+    """Estimate USD cost for various Claude models.
+
+    Pricing (as of early 2026):
+      Sonnet 4.5: $3/M input, $15/M output
+      Haiku 4.5:  $0.80/M input, $4/M output
+      Opus 4.6:   $15/M input, $75/M output
+    """
+    models = {
+        "sonnet-4.5": {"input": 3.0, "output": 15.0},
+        "haiku-4.5": {"input": 0.80, "output": 4.0},
+        "opus-4.6": {"input": 15.0, "output": 75.0},
+    }
+    costs = {}
+    for name, pricing in models.items():
+        inp = input_tokens / 1_000_000 * pricing["input"]
+        out = output_tokens / 1_000_000 * pricing["output"]
+        costs[name] = round(inp + out, 4)
+    costs["total"] = costs["sonnet-4.5"]  # default model
+    return costs
+
+
+# ── Report persistence & comparison ──────────────────────────────────────────
+
+
+def _build_report(all_results, elapsed, args):
+    """Build a serializable report dict from benchmark results."""
+    report = {
+        "timestamp": datetime.now(tz=None).astimezone().isoformat(),
+        "elapsed_s": round(elapsed, 1),
+        "config": {
+            "api_url": args.api_url,
+            "qmd_url": args.qmd_url,
+            "runs": args.runs,
+            "suites": args.suite or ["system", "speed", "reliability", "quality", "tokens"],
+        },
+        "suites": {},
+    }
+    for suite_name, results in all_results.items():
+        report["suites"][suite_name] = [
+            {"name": r.name, "passed": r.passed, "details": r.details}
+            for r in results
+        ]
+    return report
+
+
+def save_report(report):
+    """Save report as timestamped JSON and update 'latest' symlink."""
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = report["timestamp"].replace(":", "-").replace(".", "-")
+    filename = f"bench-{ts}.json"
+    filepath = REPORTS_DIR / filename
+    latest = REPORTS_DIR / "latest.json"
+
+    with open(filepath, "w") as f:
+        json.dump(report, f, indent=2, default=str)
+
+    # Atomic update of latest symlink
+    tmp = REPORTS_DIR / "latest.json.tmp"
+    try:
+        tmp.unlink(missing_ok=True)
+        tmp.symlink_to(filepath.name)
+        tmp.rename(latest)
+    except OSError:
+        # Fallback: just copy
+        with open(latest, "w") as f:
+            json.dump(report, f, indent=2, default=str)
+
+    return filepath
+
+
+def _report_has_speed_stats(report):
+    """Check if a report has at least one result with latency stats."""
+    for suite_results in report.get("suites", {}).values():
+        for r in suite_results:
+            details = r.get("details", {})
+            stats = details.get("stats") if isinstance(details, dict) else None
+            if isinstance(stats, dict) and stats.get("p50") is not None:
+                return True
+    return False
+
+
+def load_previous_report():
+    """Load the most recent saved report that has comparable speed metrics.
+
+    Skips incomplete/partial runs (e.g., system-only) so comparisons
+    always have meaningful latency data.
+    """
+    if not REPORTS_DIR.exists():
+        return None
+
+    # Get all report files sorted newest-first (filename contains ISO timestamp)
+    reports = sorted(REPORTS_DIR.glob("bench-*.json"), reverse=True)
+
+    for report_path in reports:
+        try:
+            with open(report_path) as f:
+                report = json.load(f)
+            if _report_has_speed_stats(report):
+                return report
+        except (json.JSONDecodeError, OSError):
+            continue
+
+    return None
+
+
+def _show_latest_comparison():
+    """Show comparison of the two most recent full reports, then exit."""
+    if not REPORTS_DIR.exists():
+        print("No reports found in .benchmark/")
+        return
+
+    reports = sorted(REPORTS_DIR.glob("bench-*.json"), reverse=True)
+    full_reports = []
+    for rp in reports:
+        try:
+            with open(rp) as f:
+                data = json.load(f)
+            if _report_has_speed_stats(data):
+                full_reports.append((rp, data))
+            if len(full_reports) == 2:
+                break
+        except (json.JSONDecodeError, OSError):
+            continue
+
+    if len(full_reports) < 2:
+        print("Need at least 2 full reports for comparison.")
+        if full_reports:
+            print(f"  Only found: {full_reports[0][0].name}")
+        return
+
+    current_path, current = full_reports[0]
+    previous_path, previous = full_reports[1]
+
+    print(f"\n{BOLD}claude-note benchmark comparison{RESET}")
+    print(f"  Current:  {current_path.name}  ({current.get('timestamp', '?')})")
+    print(f"  Previous: {previous_path.name}  ({previous.get('timestamp', '?')})")
+    print_comparison(current, previous)
+
+
+def _extract_metric(result_dict, key_path):
+    """Extract a numeric value from a result's details by dot-separated path."""
+    d = result_dict.get("details", {})
+    for key in key_path.split("."):
+        if isinstance(d, dict):
+            d = d.get(key)
+        else:
+            return None
+    if isinstance(d, (int, float)):
+        return d
+    return None
+
+
+def _delta_str(current, previous):
+    """Format a delta like '+12.3%' or '-5.1%' with color."""
+    if previous is None or previous == 0 or current is None:
+        return ""
+    pct = (current - previous) / abs(previous) * 100
+    if abs(pct) < 0.5:
+        return f" {DIM}(~0%){RESET}"
+    if pct > 0:
+        # For latency: higher is worse (red). For rates: higher is better (green).
+        return f" {YELLOW}(+{pct:.1f}%){RESET}"
+    else:
+        return f" {CYAN}({pct:.1f}%){RESET}"
+
+
+def _delta_str_inverse(current, previous):
+    """Delta string where lower is better (latency)."""
+    if previous is None or previous == 0 or current is None:
+        return ""
+    pct = (current - previous) / abs(previous) * 100
+    if abs(pct) < 0.5:
+        return f" {DIM}(~0%){RESET}"
+    if pct > 0:
+        return f" {RED}(+{pct:.1f}%){RESET}"
+    else:
+        return f" {GREEN}({pct:.1f}%){RESET}"
+
+
+def print_comparison(current_report, previous_report):
+    """Print a comparison table between current and previous runs."""
+    if not previous_report:
+        return
+
+    prev_ts = previous_report.get("timestamp", "?")
+    print(f"\n{'=' * 70}")
+    print(f"  COMPARISON vs {prev_ts}")
+    print(f"{'=' * 70}")
+
+    # Build lookup: name -> details for previous run
+    prev_lookup = {}
+    for suite_results in previous_report.get("suites", {}).values():
+        for r in suite_results:
+            prev_lookup[r["name"]] = r
+
+    comparisons = []
+    for suite_results in current_report.get("suites", {}).values():
+        for r in suite_results:
+            name = r["name"]
+            prev = prev_lookup.get(name)
+            if not prev:
+                continue
+
+            # Compare latency metrics (p50, p95, mean)
+            for metric in ["stats.p50", "stats.p95", "stats.mean"]:
+                cur_val = _extract_metric(r, metric)
+                prev_val = _extract_metric(prev, metric)
+                if cur_val is not None and prev_val is not None:
+                    comparisons.append((name, metric.split(".")[-1], cur_val, prev_val))
+
+            # Compare success rates
+            for metric in ["success_rate_pct"]:
+                cur_val = _extract_metric(r, metric)
+                prev_val = _extract_metric(prev, metric)
+                if cur_val is not None and prev_val is not None:
+                    comparisons.append((name, metric, cur_val, prev_val))
+
+    if not comparisons:
+        print(f"  {DIM}No comparable metrics found.{RESET}")
+        return
+
+    # Group by test name
+    current_name = None
+    for name, metric, cur_val, prev_val in comparisons:
+        if name != current_name:
+            current_name = name
+            print(f"\n  {name}")
+
+        if "rate" in metric or "pct" in metric:
+            delta = _delta_str(cur_val, prev_val)  # higher is better
+        else:
+            delta = _delta_str_inverse(cur_val, prev_val)  # lower is better
+
+        print(f"    {metric:>8s}: {prev_val:>8.1f} -> {cur_val:>8.1f} ms{delta}")
+
+    print()
+
+
+# ── Reporter ─────────────────────────────────────────────────────────────────
+
+
+def print_results(all_results, as_json=False):
+    """Print benchmark results."""
+    if as_json:
+        output = {}
+        for suite_name, results in all_results.items():
+            output[suite_name] = [
+                {
+                    "name": r.name,
+                    "passed": r.passed,
+                    "details": r.details,
+                }
+                for r in results
+            ]
+        print(json.dumps(output, indent=2, default=str))
+        return
+
+    total_pass = 0
+    total_fail = 0
+    total_info = 0
+
+    for suite_name, results in all_results.items():
+        print(f"\n{'=' * 70}")
+        print(f"  {suite_name.upper()}")
+        print(f"{'=' * 70}")
+
+        for r in results:
+            # Determine status icon
+            if r.name.startswith("quality_") or r.name.startswith("tokens_"):
+                icon = "\033[36mINFO\033[0m"
+                total_info += 1
+            elif r.passed:
+                icon = "\033[32mPASS\033[0m"
+                total_pass += 1
+            else:
+                icon = "\033[31mFAIL\033[0m"
+                total_fail += 1
+
+            print(f"\n  [{icon}] {r.name}")
+
+            # Print key details
+            d = r.details
+            if "stats" in d:
+                s = d["stats"]
+                if s.get("n", 0) > 0:
+                    print(f"         n={s['n']}  "
+                          f"p50={s['p50']}ms  p95={s['p95']}ms  p99={s['p99']}ms  "
+                          f"mean={s['mean']}ms  cv={s['cv_pct']}%")
+                    if s.get("outliers", 0) > 0:
+                        print(f"         (removed {s['outliers']} outliers)")
+            elif "latency_ms" in d:
+                print(f"         latency: {d['latency_ms']}ms")
+
+            if "success_rate_pct" in d:
+                print(f"         success rate: {d['success_rate_pct']}%")
+
+            if "errors" in d and d["errors"]:
+                for err in d["errors"][:3]:
+                    print(f"         error: {err}")
+
+            # Suite-specific details
+            if r.name == "quality_result_coverage":
+                for mode in ["bm25", "vector", "hybrid"]:
+                    key = f"{mode}_hit_rate_pct"
+                    if key in d:
+                        print(f"         {mode} hit rate: {d[key]}%")
+
+            if r.name == "quality_cross_mode_agreement":
+                for key in ["avg_jaccard_bm25_vs_vector", "avg_jaccard_bm25_vs_hybrid", "avg_jaccard_vector_vs_hybrid"]:
+                    if key in d:
+                        label = key.replace("avg_jaccard_", "")
+                        print(f"         {label}: {d[key]}")
+
+            if r.name == "quality_result_consistency":
+                print(f"         consistency (Jaccard): {d.get('avg_jaccard', '?')}")
+
+            if r.name.startswith("tokens_") and "prompt_tokens_est" in d:
+                print(f"         prompt: ~{d['prompt_tokens_est']} tokens  "
+                      f"({d['prompt_chars']} chars)")
+                if "cost_estimate_usd" in d:
+                    costs = d["cost_estimate_usd"]
+                    print(f"         cost per synthesis: "
+                          f"sonnet=${costs.get('sonnet-4.5', '?')}  "
+                          f"haiku=${costs.get('haiku-4.5', '?')}  "
+                          f"opus=${costs.get('opus-4.6', '?')}")
+
+            if r.name == "tokens_daily_estimate":
+                print(f"         {d.get('sessions_per_day', '?')} sessions/day  "
+                      f"~{d.get('daily_total_tokens', '?')} tokens/day")
+                costs = d.get("daily_cost_usd", {})
+                if isinstance(costs, dict):
+                    print(f"         daily cost: "
+                          f"sonnet=${costs.get('sonnet-4.5', '?')}  "
+                          f"haiku=${costs.get('haiku-4.5', '?')}  "
+                          f"opus=${costs.get('opus-4.6', '?')}")
+                    print(f"         monthly (30d): ~${d.get('monthly_cost_usd', '?')}")
+
+            if r.name == "reliability_connection_reuse":
+                print(f"         first request: {d.get('first_request_ms', '?')}ms  "
+                      f"subsequent avg: {d.get('subsequent_avg_ms', '?')}ms  "
+                      f"speedup: {d.get('reuse_speedup', '?')}x")
+
+            if r.name == "quality_hook_event_flow":
+                print(f"         session: {d.get('session_id', '?')}")
+                print(f"         events: {d.get('events_accepted', 0)}/{d.get('events_sent', 0)} accepted"
+                      f"  queued: {d.get('queue_after', 0) - d.get('queue_before', 0)}")
+                print(f"         avg latency: {d.get('latency_ms', '?')}ms")
+
+            if r.name == "quality_vault_retrieval":
+                recall = d.get("recall_at_5_pct", {})
+                print(f"         knowledge notes: {d.get('knowledge_notes', 0)}")
+                print(f"         self-retrieval @5: "
+                      f"fts={recall.get('fts', 0)}%  "
+                      f"vec={recall.get('vector', 0)}%  "
+                      f"hyb={recall.get('hybrid', 0)}%")
+                missed = [n for n in d.get("per_note", []) if n.get("vector", -1) == -1]
+                if missed:
+                    print(f"         vector misses: {', '.join(m['note'] for m in missed[:5])}")
+
+            if r.name == "quality_synth_context_lift":
+                ws = d.get("with_search", {})
+                wo = d.get("without_search", {})
+                print(f"         with search: {ws.get('avg_notes', 0)} notes  "
+                      f"{ws.get('avg_context_chars', 0)} chars  "
+                      f"avg_score={ws.get('avg_score', 0)}")
+                print(f"         without:     0 notes  {wo.get('avg_context_chars', 0)} chars")
+                print(f"         context lift: {d.get('context_lift_ratio', 0)}x")
+
+            if r.name == "quality_compare_snapshot" and isinstance(d.get("response_preview"), dict):
+                preview = d["response_preview"]
+                for mode in ["bm25", "vector", "hybrid"]:
+                    mode_data = preview.get(mode, {})
+                    count = mode_data.get("count", 0)
+                    top = mode_data.get("top_3", [])
+                    if top:
+                        top_str = ", ".join(
+                            f"{t.get('path', '?').split('/')[-1]}({t.get('score', '?')})"
+                            for t in top
+                        )
+                        print(f"         {mode}[{count}]: {top_str}")
+
+    # Summary
+    print(f"\n{'=' * 70}")
+    print(f"  SUMMARY")
+    print(f"{'=' * 70}")
+    print(f"  Pass: {total_pass}  Fail: {total_fail}  Info: {total_info}")
+    if total_fail > 0:
+        print(f"\n  \033[31m{total_fail} benchmark(s) failed.\033[0m")
+    else:
+        print(f"\n  \033[32mAll checks passed.\033[0m")
+    print()
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="claude-note benchmark suite",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""\
+            suites:
+              system       Health checks for all services
+              speed        Endpoint latency measurements
+              reliability  Concurrency, error handling, edge cases
+              quality      QMD search relevance and consistency
+              tokens       Token consumption estimation
+
+            reports:
+              Results are saved to .benchmark/ as timestamped JSON files.
+              Each run is automatically compared against the previous run.
+              Use --no-save to skip saving, --no-compare to skip comparison.
+
+            examples:
+              ./benchmark                         Run all suites
+              ./benchmark --suite speed quality    Run specific suites
+              ./benchmark --runs 50 --json        50 iterations, JSON output
+              ./benchmark --compare                Show latest comparison only
+              ./benchmark --no-compare             Run without comparison
+        """),
+    )
+    parser.add_argument(
+        "--suite", nargs="+",
+        choices=["system", "speed", "reliability", "quality", "tokens"],
+        default=None,
+        help="Which benchmark suite(s) to run (default: all)",
+    )
+    parser.add_argument("--api-url", default=API_URL, help=f"claude-note API URL (default: {API_URL})")
+    parser.add_argument("--qmd-url", default=QMD_URL, help=f"QMD API URL (default: {QMD_URL})")
+    parser.add_argument("--runs", type=int, default=DEFAULT_RUNS, help=f"Iterations per benchmark (default: {DEFAULT_RUNS})")
+    parser.add_argument("--json", action="store_true", help="Output results as JSON")
+    parser.add_argument("--no-save", action="store_true", help="Don't save report to .benchmark/")
+    parser.add_argument("--no-compare", action="store_true", help="Don't compare with previous run")
+    parser.add_argument("--compare", action="store_true",
+                        help="Show comparison of the two most recent full reports and exit")
+
+    args = parser.parse_args()
+
+    global _quiet
+    _quiet = args.json
+
+    if args.compare:
+        _show_latest_comparison()
+        return
+
+    suites = args.suite or ["system", "speed", "reliability", "quality", "tokens"]
+
+    if not _quiet:
+        print(f"\n{BOLD}claude-note benchmark{RESET}")
+        print(f"  API:  {args.api_url}")
+        print(f"  QMD:  {args.qmd_url}")
+        print(f"  Runs: {args.runs}")
+        print(f"  Suites: {', '.join(suites)}")
+        print()
+
+    all_results = {}
+    t_start = time.monotonic()
+
+    if "system" in suites:
+        all_results["system"] = bench_system(args.api_url, args.qmd_url)
+
+    if "speed" in suites:
+        all_results["speed"] = bench_speed(args.api_url, args.qmd_url, args.runs)
+
+    if "reliability" in suites:
+        all_results["reliability"] = bench_reliability(args.api_url, args.qmd_url, args.runs)
+
+    if "quality" in suites:
+        all_results["quality"] = bench_quality(args.api_url, args.qmd_url, args.runs)
+
+    if "tokens" in suites:
+        all_results["tokens"] = bench_tokens(args.api_url, args.qmd_url)
+
+    elapsed = time.monotonic() - t_start
+
+    if not _quiet:
+        print(f"\n{DIM}Total time: {elapsed:.1f}s{RESET}")
+
+    print_results(all_results, as_json=args.json)
+
+    # Save report and compare with previous
+    report = _build_report(all_results, elapsed, args)
+    previous = None
+
+    if not args.no_save:
+        previous = load_previous_report()
+        filepath = save_report(report)
+        if not _quiet:
+            print(f"  {DIM}Report saved: {filepath}{RESET}")
+
+    if not args.no_compare and not _quiet and previous:
+        print_comparison(report, previous)
+
+
+if __name__ == "__main__":
+    main()

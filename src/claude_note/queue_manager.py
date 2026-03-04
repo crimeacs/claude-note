@@ -97,7 +97,7 @@ def get_unprocessed_sessions(processed_sessions: set) -> dict[str, list]:
 
 
 def cleanup_old_queue_files(keep_days: int = 7) -> None:
-    """Remove queue files older than keep_days."""
+    """Remove queue files and old transcripts older than keep_days."""
     if not config.QUEUE_DIR.exists():
         return
 
@@ -111,3 +111,14 @@ def cleanup_old_queue_files(keep_days: int = 7) -> None:
         except ValueError:
             # Skip files that don't match the date pattern
             continue
+
+    # Clean up old transcript files by mtime
+    if config.TRANSCRIPTS_DIR.exists():
+        import time
+        cutoff_ts = time.time() - (keep_days * 86400)
+        for transcript_file in config.TRANSCRIPTS_DIR.glob("*.jsonl"):
+            try:
+                if transcript_file.stat().st_mtime < cutoff_ts:
+                    transcript_file.unlink()
+            except OSError:
+                continue

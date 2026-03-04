@@ -1,0 +1,14 @@
+host: ""
+port: 8317
+
+# Proxy auth key — clients (claude-note) use this to talk to the proxy.
+# NOT an Anthropic API key. Change this to something secret in production.
+api-keys:
+  - "claude-note-proxy-key"
+
+# Claude Code OAuth — run `make cliproxy-login` to authenticate.
+# Tokens are stored in the auth-dir volume, no API key needed.
+auth-dir: "~/.cli-proxy-api"
+
+debug: false
+logging-to-file: false

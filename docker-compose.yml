@@ -1,0 +1,172 @@
+services:
+  claude-note:
+    build:
+      context: .
+      dockerfile: docker/claude-note/Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - vault:/vault
+      - ./docker/claude-note/config.toml:/home/nonroot/.config/claude-note/config.toml:ro
+    environment:
+      - CLAUDE_NOTE_VAULT_ROOT=/vault
+      - CLAUDE_NOTE_API_BASE=http://cliproxy:8317
+      - CLAUDE_NOTE_API_KEY=claude-note-proxy-key
+      - CLAUDE_NOTE_QMD_API_BASE=http://qmd:8686
+      - CLAUDE_NOTE_QMD_ENABLED=true
+    depends_on:
+      - cliproxy
+      - qmd
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  cliproxy:
+    image: eceasy/cli-proxy-api:latest
+    ports:
+      - "8317:8317"
+    volumes:
+      - ./docker/cliproxy/config.yaml:/CLIProxyAPI/config.yaml
+      - cliproxy-auth:/root/.cli-proxy-api
+    restart: unless-stopped
+
+  emb-service:
+    build:
+      context: docker/emb-service
+    ports:
+      - "3006:3006"
+    cpuset: "0,1"
+    environment:
+      - EMBEDDING_MODEL=bge-small-en-v1.5-q
+      - PORT=3006
+      - OMP_NUM_THREADS=2
+      - OMP_WAIT_POLICY=PASSIVE
+    volumes:
+      - emb-cache:/home/nonroot/.cache
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "2.0"
+    healthcheck:
+      test: ["CMD", "healthcheck"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    restart: unless-stopped
+
+  rerank-service:
+    build:
+      context: docker/rerank-service
+    ports:
+      - "3007:3007"
+    cpuset: "0,1"
+    environment:
+      - RERANK_MODEL=jina-reranker-v1-turbo-en
+      - PORT=3007
+      - OMP_NUM_THREADS=2
+      - OMP_WAIT_POLICY=PASSIVE
+    volumes:
+      - rerank-cache:/home/nonroot/.cache
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "2.0"
+    healthcheck:
+      test: ["CMD", "healthcheck"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    restart: unless-stopped
+
+  pgvector:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: qmd_vectors
+      POSTGRES_USER: qmd
+      POSTGRES_PASSWORD: qmd
+    volumes:
+      - pgvector-data:/var/lib/postgresql/data
+      - ./docker/pgvector/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qmd -d qmd_vectors"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  qmd:
+    build:
+      context: docker/qmd
+    ports:
+      - "8686:8686"
+    volumes:
+      - vault:/vault:ro
+    environment:
+      - QMD_PORT=8686
+      - QMD_VAULT_PATH=/vault
+      - QMD_REINDEX_INTERVAL=300
+      - EMB_SERVICE_URL=http://emb-service:3006
+      - RERANK_SERVICE_URL=http://rerank-service:3007
+      - PGVECTOR_URL=postgres://qmd:qmd@pgvector:5432/qmd_vectors
+    depends_on:
+      emb-service:
+        condition: service_healthy
+      rerank-service:
+        condition: service_healthy
+      pgvector:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "2.0"
+    healthcheck:
+      test: ["CMD", "/nodejs/bin/node", "-e", "fetch('http://localhost:8686/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  obsidian:
+    build:
+      context: docker/obsidian
+    ports:
+      - "8080:8080"
+    volumes:
+      - vault:/var/www/perlite/vault:ro
+    environment:
+      - NOTES_PATH=vault
+      - HIDE_FOLDERS=.claude-note,.obsidian,.trash
+    healthcheck:
+      test: ["CMD", "php", "-r", "file_get_contents('http://localhost:8080/') !== false || exit(1);"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  vault:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${CLAUDE_NOTE_VAULT_ROOT:-./vault-dir}
+  emb-cache:
+  rerank-cache:
+  pgvector-data:
+  cliproxy-auth:

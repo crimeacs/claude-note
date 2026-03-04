@@ -45,3 +45,12 @@ htmlcov/
 
 # Local development
 *.log
+
+# Runtime state (queue, session state, locks, logs)
+.claude-note/
+
+# Local vault directory (Docker bind mount)
+vault-dir/
+
+# Benchmark reports
+.benchmark/

@@ -1,0 +1,35 @@
+{
+  "PostToolUse": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "bash <HOOK_SCRIPT_PATH>",
+          "timeout": 5000
+        }
+      ]
+    }
+  ],
+  "UserPromptSubmit": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "bash <HOOK_SCRIPT_PATH>",
+          "timeout": 5000
+        }
+      ]
+    }
+  ],
+  "Stop": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "bash <HOOK_SCRIPT_PATH>",
+          "timeout": 20000
+        }
+      ]
+    }
+  ]
+}

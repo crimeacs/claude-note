@@ -248,12 +248,23 @@ def read_transcript_from_state(state) -> TranscriptContent:
     """
     Read transcript for a session from its state.
 
+    Checks local transcript store first (uploaded by Stop hook),
+    then falls back to original transcript_path.
+
     Args:
         state: SessionState object
 
     Returns:
         TranscriptContent with extracted data
     """
+    from . import config
+
+    # Check local transcript store first (uploaded by Stop hook)
+    local = config.TRANSCRIPTS_DIR / f"{state.session_id}.jsonl"
+    if local.exists():
+        return read_transcript(local)
+
+    # Fall back to original path (non-Docker / local setups)
     if not state.transcript_path:
         raise ValueError("Session state has no transcript_path")
 
