@@ -221,3 +221,19 @@ This improves synthesis quality by providing relevant vault context.
 ## License
 
 MIT
+
+## Codex and the ChatGPT desktop app
+
+The ChatGPT desktop app runs Codex, and Codex supports the same hook events as Claude Code (`UserPromptSubmit`, `Stop`, `SessionEnd`, each with `session_id`, `transcript_path` and `cwd`). `claude-note` reads Codex rollouts (`~/.codex/sessions/**/rollout-*.jsonl`) as well as Claude Code transcripts; context Codex injects itself (environment, AGENTS.md, plugin lists) is not treated as a user prompt.
+
+To capture Codex sessions, add `~/.codex/hooks.json`:
+
+```json
+{"hooks": {
+  "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "claude-note enqueue", "timeout": 5}]}],
+  "Stop":             [{"hooks": [{"type": "command", "command": "claude-note enqueue", "timeout": 5}]}],
+  "SessionEnd":       [{"hooks": [{"type": "command", "command": "claude-note enqueue", "timeout": 3}]}]
+}}
+```
+
+Codex runs a new hooks file only after it has been trusted once: approve it in the app's hooks review (or run `codex` once in a terminal). Until then the hooks are skipped silently.
