@@ -190,6 +190,64 @@ def cmd_install_codex_hooks(args) -> int:
     return 0
 
 
+def cmd_push(args) -> int:
+    """Push curated notes (redacted) to the shared Foresyn vault inbox."""
+    from . import push
+    if args.install_agent:
+        return install_push_agent()
+    counts = push.run(dry_run=args.dry_run, limit=args.limit)
+    label = "would push" if args.dry_run else "pushed"
+    print(f"{label}: {counts['pushed']}  unchanged: {counts['unchanged']}  redacted: {counts['redacted']}  "
+          f"skipped: {counts['skipped']}  errors: {counts['errors']}  (not eligible: {counts['not_eligible']})")
+    if counts.get("stopped"):
+        print(f"stopped early: {counts['stopped']}")
+    return 1 if counts["errors"] else 0
+
+
+PUSH_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.claude-note.push</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/timeout</string><string>-k</string><string>60</string><string>3600</string>
+    <string>{exe}</string><string>push</string>
+  </array>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StandardOutPath</key><string>{logs}/push.log</string>
+  <key>StandardErrorPath</key><string>{logs}/push.log</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>{path}</string></dict>
+</dict>
+</plist>
+"""
+
+
+def install_push_agent() -> int:
+    import os
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    exe = shutil.which("claude-note") or "claude-note"
+    logs = Path.home() / "Library/Logs/claude-note"
+    logs.mkdir(parents=True, exist_ok=True)
+    plist = Path.home() / "Library/LaunchAgents/com.claude-note.push.plist"
+    timeout = shutil.which("timeout") or shutil.which("gtimeout")
+    body = PUSH_PLIST.format(exe=exe, logs=logs, path=os.environ.get("PATH", "/usr/bin:/bin"))
+    if timeout:
+        body = body.replace("/usr/bin/timeout", timeout)
+    else:  # no coreutils timeout: push.py still enforces its own run deadline
+        body = body.replace("    <string>/usr/bin/timeout</string><string>-k</string><string>60</string><string>3600</string>\n", "")
+    plist.write_text(body)
+    uid = os.getuid()
+    subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist)], capture_output=True, timeout=30)
+    subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist)], check=True, timeout=30)
+    print(f"Installed {plist}: runs `claude-note push` daily at 03:00; log {logs}/push.log")
+    return 0
+
+
 def cmd_resynth(args) -> int:
     """Handle resynth command - re-run synthesis for a session."""
     session_id = args.session_id
@@ -394,6 +452,15 @@ def main() -> int:
     import_parser.add_argument("zips", nargs="*", help="Export zip(s) to import explicitly")
     import_parser.add_argument("--since", help="Backfill sessions updated since YYYY-MM-DD")
     import_parser.set_defaults(func=cmd_import)
+
+    # push command
+    push_parser = subparsers.add_parser(
+        "push", help="Push curated notes (redacted) to the shared Foresyn vault inbox"
+    )
+    push_parser.add_argument("--dry-run", "-n", action="store_true", help="Count only; no network")
+    push_parser.add_argument("--limit", type=int, default=0, help="Push at most N notes this run")
+    push_parser.add_argument("--install-agent", action="store_true", help="Install the daily 03:00 launchd agent")
+    push_parser.set_defaults(func=cmd_push)
 
     # install-codex-hooks command
     codex_parser = subparsers.add_parser(
