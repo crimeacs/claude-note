@@ -251,3 +251,21 @@ claude-note import ~/Downloads/data-2026-09-25.zip
 Codex skips a new hooks file until it is trusted once: approve it in the app's
 hooks review, or run `codex` in a terminal and accept the prompt. Until then the
 30-minute sweep still picks the sessions up, just later.
+
+## Daily push to the shared Foresyn vault
+
+`claude-note push` sends curated notes to the Foresyn vault inbox
+(`inbox/<user>/<date>/<path with / as __>.md`) using `~/.foresyn/config.json`.
+Only notes whose frontmatter `type` is `pattern`, `gotcha`, `decision`,
+`reference`, `project` or `literature` go; session notes never do, nor anything
+with `share: false` or under a `private/` folder. API keys, tokens, passwords,
+private keys and credentialed connection strings are replaced with
+`[REDACTED: <kind>]` first; a note the scanner fails on is skipped. A note whose
+redacted content is unchanged since its last push sends no request.
+
+```bash
+claude-note push --dry-run        # counts only
+claude-note push --install-agent  # launchd, daily at 03:00 (log: ~/Library/Logs/claude-note/push.log)
+```
+
+Heartbeat after a clean run: `~/Library/Logs/claude-note/push.ok`.
