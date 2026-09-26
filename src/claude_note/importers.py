@@ -15,6 +15,7 @@ synthesis. A content hash per conversation makes every source idempotent.
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -190,15 +191,19 @@ def import_zip(zip_path: Path, seen: dict) -> Optional[int]:
         return None
 
 
-def sweep_zips(seen: dict) -> int:
+def sweep_zips(seen: dict, problems: list) -> int:
     """Import export zips from the watched folders and file them under done/."""
     done_dir = IMPORTS_DIR / "done"
     queued = 0
     for folder in WATCH_DIRS:
         try:
-            candidates = sorted(folder.glob("*.zip"))
-        except OSError:
-            continue  # e.g. no macOS Downloads-folder permission
+            candidates = sorted(folder / n for n in os.listdir(folder) if n.endswith(".zip"))
+        except FileNotFoundError:
+            continue
+        except PermissionError as e:
+            # macOS privacy: the worker's Python needs access to this folder.
+            problems.append(f"cannot read {folder}: {e.strerror}")
+            continue
         for zip_path in candidates:
             if folder != IMPORTS_DIR and not _looks_like_export(zip_path):
                 continue
@@ -344,8 +349,8 @@ def sweep(since: Optional[datetime] = None, zips: Iterable[Path] = ()) -> dict:
     """Run every source once; touch the heartbeat on success."""
     seen = _load_seen()
     since_ts = _since(seen, since)
-    counts = {}
-    for name, fn in (("zips", lambda: sweep_zips(seen)),
+    counts, problems = {}, []
+    for name, fn in (("zips", lambda: sweep_zips(seen, problems)),
                      ("cursor", lambda: sweep_cursor(seen, since_ts)),
                      ("codex", lambda: sweep_codex(seen, since_ts))):
         try:
@@ -353,6 +358,8 @@ def sweep(since: Optional[datetime] = None, zips: Iterable[Path] = ()) -> dict:
         except Exception as e:  # one broken source must not stop the others
             counts[name] = f"error: {e}"
         _save_seen(seen)
+    if problems:
+        counts["problems"] = problems
     for zip_path in zips:
         counts[str(zip_path)] = import_zip(Path(zip_path), seen)
         _save_seen(seen)

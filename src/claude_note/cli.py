@@ -115,6 +115,12 @@ def cmd_status(args) -> int:
         age = time.time() - importers.HEARTBEAT.stat().st_mtime
         stale = "  STALE: is the worker running?" if age > 2 * importers.SWEEP_INTERVAL + 600 else ""
         print(f"  last ran {int(age // 60)} min ago{stale}")
+        try:
+            import json
+            for problem in json.loads(importers.HEARTBEAT.read_text())["counts"].get("problems", []):
+                print(f"  PROBLEM: {problem}")
+        except (OSError, ValueError, KeyError):
+            pass
     else:
         print("  (never ran)")
 
@@ -176,7 +182,7 @@ def cmd_install_codex_hooks(args) -> int:
     exe = shutil.which("claude-note") or "claude-note"
     path = Path(args.hooks_file).expanduser()
     if install_codex_hooks(path, f"{exe} enqueue"):
-        print(f"Added claude-note hooks to {path} (previous file backed up alongside).")
+        print(f"Added claude-note hooks to {path} (any previous file is backed up alongside).")
     else:
         print(f"{path} already has the claude-note hooks.")
     print("Codex skips new hooks until trusted: open the ChatGPT/Codex app and approve them")
