@@ -95,7 +95,7 @@ class ImporterTests(unittest.TestCase):
             ("composerData:old", json.dumps({"composerId": "old", "lastUpdatedAt": 1000})),
             ("bubbleId:comp1:b1", json.dumps({"type": 1, "text": "Fix the build"})),
             ("bubbleId:comp1:b2", json.dumps({"type": 2, "text": "Fixed it.", "toolFormerData": {
-                "name": "edit_file", "params": json.dumps({"file_path": "/repo/a.py"}), "result": "ok"}})),
+                "name": "edit_file", "params": json.dumps({"relativeWorkspacePath": "/repo/a.py"}), "result": "ok"}})),
         ]
         db.executemany("insert into cursorDiskKV values (?, ?)", rows)
         db.commit()

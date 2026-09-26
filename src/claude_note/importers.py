@@ -254,7 +254,11 @@ def _cursor_bubble_message(bubble: dict) -> Optional[dict]:
             params = json.loads(tf.get("params") or tf.get("rawArgs") or "{}")
         except ValueError:
             params = {"input": tf.get("rawArgs")}
-        tools.append({"name": tf["name"], "input": params if isinstance(params, dict) else {"input": params},
+        params = params if isinstance(params, dict) else {"input": params}
+        path = params.get("relativeWorkspacePath") or params.get("targetFile")
+        if path and "file_path" not in params:
+            params["file_path"] = path
+        tools.append({"name": tf["name"], "input": params,
                       "output": (tf.get("result") or "")[:2000]})
     thinking = (bubble.get("thinking") or {}).get("text") if isinstance(bubble.get("thinking"), dict) else None
     return {"role": role, "text": bubble.get("text") or "", "tools": tools, "thinking": [thinking] if thinking else []}
