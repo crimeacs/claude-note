@@ -321,7 +321,7 @@ def sweep_codex(seen: dict, since_ts: float, sessions_dir: Path = None) -> int:
         if not session_id or meta.get("background"):
             seen[key] = mtime
             continue
-        if key not in seen and session_tracker.load_session_state(session_id):
+        if key not in seen and session_tracker.get_state_file(session_id).exists():
             seen[key] = mtime  # the hook already delivered this session
             continue
         content = read_transcript(path)
