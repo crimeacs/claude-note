@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp())
-os.environ.setdefault("CLAUDE_NOTE_VAULT", str(_TMP / "vault"))
+os.environ.setdefault("CLAUDE_NOTE_VAULT_ROOT", str(_TMP / "vault"))
 
 from claude_note import cli, config, importers, queue_manager  # noqa: E402
 from claude_note.transcript_reader import read_transcript  # noqa: E402
