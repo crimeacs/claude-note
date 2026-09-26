@@ -144,5 +144,16 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(len(list(self.tmp.glob("hooks.json.bak-*"))), 1)
 
 
+
+class NoteNameTests(unittest.TestCase):
+    def test_codex_uuid7_uses_random_tail(self):
+        from claude_note import models, note_writer
+        state = models.SessionState(session_id="01a0d90b-54fe-71d1-a813-3c867e471182",
+                                    first_event_ts="2026-09-25T10:00:00Z", last_event_ts="2026-09-25T10:00:00Z")
+        self.assertEqual(note_writer.get_note_filename(state), "claude-session-2026-09-25-7e471182.md")
+        state.session_id = "c1a0d0e0-1111-4222-8333-000000000001"
+        self.assertTrue(note_writer.get_note_filename(state).endswith("-c1a0d0e0.md"))
+
+
 if __name__ == "__main__":
     unittest.main()
