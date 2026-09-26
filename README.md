@@ -222,18 +222,32 @@ This improves synthesis quality by providing relevant vault context.
 
 MIT
 
-## Codex and the ChatGPT desktop app
+## Other assistants: Codex / ChatGPT app, Cursor, Claude.ai and ChatGPT exports
 
-The ChatGPT desktop app runs Codex, and Codex supports the same hook events as Claude Code (`UserPromptSubmit`, `Stop`, `SessionEnd`, each with `session_id`, `transcript_path` and `cwd`). `claude-note` reads Codex rollouts (`~/.codex/sessions/**/rollout-*.jsonl`) as well as Claude Code transcripts; context Codex injects itself (environment, AGENTS.md, plugin lists) is not treated as a user prompt.
+| Assistant | How it is captured |
+|---|---|
+| Claude Code (terminal) | hooks in `~/.claude/settings.json` (above) |
+| Codex CLI and the ChatGPT desktop app (it runs Codex) | hooks in `~/.codex/hooks.json`: `claude-note install-codex-hooks` |
+| Cursor | read from Cursor's `state.vscdb` (read-only) by the worker every 30 min |
+| Claude desktop / claude.ai, ChatGPT web | Settings → Export data; leave the zip in `~/Downloads` or drop it in `~/Documents/claude-note-imports/` |
 
-To capture Codex sessions, add `~/.codex/hooks.json`:
+The worker sweeps every 30 minutes for sources without a hook: Cursor chats,
+export zips (Claude `data-*.zip`, ChatGPT `<hash>-<date>.zip`, or any zip in
+`~/Documents/claude-note-imports/` that holds a `conversations.json`), and Codex
+rollouts the hook did not deliver. Each conversation is converted into a local
+transcript under `~/.local/share/claude-note/transcripts/` and processed once
+(content hash); a conversation that grows is processed again. Imported zips move
+to `~/Documents/claude-note-imports/done/`. Codex subagent threads and
+`codex exec` automation are skipped. The first sweep only looks back 7 days;
+backfill older history with `claude-note import --since 2025-01-01`. Heartbeat:
+`~/Library/Logs/claude-note/import-sweep.ok` (shown in `claude-note status`).
 
-```json
-{"hooks": {
-  "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "claude-note enqueue", "timeout": 5}]}],
-  "Stop":             [{"hooks": [{"type": "command", "command": "claude-note enqueue", "timeout": 5}]}],
-  "SessionEnd":       [{"hooks": [{"type": "command", "command": "claude-note enqueue", "timeout": 3}]}]
-}}
+```bash
+claude-note install-codex-hooks   # once; backs up ~/.codex/hooks.json
+claude-note import                # sweep now instead of waiting
+claude-note import ~/Downloads/data-2026-09-25.zip
 ```
 
-Codex runs a new hooks file only after it has been trusted once: approve it in the app's hooks review (or run `codex` once in a terminal). Until then the hooks are skipped silently.
+Codex skips a new hooks file until it is trusted once: approve it in the app's
+hooks review, or run `codex` in a terminal and accept the prompt. Until then the
+30-minute sweep still picks the sessions up, just later.
