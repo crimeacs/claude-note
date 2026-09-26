@@ -125,6 +125,25 @@ def _is_codex_transcript(transcript_path: Path) -> bool:
     return False
 
 
+def codex_session_meta(transcript_path) -> dict:
+    """First-record metadata of a Codex rollout: id, cwd, and whether it is a
+    background run (a subagent thread, or `codex exec` automation) that should
+    not become a note of its own. Empty dict if not a Codex rollout."""
+    try:
+        with open(transcript_path, "r") as f:
+            entry = json.loads(f.readline())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(entry, dict) or entry.get("type") != "session_meta":
+        return {}
+    payload = entry.get("payload")
+    if not isinstance(payload, dict):
+        return {}
+    source = payload.get("source")
+    background = source == "exec" or (isinstance(source, dict) and "subagent" in source)
+    return {"id": payload.get("id") or payload.get("session_id"), "cwd": payload.get("cwd", ""), "background": background}
+
+
 def _codex_texts(content, kinds: tuple) -> list[str]:
     if isinstance(content, str):
         return [content]
