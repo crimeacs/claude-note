@@ -198,7 +198,7 @@ def cmd_push(args) -> int:
     counts = push.run(dry_run=args.dry_run, limit=args.limit)
     label = "would push" if args.dry_run else "pushed"
     print(f"{label}: {counts['pushed']}  unchanged: {counts['unchanged']}  redacted: {counts['redacted']}  "
-          f"skipped: {counts['skipped']}  errors: {counts['errors']}  (not eligible: {counts['not_eligible']})")
+          f"skipped: {counts['skipped']}  skipped:stub: {counts['skipped_stub']}  errors: {counts['errors']}  (not eligible: {counts['not_eligible']})")
     if counts.get("stopped"):
         print(f"stopped early: {counts['stopped']}")
     return 1 if counts["errors"] else 0

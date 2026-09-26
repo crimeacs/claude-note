@@ -363,6 +363,10 @@ def sweep(since: Optional[datetime] = None, zips: Iterable[Path] = ()) -> dict:
     for zip_path in zips:
         counts[str(zip_path)] = import_zip(Path(zip_path), seen)
         _save_seen(seen)
+    # Touched on every clean sweep, including one that found nothing; a source
+    # that raised leaves it stale so the owner's app notices within the hour.
+    if any(isinstance(v, str) and v.startswith("error") for v in counts.values()):
+        return counts
     HEARTBEAT.parent.mkdir(parents=True, exist_ok=True)
     HEARTBEAT.write_text(json.dumps({"ts": datetime.now().isoformat(), "counts": counts}))
     return counts

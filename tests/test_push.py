@@ -15,8 +15,11 @@ OPENAI = "sk-proj-" + "Abcdefghijklmnopqrstuvwxyz012345"
 PEM = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----"
 
 
+FILLER = " This paragraph is real content about how the thing works and why it matters." * 4
+
+
 def note(note_type, body="", extra=""):
-    return f"---\ntype: {note_type}\n{extra}---\n\n{body}\n"
+    return f"---\ntype: {note_type}\n{extra}---\n\n{body}{FILLER}\n"
 
 
 class FakeClient:
@@ -89,6 +92,25 @@ class PushTests(unittest.TestCase):
         # An edit is pushed again.
         (self.vault / "topics/gotcha-b.md").write_text(note("gotcha", "edited"))
         self.assertEqual(push.run(vault=self.vault, client=FakeClient())["pushed"], 1)
+
+    def test_stub_notes_are_skipped(self):
+        stubs = {
+            "short.md": "---\ntype: pattern\n---\n\nOne line.\n",
+            "headings.md": "---\ntype: gotcha\n---\n\n# Title\n\n## Context\n\n## Fix\n\n## Related\n" + "#" * 0,
+            "placeholder.md": "---\ntype: decision\n---\n\n# Decision\n\nThis was never written up; see the session log for details of what happened here.\n" * 2,
+        }
+        for rel, text in stubs.items():
+            (self.vault / rel).write_text(text)
+        client = FakeClient()
+        counts = push.run(vault=self.vault, client=client)
+        self.assertEqual((counts["skipped_stub"], counts["pushed"]), (3, 2))
+
+    def test_run_with_nothing_to_do_touches_heartbeat(self):
+        push.run(vault=self.vault, client=FakeClient())
+        push.HEARTBEAT.unlink()
+        counts = push.run(vault=self.vault, client=FakeClient())
+        self.assertEqual(counts["pushed"], 0)
+        self.assertTrue(push.HEARTBEAT.exists())
 
     def test_scanner_error_skips_note(self):
         original = push.redact

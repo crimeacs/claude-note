@@ -98,6 +98,17 @@ def eligible(rel: Path, text: str) -> Optional[str]:
     return note_type
 
 
+STUB_MIN_CHARS = 200
+_PLACEHOLDER = re.compile(r"(?i)never written up|\bTODO:? write\b|\bTBD\b|to be written|\(placeholder\)")
+
+
+def is_stub(text: str) -> bool:
+    """A note with no real body: short, a known placeholder, or only headings."""
+    body = re.sub(r"\A---\r?\n.*?\r?\n---\r?\n?", "", text, count=1, flags=re.S)
+    prose = "\n".join(l for l in body.splitlines() if l.strip() and not l.lstrip().startswith("#"))
+    return len(body.strip()) < STUB_MIN_CHARS or not prose.strip() or bool(_PLACEHOLDER.search(body) and len(prose) < 600)
+
+
 def remote_path(person: str, day: str, rel: Path) -> str:
     stem = str(rel.with_suffix("")).replace("/", "__")
     return f"inbox/{person}/{day}/{stem}.md"
@@ -181,7 +192,7 @@ def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit:
     day = date.today().isoformat()
     laptop = socket.gethostname().split(".")[0]
     state = _load_state()
-    counts = {"pushed": 0, "unchanged": 0, "redacted": 0, "skipped": 0, "errors": 0, "not_eligible": 0}
+    counts = {"pushed": 0, "unchanged": 0, "redacted": 0, "skipped": 0, "skipped_stub": 0, "errors": 0, "not_eligible": 0}
     if client is None and not dry_run:
         client = Client(json.loads(FORESYN_CONFIG.read_text()))
     started = time.monotonic()
@@ -199,6 +210,9 @@ def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit:
             continue
         if not note_type:
             counts["not_eligible"] += 1
+            continue
+        if is_stub(text):
+            counts["skipped_stub"] += 1
             continue
         try:
             content, n = redact(text)
@@ -238,6 +252,8 @@ def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit:
 
     if stop_reason:
         counts["stopped"] = stop_reason
+    # Touched on every clean run, including one with nothing to push: the
+    # owner's app alerts when this file is older than 26 h.
     if not dry_run and counts["errors"] == 0 and not stop_reason:
         HEARTBEAT.parent.mkdir(parents=True, exist_ok=True)
         HEARTBEAT.write_text(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "counts": counts}))
