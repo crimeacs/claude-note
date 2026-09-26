@@ -41,6 +41,14 @@ class CodexTranscriptTests(unittest.TestCase):
         self.assertIn("/repo/music.py", content.files_touched)
         self.assertEqual(content.thinking_snippets, ["Plan the mix"])
 
+    def test_patch_inside_exec_script(self):
+        script = 'await tools.apply_patch("*** Begin Patch\\n*** Add File: /repo/new.py\\n+x\\n*** End Patch")'
+        path = _write([
+            {"type": "session_meta", "payload": {"id": "s2"}},
+            {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "call_id": "c1", "input": script}},
+        ])
+        self.assertEqual(read_transcript(path).files_touched, ["/repo/new.py"])
+
     def test_claude_transcripts_still_parse(self):
         path = _write([
             {"type": "user", "message": {"content": "hello"}},

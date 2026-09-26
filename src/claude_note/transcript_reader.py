@@ -5,6 +5,7 @@ Parses Claude Code transcript JSONL and extracts content for synthesis.
 """
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Union
@@ -106,6 +107,9 @@ def _summarize_tool_output(tool_name: str, output: str, max_len: int = 200) -> s
 _CODEX_INJECTED_PREFIXES = ("<", "# AGENTS.md instructions", "# Files mentioned by the user")
 
 
+_CODEX_PATCH_FILE = re.compile(r"\*\*\* (?:Update|Add|Delete) File: ([^\n\\\"'`]+)")
+
+
 def _is_codex_transcript(transcript_path: Path) -> bool:
     """Codex rollouts are JSONL whose records carry a `payload` object."""
     with open(transcript_path, "r") as f:
@@ -141,11 +145,10 @@ def _read_codex_transcript(transcript_path: Path) -> TranscriptContent:
 
     def touch(tool_name: str, tool_input: dict) -> None:
         paths = list(_extract_file_paths(tool_name, tool_input))
+        # apply_patch bodies arrive raw, or embedded in an `exec` script as a
+        # string literal with escaped newlines; match the marker either way.
         patch = tool_input.get("input") if isinstance(tool_input.get("input"), str) else ""
-        for marker in ("*** Update File: ", "*** Add File: ", "*** Delete File: "):
-            for line in patch.splitlines():
-                if line.startswith(marker):
-                    paths.append(line[len(marker):].strip())
+        paths.extend(m.strip() for m in _CODEX_PATCH_FILE.findall(patch))
         for path in paths:
             if path and path not in files_seen:
                 content.files_touched.append(path)
