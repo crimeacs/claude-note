@@ -58,7 +58,7 @@ SECRET_PATTERNS = [
     ("bearer token", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9_\-.=]{20,}")),
     ("secret", re.compile(
         r"(?i)\b([A-Z0-9_]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|_key)[A-Z0-9_]*)"
-        r"(\s*[:=]\s*[\"']?)(?![\"']?(?:\[REDACTED|<|\$\{|\$[A-Z_]|\*{3}|x{6}))([^\s\"'`,;]{8,})")),
+        r"(\s*[:=]\s*[\"']?)(?![\"']?(?:\[|<|\{|\(|\$|\*\*|\.\.\.|x{6}|(?:os|process|env|config|settings|self|args|req|request)\.))([^\s\"'`,;]{8,})")),
 ]
 
 
