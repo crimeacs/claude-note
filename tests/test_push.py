@@ -133,6 +133,36 @@ class PushTests(unittest.TestCase):
         self.assertIn("403", counts["stopped"])
         self.assertFalse(push.HEARTBEAT.exists())
 
+    def test_lost_response_is_retried_once_and_counts_as_pushed(self):
+        push.RETRY_DELAY = 0
+
+        class Flaky(FakeClient):
+            def put(self, path, content, metadata):
+                self.calls.append(path)
+                if self.calls.count(path) == 1:
+                    raise TimeoutError("read timed out")  # server wrote it, reply lost
+                return 200, {"document": {"revision": 1}, "noop": True}
+        client = Flaky()
+        counts = push.run(vault=self.vault, client=client)
+        self.assertEqual((counts["pushed"], counts["errors"], len(client.calls)), (2, 0, 4))
+        self.assertTrue(push.HEARTBEAT.exists())
+
+    def test_persistent_server_error_is_counted_and_logged(self):
+        push.RETRY_DELAY = 0
+
+        class Broken(FakeClient):
+            def put(self, path, content, metadata):
+                self.calls.append(path)
+                return 502, {"error": "bad gateway"}
+        import contextlib
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            counts = push.run(vault=self.vault, client=Broken())
+        self.assertEqual((counts["errors"], counts["pushed"]), (2, 0))
+        self.assertIn("error: pattern-a.md: HTTP 502: bad gateway", err.getvalue())
+        self.assertFalse(push.HEARTBEAT.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

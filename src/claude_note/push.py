@@ -21,6 +21,7 @@ import re
 import signal
 import socket
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -38,6 +39,8 @@ FORESYN_CONFIG = Path.home() / ".foresyn/config.json"
 USER_AGENT = "claude-note-push/1.0 (+https://github.com/crimeacs/claude-note)"
 REQUEST_DEADLINE = 60        # wall-clock seconds per HTTP request
 RUN_DEADLINE = 45 * 60       # wall-clock seconds for the whole run
+RETRY_DELAY = 5              # seconds before the single retry of a transient failure
+DETERMINISTIC = (401, 403, 429)
 
 # Well-known secret shapes (subset of the gitleaks / detect-secrets rules).
 # Order matters: specific rules first, generic assignment last.
@@ -186,6 +189,34 @@ def _save_state(state: dict) -> None:
     tmp.replace(STATE_FILE)
 
 
+def _describe(status: int, body: dict) -> str:
+    detail = body.get("error") or body
+    return f"HTTP {status}: {detail}" if status else f"no response: {detail}"
+
+
+def _put(client, path: str, content: str, metadata: dict) -> tuple[int, dict]:
+    try:
+        return client.put(path, content, metadata)
+    except Exception as e:  # network error or deadline
+        return 0, {"error": f"{type(e).__name__}: {e}"}
+
+
+def _put_once_more_if_transient(client, path: str, content: str, metadata: dict) -> tuple[int, dict]:
+    """PUT, retrying once when there was no response, a 5xx or a 409.
+
+    A lost response is the common case: the server wrote the note but the
+    reply never arrived (2026-09-29: the document landed, the run counted an
+    error and exited 1). The retry re-reads the revision, and the server
+    treats a PUT of identical content as a no-op, so it cannot duplicate.
+    """
+    status, body = _put(client, path, content, metadata)
+    if status == 0 or status >= 500 or status == 409:
+        print(f"retrying {path} after {_describe(status, body)}", file=sys.stderr)
+        time.sleep(RETRY_DELAY)
+        status, body = _put(client, path, content, metadata)
+    return status, body
+
+
 def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit: int = 0) -> dict:
     vault = Path(vault or config.VAULT_ROOT)
     person, email = identity()
@@ -236,18 +267,16 @@ def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit:
             break
         metadata = {"source": "claude-note", "author": email, "laptop": laptop, "source_path": str(rel),
                     "content_sha256": sha, "note_type": note_type, "redactions": n}
-        try:
-            status, body = client.put(remote_path(person, day, rel), content, metadata)
-        except Exception as e:  # network error or deadline: try again next run
-            status, body = 0, {"error": str(e)}
+        status, body = _put_once_more_if_transient(client, remote_path(person, day, rel), content, metadata)
         if status == 200:
             counts["pushed"] += 1
             state[str(rel)] = sha
             _save_state(state)
         else:
             counts["errors"] += 1
-            if status in (401, 403, 429):  # deterministic: stop, do not hammer
-                stop_reason = f"HTTP {status}: {body.get('error') or body}"
+            print(f"error: {rel}: {_describe(status, body)}", file=sys.stderr)
+            if status in DETERMINISTIC:  # do not hammer
+                stop_reason = _describe(status, body)
                 break
 
     if stop_reason:
