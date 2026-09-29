@@ -125,7 +125,7 @@ echo -e "${BLUE}[2/8]${NC} Configuring vault..."
 
 # Check for existing config
 if [[ -f "${CONFIG_DIR}/config.toml" ]]; then
-    EXISTING_VAULT=$(grep -E '^vault_root\s*=' "${CONFIG_DIR}/config.toml" 2>/dev/null | sed 's/.*=\s*"\?\([^"]*\)"\?/\1/' || true)
+    EXISTING_VAULT=$(grep -E '^vault_root\s*=' "${CONFIG_DIR}/config.toml" 2>/dev/null | sed -E 's/.*=[[:space:]]*"?([^"]*)"?/\1/' || true)
     if [[ -n "$EXISTING_VAULT" ]]; then
         echo -e "  Found existing config: ${EXISTING_VAULT}"
         read -p "  Use this vault? [Y/n] " USE_EXISTING

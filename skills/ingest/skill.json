@@ -1,0 +1,29 @@
+{
+  "name": "ingest",
+  "version": "1.0.0",
+  "description": "Ingest documents into atomic knowledge notes with semantic deduplication",
+  "author": "crimeacs",
+  "homepage": "https://github.com/crimeacs/claude-ingest-skill",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/crimeacs/claude-ingest-skill.git"
+  },
+  "keywords": [
+    "knowledge-management",
+    "obsidian",
+    "zettelkasten",
+    "note-taking",
+    "pdf",
+    "research",
+    "atomic-notes"
+  ],
+  "skills": [
+    {
+      "file": "SKILL.md",
+      "name": "ingest"
+    }
+  ],
+  "requirements": {
+    "optional": ["claude-note"]
+  }
+}

@@ -1,6 +1,6 @@
 [project]
 name = "claude-note"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Session logging and knowledge synthesis for Claude Code"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -36,6 +36,9 @@ Issues = "https://github.com/artemiin/claude-note/issues"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/claude_note/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/claude_note"]

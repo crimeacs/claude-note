@@ -1,14 +1,13 @@
 ---
 name: ingest
-description: Ingest documents (PDF, DOCX, MD, TXT, URLs) into your knowledge vault as structured literature or internal notes. Use when you want to extract knowledge from research papers, documentation, specs, or web pages and create permanent notes.
-disable-model-invocation: true
-argument-hint: [file-or-url] [--internal]
+description: Ingest PDFs, DOCX, and URLs into your knowledge vault as atomic, interconnected notes. Extracts concepts with semantic deduplication. Use when you want to turn research papers, documentation, or team docs into permanent knowledge.
+argument-hint: [file-or-url] [--internal] [--dry-run]
 allowed-tools: Read, Write, Bash, WebFetch
 ---
 
 # Document Ingestion Skill
 
-Ingest external documents into your claude-note vault as structured, linkable notes.
+Turn external documents into structured, linkable knowledge notes with semantic deduplication.
 
 ## Quick Start
 
@@ -16,7 +15,15 @@ Ingest external documents into your claude-note vault as structured, linkable no
 /ingest ~/Downloads/attention-paper.pdf
 /ingest https://example.com/api-docs --internal
 /ingest spec.docx --title "API Specification v2"
+/ingest paper.pdf --dry-run  # Preview without writing
 ```
+
+## Features
+
+- **Semantic deduplication**: Merges similar concepts instead of creating duplicates
+- **Atomic notes**: Extracts 3-15 typed concepts per document
+- **Multi-source accumulation**: Concepts grow richer with each new source
+- **Dual mode**: Literature (research) vs Internal (team docs)
 
 ## Modes
 
@@ -30,10 +37,31 @@ Ingest external documents into your claude-note vault as structured, linkable no
 | `[file-or-url]` | Path to document (.pdf, .docx, .md, .txt) or URL |
 | `--internal` | Create internal note instead of literature note |
 | `--title "..."` | Override the note title (default: derived from filename/URL) |
+| `--dry-run` | Preview what would be extracted without writing files |
+
+## Prerequisites
+
+This skill requires `claude-note` CLI for full functionality (deduplication, PDF parsing).
+
+Check if installed:
+```bash
+claude-note --version
+```
+
+Install if needed:
+```bash
+# Using uv (recommended)
+uv tool install git+https://github.com/crimeacs/claude-note.git
+
+# Or using pipx
+pipx install git+https://github.com/crimeacs/claude-note.git
+```
+
+**Without CLI**: The skill still works for basic ingestion using built-in tools (pdftotext, pandoc), but advanced features like semantic deduplication require the CLI.
 
 ## Process
 
-When the user invokes `/ingest`, you should:
+When the user invokes `/ingest`, follow these steps:
 
 ### 1. Read the Document
 
@@ -54,16 +82,31 @@ cat ~/.config/claude-note/config.toml
 
 Look for `vault_root = "..."` to find where notes should be created.
 
+If no config exists, ask the user where to create notes.
+
 ### 3. Extract Knowledge
 
-As Claude, you directly analyze the content and extract:
+Analyze the content and extract:
 - **Summary**: 2-3 sentence overview of what the document covers
-- **Key Concepts**: Main ideas, terminology, and definitions
+- **Key Concepts**: Main ideas, terminology, and definitions (3-7 concepts)
 - **Highlights**: Important findings, quotes, or actionable insights
 - **Questions**: Open questions or things worth exploring further
 - **Related Topics**: Connections to other knowledge areas
 
-### 4. Create the Note
+### 4. Check for Duplicates
+
+Before creating a new note, check if a similar note exists:
+```bash
+ls {vault_path}/literature/ 2>/dev/null | grep -i "{keywords}"
+ls {vault_path}/internal/ 2>/dev/null | grep -i "{keywords}"
+```
+
+If a similar note exists, ask the user if they want to:
+1. Merge new content into the existing note
+2. Create a separate note anyway
+3. Cancel
+
+### 5. Create the Note
 
 Write a structured note using the appropriate format:
 - Literature notes: See [literature-format.md](references/literature-format.md)
@@ -75,18 +118,9 @@ Write a structured note using the appropriate format:
 
 Where `{slug}` is a kebab-case version of the title (max 50 chars).
 
-### 5. Handle Duplicates
+### 6. Confirm
 
-Before creating a new note, check if a similar note exists:
-```bash
-ls {vault_path}/literature/ | grep -i "{keywords}"
-ls {vault_path}/internal/ | grep -i "{keywords}"
-```
-
-If a similar note exists, ask the user if they want to:
-1. Merge new content into the existing note
-2. Create a separate note anyway
-3. Cancel
+Tell the user what was created and offer to open the note.
 
 ## Example Workflow
 
@@ -118,12 +152,23 @@ For URLs, use WebFetch to get the content:
 
 WebFetch will retrieve the content, then follow the same extraction process.
 
+## Dry Run
+
+Preview what would be extracted without writing files:
+
+```
+/ingest paper.pdf --dry-run
+```
+
+This shows the extracted knowledge and where it would be saved, but doesn't create any files.
+
 ## Tips
 
 - Use descriptive filenames or `--title` for better slugs
 - Review created notes and add manual annotations
 - Link to existing topic notes in your vault using `[[note-name]]` syntax
 - For large documents, focus on the most important 3-5 concepts
+- Use `--dry-run` to preview before committing
 
 ## See Also
 

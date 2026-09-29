@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>claude-note demo</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, sans-serif;
+      padding: 30px;
+      overflow: hidden;
+    }
+
+    .title {
+      color: #fff;
+      font-size: 32px;
+      font-weight: 600;
+      margin-bottom: 30px;
+      opacity: 0;
+      animation: fadeIn 0.5s ease forwards;
+    }
+
+    .title span {
+      color: #d4a574;
+    }
+
+    .main-container {
+      display: flex;
+      gap: 25px;
+      align-items: center;
+    }
+
+    .left-section {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .terminal {
+      width: 320px;
+      background: #0d1117;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+      opacity: 0;
+      animation: slideInLeft 0.6s ease 0.3s forwards;
+    }
+
+    .terminal-header {
+      background: #161b22;
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .terminal-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }
+
+    .terminal-dot.red { background: #ff5f56; }
+    .terminal-dot.yellow { background: #ffbd2e; }
+    .terminal-dot.green { background: #27ca40; }
+
+    .terminal-title {
+      color: #8b949e;
+      font-size: 12px;
+      margin-left: 8px;
+    }
+
+    .terminal-body {
+      padding: 16px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 11px;
+      line-height: 1.5;
+      min-height: 160px;
+    }
+
+    .prompt { color: #7ee787; }
+    .command { color: #c9d1d9; }
+
+    .output {
+      color: #8b949e;
+      opacity: 0;
+    }
+    .output.visible { animation: typeIn 0.3s ease forwards; }
+
+    .claude-response {
+      color: #d4a574;
+      margin-top: 10px;
+      opacity: 0;
+    }
+    .claude-response.visible { animation: typeIn 0.4s ease forwards; }
+
+    /* Middle flow section */
+    .flow-section {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 15px;
+      opacity: 0;
+      animation: fadeIn 0.5s ease 1.8s forwards;
+    }
+
+    .flow-arrow {
+      width: 60px;
+      height: 3px;
+      background: linear-gradient(90deg, #d4a574, #e8c89e);
+      border-radius: 2px;
+      position: relative;
+    }
+
+    .flow-arrow::after {
+      content: '';
+      position: absolute;
+      right: -6px;
+      top: -5px;
+      border: 6px solid transparent;
+      border-left: 10px solid #e8c89e;
+    }
+
+    .flow-label {
+      color: #d4a574;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .brain-icon {
+      font-size: 28px;
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+
+    /* Right section - Obsidian */
+    .right-section {
+      display: flex;
+      flex-direction: column;
+      gap: 15px;
+    }
+
+    .obsidian {
+      width: 300px;
+      background: #1e1e1e;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+      opacity: 0;
+      animation: slideInRight 0.6s ease 0.5s forwards;
+    }
+
+    .obsidian-header {
+      background: #2d2d2d;
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .obsidian-icon { font-size: 16px; }
+    .obsidian-title {
+      color: #a89984;
+      font-size: 11px;
+    }
+
+    .obsidian-body {
+      padding: 14px;
+      font-family: 'SF Pro Text', -apple-system, sans-serif;
+      font-size: 11px;
+      line-height: 1.6;
+      min-height: 140px;
+      color: #d4d4d4;
+    }
+
+    .note-title {
+      color: #d4a574;
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 12px;
+      opacity: 0;
+    }
+    .note-title.visible { animation: typeIn 0.4s ease forwards; }
+
+    .note-section {
+      margin-bottom: 10px;
+      opacity: 0;
+    }
+    .note-section.visible { animation: slideUp 0.4s ease forwards; }
+
+    .note-heading {
+      color: #7ee787;
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .note-content {
+      color: #b0b0b0;
+      font-size: 10px;
+    }
+
+    .note-tag {
+      display: inline-block;
+      background: #3d3d3d;
+      color: #d4a574;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 9px;
+      margin-right: 4px;
+    }
+
+    .note-link { color: #8be9fd; }
+
+    /* Graph visualization - Obsidian style */
+    .graph-container {
+      width: 300px;
+      height: 220px;
+      background: #0d0d0d;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+      opacity: 0;
+      animation: slideInRight 0.6s ease 0.7s forwards;
+      position: relative;
+    }
+
+    .graph-header {
+      background: #1a1a1a;
+      padding: 8px 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid #2a2a2a;
+    }
+
+    .graph-title {
+      color: #888;
+      font-size: 12px;
+    }
+
+    .graph-canvas {
+      width: 100%;
+      height: 180px;
+      position: relative;
+    }
+
+    /* SVG for edges */
+    .graph-svg {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+    }
+
+    .graph-svg line {
+      stroke: #3a3a3a;
+      stroke-width: 1;
+      opacity: 0;
+    }
+
+    .graph-svg line.visible {
+      animation: lineAppear 0.3s ease forwards;
+    }
+
+    .graph-svg line.new-edge {
+      stroke: #d4a574;
+      stroke-width: 1.5;
+      opacity: 0;
+    }
+
+    .graph-svg line.new-edge.visible {
+      animation: newLineAppear 0.4s ease forwards;
+    }
+
+    /* Graph nodes - small dots like Obsidian */
+    .dot {
+      position: absolute;
+      border-radius: 50%;
+      opacity: 0;
+    }
+
+    .dot.visible {
+      animation: dotAppear 0.3s ease forwards;
+    }
+
+    /* Existing nodes - various sizes and colors */
+    .dot-1 { width: 8px; height: 8px; background: #6b9eff; left: 45px; top: 35px; }
+    .dot-2 { width: 6px; height: 6px; background: #6b9eff; left: 75px; top: 25px; }
+    .dot-3 { width: 10px; height: 10px; background: #7ee787; left: 55px; top: 70px; }
+    .dot-4 { width: 5px; height: 5px; background: #888; left: 30px; top: 55px; }
+    .dot-5 { width: 7px; height: 7px; background: #f0a050; left: 90px; top: 50px; }
+    .dot-6 { width: 6px; height: 6px; background: #6b9eff; left: 110px; top: 30px; }
+    .dot-7 { width: 8px; height: 8px; background: #888; left: 40px; top: 100px; }
+    .dot-8 { width: 5px; height: 5px; background: #6b9eff; left: 70px; top: 115px; }
+    .dot-9 { width: 9px; height: 9px; background: #7ee787; left: 100px; top: 95px; }
+    .dot-10 { width: 6px; height: 6px; background: #f0a050; left: 130px; top: 70px; }
+    .dot-11 { width: 7px; height: 7px; background: #6b9eff; left: 160px; top: 45px; }
+    .dot-12 { width: 5px; height: 5px; background: #888; left: 180px; top: 30px; }
+    .dot-13 { width: 8px; height: 8px; background: #7ee787; left: 200px; top: 55px; }
+    .dot-14 { width: 6px; height: 6px; background: #6b9eff; left: 175px; top: 85px; }
+    .dot-15 { width: 5px; height: 5px; background: #f0a050; left: 145px; top: 110px; }
+    .dot-16 { width: 7px; height: 7px; background: #888; left: 220px; top: 100px; }
+    .dot-17 { width: 6px; height: 6px; background: #6b9eff; left: 250px; top: 70px; }
+    .dot-18 { width: 5px; height: 5px; background: #7ee787; left: 235px; top: 40px; }
+    .dot-19 { width: 8px; height: 8px; background: #6b9eff; left: 115px; top: 140px; }
+    .dot-20 { width: 6px; height: 6px; background: #f0a050; left: 190px; top: 130px; }
+    .dot-21 { width: 5px; height: 5px; background: #888; left: 60px; top: 145px; }
+    .dot-22 { width: 7px; height: 7px; background: #6b9eff; left: 240px; top: 125px; }
+
+    /* NEW node - the one being added */
+    .dot-new {
+      width: 14px;
+      height: 14px;
+      background: #d4a574;
+      left: 148px;
+      top: 78px;
+      opacity: 0;
+      box-shadow: 0 0 0 0 rgba(212, 165, 116, 0.5);
+    }
+
+    .dot-new.visible {
+      animation: newNodeAppear 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+    }
+
+    .dot-new.pulse {
+      animation: newNodeAppear 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards,
+                 nodePulse 1.5s ease-in-out 0.6s infinite;
+    }
+
+    .subtitle {
+      color: #8b949e;
+      font-size: 14px;
+      margin-top: 25px;
+      opacity: 0;
+      animation: fadeIn 0.5s ease 5.5s forwards;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    @keyframes slideInLeft {
+      from { opacity: 0; transform: translateX(-30px); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+
+    @keyframes slideInRight {
+      from { opacity: 0; transform: translateX(30px); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+
+    @keyframes typeIn {
+      from { opacity: 0; transform: translateY(5px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes slideUp {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.1); }
+    }
+
+    @keyframes dotAppear {
+      from { opacity: 0; transform: scale(0); }
+      to { opacity: 0.9; transform: scale(1); }
+    }
+
+    @keyframes lineAppear {
+      from { opacity: 0; }
+      to { opacity: 0.4; }
+    }
+
+    @keyframes newNodeAppear {
+      0% { opacity: 0; transform: scale(0); }
+      70% { transform: scale(1.3); }
+      100% { opacity: 1; transform: scale(1); }
+    }
+
+    @keyframes newLineAppear {
+      from { opacity: 0; stroke-dasharray: 100; stroke-dashoffset: 100; }
+      to { opacity: 0.8; stroke-dasharray: 100; stroke-dashoffset: 0; }
+    }
+
+    @keyframes nodePulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(212, 165, 116, 0.5); }
+      50% { box-shadow: 0 0 15px 5px rgba(212, 165, 116, 0.3); }
+    }
+  </style>
+</head>
+<body>
+  <div class="title">claude-note <span>×</span> Obsidian</div>
+
+  <div class="main-container">
+    <!-- Left: Terminal -->
+    <div class="left-section">
+      <div class="terminal">
+        <div class="terminal-header">
+          <div class="terminal-dot red"></div>
+          <div class="terminal-dot yellow"></div>
+          <div class="terminal-dot green"></div>
+          <span class="terminal-title">Claude Code</span>
+        </div>
+        <div class="terminal-body">
+          <div><span class="prompt">❯</span> <span class="command">claude</span></div>
+          <div class="output" id="o1">Starting session...</div>
+          <div class="output" id="o2"><span class="prompt">You:</span> Fix auth bug</div>
+          <div class="claude-response" id="c1">
+            <span style="color: #7ee787;">Claude:</span> Check JWT expiration before signature verification...
+          </div>
+          <div class="output" id="o3" style="color: #7ee787;">✓ Session complete</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Middle: Flow -->
+    <div class="flow-section">
+      <div class="flow-arrow"></div>
+      <div class="brain-icon">🧠</div>
+      <div class="flow-label">synthesize</div>
+      <div class="flow-arrow"></div>
+    </div>
+
+    <!-- Right: Obsidian -->
+    <div class="right-section">
+      <div class="obsidian">
+        <div class="obsidian-header">
+          <span class="obsidian-icon">💎</span>
+          <span class="obsidian-title">auth-patterns.md</span>
+        </div>
+        <div class="obsidian-body">
+          <div class="note-title" id="n1">JWT Authentication</div>
+          <div class="note-section" id="s1">
+            <span class="note-tag">#security</span>
+            <span class="note-tag">#auth</span>
+          </div>
+          <div class="note-section" id="s2">
+            <div class="note-heading">## Key Learning</div>
+            <div class="note-content">Validate expiration <em>before</em> signature</div>
+          </div>
+          <div class="note-section" id="s3">
+            <div class="note-content">
+              <span class="note-link">[[api-security]]</span> · <span class="note-link">[[sessions]]</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Graph - Obsidian style -->
+      <div class="graph-container">
+        <div class="graph-header">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2">
+            <circle cx="5" cy="5" r="2"/>
+            <circle cx="19" cy="5" r="2"/>
+            <circle cx="12" cy="12" r="2"/>
+            <circle cx="5" cy="19" r="2"/>
+            <circle cx="19" cy="19" r="2"/>
+            <line x1="7" y1="5" x2="17" y2="5"/>
+            <line x1="5" y1="7" x2="5" y2="17"/>
+            <line x1="19" y1="7" x2="19" y2="17"/>
+            <line x1="7" y1="19" x2="17" y2="19"/>
+            <line x1="7" y1="7" x2="10" y2="10"/>
+            <line x1="14" y1="14" x2="17" y2="17"/>
+          </svg>
+          <span class="graph-title">Graph view</span>
+        </div>
+        <div class="graph-canvas">
+          <!-- SVG for connection lines -->
+          <svg class="graph-svg" viewBox="0 0 300 180">
+            <!-- Existing connections -->
+            <line x1="49" y1="39" x2="78" y2="29" class="existing-edge" id="e1"/>
+            <line x1="49" y1="39" x2="59" y2="74" class="existing-edge" id="e2"/>
+            <line x1="78" y1="29" x2="113" y2="34" class="existing-edge" id="e3"/>
+            <line x1="59" y1="74" x2="94" y2="54" class="existing-edge" id="e4"/>
+            <line x1="94" y1="54" x2="133" y2="74" class="existing-edge" id="e5"/>
+            <line x1="113" y1="34" x2="163" y2="49" class="existing-edge" id="e6"/>
+            <line x1="163" y1="49" x2="203" y2="59" class="existing-edge" id="e7"/>
+            <line x1="104" y1="99" x2="133" y2="74" class="existing-edge" id="e8"/>
+            <line x1="104" y1="99" x2="148" y2="114" class="existing-edge" id="e9"/>
+            <line x1="178" y1="89" x2="203" y2="59" class="existing-edge" id="e10"/>
+            <line x1="44" y1="104" x2="73" y2="119" class="existing-edge" id="e11"/>
+            <line x1="73" y1="119" x2="118" y2="144" class="existing-edge" id="e12"/>
+            <line x1="178" y1="89" x2="223" y2="104" class="existing-edge" id="e13"/>
+            <line x1="193" y1="134" x2="243" y2="129" class="existing-edge" id="e14"/>
+            <line x1="253" y1="74" x2="238" y2="44" class="existing-edge" id="e15"/>
+
+            <!-- NEW connections to the new node -->
+            <line x1="155" y1="85" x2="104" y2="99" class="new-edge" id="ne1"/>
+            <line x1="155" y1="85" x2="133" y2="74" class="new-edge" id="ne2"/>
+            <line x1="155" y1="85" x2="178" y2="89" class="new-edge" id="ne3"/>
+            <line x1="155" y1="85" x2="163" y2="49" class="new-edge" id="ne4"/>
+            <line x1="155" y1="85" x2="94" y2="54" class="new-edge" id="ne5"/>
+          </svg>
+
+          <!-- Existing dots -->
+          <div class="dot dot-1" id="d1"></div>
+          <div class="dot dot-2" id="d2"></div>
+          <div class="dot dot-3" id="d3"></div>
+          <div class="dot dot-4" id="d4"></div>
+          <div class="dot dot-5" id="d5"></div>
+          <div class="dot dot-6" id="d6"></div>
+          <div class="dot dot-7" id="d7"></div>
+          <div class="dot dot-8" id="d8"></div>
+          <div class="dot dot-9" id="d9"></div>
+          <div class="dot dot-10" id="d10"></div>
+          <div class="dot dot-11" id="d11"></div>
+          <div class="dot dot-12" id="d12"></div>
+          <div class="dot dot-13" id="d13"></div>
+          <div class="dot dot-14" id="d14"></div>
+          <div class="dot dot-15" id="d15"></div>
+          <div class="dot dot-16" id="d16"></div>
+          <div class="dot dot-17" id="d17"></div>
+          <div class="dot dot-18" id="d18"></div>
+          <div class="dot dot-19" id="d19"></div>
+          <div class="dot dot-20" id="d20"></div>
+          <div class="dot dot-21" id="d21"></div>
+          <div class="dot dot-22" id="d22"></div>
+
+          <!-- NEW node -->
+          <div class="dot dot-new" id="dnew"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="subtitle">Sessions become knowledge. Graph grows automatically.</div>
+
+  <script>
+    const timeline = [
+      // Terminal animation
+      { el: '#o1', delay: 600 },
+      { el: '#o2', delay: 1200 },
+      { el: '#c1', delay: 1800 },
+      { el: '#o3', delay: 2600 },
+
+      // Note content
+      { el: '#n1', delay: 3200 },
+      { el: '#s1', delay: 3500 },
+      { el: '#s2', delay: 3800 },
+      { el: '#s3', delay: 4100 },
+
+      // Existing graph dots (staggered)
+      { el: '#d1', delay: 3300 },
+      { el: '#d2', delay: 3350 },
+      { el: '#d3', delay: 3400 },
+      { el: '#d4', delay: 3450 },
+      { el: '#d5', delay: 3500 },
+      { el: '#d6', delay: 3550 },
+      { el: '#d7', delay: 3600 },
+      { el: '#d8', delay: 3650 },
+      { el: '#d9', delay: 3700 },
+      { el: '#d10', delay: 3750 },
+      { el: '#d11', delay: 3800 },
+      { el: '#d12', delay: 3850 },
+      { el: '#d13', delay: 3900 },
+      { el: '#d14', delay: 3950 },
+      { el: '#d15', delay: 4000 },
+      { el: '#d16', delay: 4050 },
+      { el: '#d17', delay: 4100 },
+      { el: '#d18', delay: 4150 },
+      { el: '#d19', delay: 4200 },
+      { el: '#d20', delay: 4250 },
+      { el: '#d21', delay: 4300 },
+      { el: '#d22', delay: 4350 },
+
+      // Existing edges
+      { el: '#e1', delay: 3400 },
+      { el: '#e2', delay: 3450 },
+      { el: '#e3', delay: 3500 },
+      { el: '#e4', delay: 3550 },
+      { el: '#e5', delay: 3600 },
+      { el: '#e6', delay: 3650 },
+      { el: '#e7', delay: 3700 },
+      { el: '#e8', delay: 3750 },
+      { el: '#e9', delay: 3800 },
+      { el: '#e10', delay: 3850 },
+      { el: '#e11', delay: 3900 },
+      { el: '#e12', delay: 3950 },
+      { el: '#e13', delay: 4000 },
+      { el: '#e14', delay: 4050 },
+      { el: '#e15', delay: 4100 },
+
+      // NEW node appears (the star of the show!)
+      { el: '#dnew', delay: 4600, class: 'visible' },
+      { el: '#dnew', delay: 4700, class: 'pulse' },
+
+      // NEW edges connect
+      { el: '#ne1', delay: 4800 },
+      { el: '#ne2', delay: 4900 },
+      { el: '#ne3', delay: 5000 },
+      { el: '#ne4', delay: 5100 },
+      { el: '#ne5', delay: 5200 },
+    ];
+
+    timeline.forEach(item => {
+      setTimeout(() => {
+        const el = document.querySelector(item.el);
+        el.classList.add(item.class || 'visible');
+      }, item.delay);
+    });
+  </script>
+</body>
+</html>

@@ -1,68 +1,35 @@
 # Document Ingestion
 
-Claude Note can ingest external documents (research papers, documentation, technical specs) and convert them into structured literature notes in your vault.
+Claude Note can ingest external documents (research papers, documentation, technical specs) and convert them into structured atomic notes in your vault.
 
-## Two Ways to Ingest
+## Two Modes
 
-| Method | When to Use |
-|--------|-------------|
-| `/ingest` skill | Interactive use in Claude Code sessions |
-| `claude-note ingest` CLI | Batch processing, automation, scripts |
-
-### Using /ingest Skill (Recommended for single documents)
-
-In any Claude Code session:
-```
-/ingest ~/Downloads/paper.pdf
-/ingest https://example.com/article --internal
-/ingest spec.docx --title "API Specification v2"
-```
-
-The skill uses Claude directly to extract knowledge - no separate API call needed.
-
-### Using CLI (For batch/automation)
-
-```bash
-# Process multiple files
-for f in ~/papers/*.pdf; do
-    claude-note ingest "$f"
-done
-
-# Ingest with options
-claude-note ingest report.pdf --title "Q4 Review" --dry-run
-```
-
-The CLI calls the Claude API programmatically and is better for processing multiple documents or scripted workflows.
-
----
-
-## Overview
-
-```
-External Document          →    Ingestion    →    Vault Notes
-├── paper.pdf                                    ├── lit-paper-title.md
-├── spec.docx                                    ├── topic-concepts.md (updated)
-└── notes.md                                     └── inbox (unroutable items)
-```
+| Mode | Flag | Output | Use Case |
+|------|------|--------|----------|
+| Literature | (default) | `lit-*.md` in `literature/` | Research papers, external docs |
+| Internal | `--internal` | `int-*.md` in `internal/` | Team docs, processes, architecture |
 
 ## Quick Start
 
 ```bash
-# Ingest a PDF
-claude-note ingest ~/Downloads/attention-paper.pdf
+# Ingest a research paper
+claude-note ingest ~/Downloads/paper.pdf
 
-# Ingest with custom title
-claude-note ingest report.docx --title "Q4 Architecture Review"
-
-# Preview without writing
+# Preview without creating notes
 claude-note ingest paper.pdf --dry-run
+
+# Ingest team documentation
+claude-note ingest process.docx --internal
+
+# Custom title
+claude-note ingest spec.pdf --title "API Specification v2"
 ```
 
 ## Supported Formats
 
 | Format | Extension | Requirements |
 |--------|-----------|--------------|
-| PDF | `.pdf` | pandoc or pdftotext |
+| PDF | `.pdf` | pymupdf, pdftotext, or pandoc |
 | Word | `.docx` | pandoc |
 | Markdown | `.md` | None |
 | Plain text | `.txt` | None |
@@ -70,47 +37,61 @@ claude-note ingest paper.pdf --dry-run
 ### Installing Dependencies
 
 ```bash
-# macOS
-brew install pandoc
+# Best PDF support (recommended)
+pip install pymupdf
 
-# Ubuntu/Debian
-sudo apt install pandoc
+# Alternative: pandoc (also handles DOCX)
+brew install pandoc        # macOS
+sudo apt install pandoc    # Ubuntu/Debian
 
-# Verify
-pandoc --version
+# Alternative: pdftotext
+brew install poppler       # macOS
+sudo apt install poppler-utils  # Ubuntu/Debian
 ```
 
 ## How It Works
 
 ### 1. Text Extraction
 
-The document is converted to plain text:
-- **PDF:** Uses pandoc (preserves structure) or pdftotext (fallback)
-- **DOCX:** Uses pandoc (preserves headings, lists)
-- **MD/TXT:** Read directly
+Documents are converted to plain text:
+- **PDF:** pymupdf (best) → pdftotext → pandoc (fallback chain)
+- **DOCX:** pandoc
+- **MD/TXT:** Direct read
 
 ### 2. Knowledge Extraction
 
 Claude analyzes the document and extracts:
-- **Summary:** 2-3 sentence overview
-- **Key concepts:** Main ideas and terminology
-- **Highlights:** Important quotes or findings
-- **Questions:** Things worth exploring further
-- **Related topics:** Connections to other knowledge
+- **Source summary:** 2-3 sentence overview
+- **Key citation:** Author/title for references
+- **Interesting takeaways:** Narrative summary of key insights
+- **Atomic concepts:** 3-15 standalone notes per document
 
-### 3. Duplicate Detection
+Each concept includes:
+- Title and slug (becomes filename)
+- Type: finding, technique, definition, benchmark, open-question
+- Summary and optional details
+- Fi project relevance (if applicable)
+- Tags
 
-If qmd is enabled, semantic search checks for existing similar content:
-- High similarity (>85%): Merge into existing note
-- Medium similarity: Prompt for decision
-- No match: Create new note
+### 3. Semantic Deduplication
 
-### 4. Note Creation/Updates
+When qmd is enabled, ingestion checks for similar existing notes:
+- **Exact match:** Attempts to merge new source info
+- **Similar concept:** Merges if new information adds value
+- **No match:** Creates new note
 
-Based on extracted knowledge:
-- **Main literature note:** `lit-{title}.md` created in `literature/`
-- **Topic updates:** Existing notes get links to new content
-- **New topics:** Optionally create topic notes for novel concepts
+This prevents duplicate notes while accumulating sources.
+
+### 4. Note Creation
+
+**Source note:** `lit-{citation-slug}.md` or `int-{citation-slug}.md`
+- Links to all extracted concept notes
+- Contains metadata about the ingested document
+
+**Concept notes:** `lit-{concept-slug}.md` or `int-{concept-slug}.md`
+- Atomic, standalone notes
+- Link back to source
+- Include relevance to your project
 
 ---
 
@@ -128,103 +109,96 @@ claude-note ingest <file> [options]
 
 ### Options
 
-| Option | Description |
-|--------|-------------|
-| `--title`, `-t` | Override note title (default: filename) |
-| `--model`, `-m` | Override Claude model |
-| `--dry-run`, `-n` | Extract and display without writing |
-| `--internal`, `-i` | Create `int-*` notes in `internal/` |
-| `--no-topics` | Don't update/create topic notes |
-| `--force` | Ignore duplicate warnings |
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--title` | `-t` | Override note title (default: filename) |
+| `--model` | `-m` | Override Claude model for extraction |
+| `--dry-run` | `-n` | Extract and display without writing notes |
+| `--internal` | `-i` | Create `int-*` notes in `internal/` instead of `lit-*` in `literature/` |
 
 ---
 
 ## Output Structure
 
-### Literature Note
+### Source Note
 
-Created at `literature/lit-{title}.md`:
+Created at `literature/lit-{slug}.md`:
 
 ```markdown
 ---
 tags:
-  - literature
-  - machine-learning
-  - transformers
-source: attention-is-all-you-need.pdf
-author: Vaswani et al.
-year: 2017
+  - source/literature
+  - paper
+  - project/fi
+source_file: "paper.pdf"
 ingested: 2024-01-15
 ---
 
-# Attention Is All You Need
+# Author et al. (2024)
 
-## Summary
+2-3 sentence summary of what this document covers.
 
-This paper introduces the Transformer architecture, which relies entirely on
-attention mechanisms without recurrence or convolution. The model achieves
-state-of-the-art results on machine translation while being more parallelizable.
+## Extracted Concepts
 
-## Key Concepts
+- [[literature/lit-concept-one|Concept One]]
+- [[literature/lit-concept-two|Concept Two]]
+- [[literature/lit-concept-three|Concept Three]]
 
-- **Self-attention**: Mechanism to compute representations by attending to
-  different positions in the same sequence
-- **Multi-head attention**: Running attention multiple times in parallel
-- **Positional encoding**: Injecting sequence order information
+## Source
 
-## Highlights
-
-> "Attention is all you need" - The paper's central claim is that attention
-> mechanisms alone are sufficient for sequence modeling tasks.
-
-Key findings:
-- BLEU score of 28.4 on EN-DE translation (new SOTA)
-- 3.5 days training on 8 GPUs
-- Generalizes to other tasks (parsing)
-
-## Questions
-
-- How do positional encodings compare to learned position embeddings?
-- What is the computational complexity vs RNNs?
+- **File:** `paper.pdf`
+- **Ingested:** 2024-01-15
+- **Type:** paper
 
 ## Related
 
-- [[transformers]] - Architecture family
-- [[attention-mechanisms]] - Core concept
-- [[sequence-models]] - Broader context
-- [[neural-machine-translation]] - Application domain
+- [[fi-ml-moc]] - ML project hub
+- [[fi-moc]] - Fi project hub
 ```
 
-### Topic Note Updates
+### Concept Note
 
-Existing topic notes get links in their "Related" or "From Literature" section:
-
-```markdown
-<!-- In transformers.md -->
-
-## From Literature
-
-- [[lit-attention-is-all-you-need]] - Original Transformer paper (2017)
-- [[lit-bert-paper]] - Bidirectional pre-training
-```
-
-### Internal Documents
-
-With `--internal`, creates `internal/int-{title}.md`:
+Created at `literature/lit-{concept-slug}.md`:
 
 ```markdown
 ---
 tags:
-  - internal
-  - architecture
-source: team-rfc.docx
-ingested: 2024-01-15
+  - source/literature
+  - project/fi
+  - lit/finding
+  - machine-learning
+source: "[[literature/lit-author-2024]]"
+added: 2024-01-15
 ---
 
-# Authentication Service RFC
+# Concept Title
 
-[extracted content...]
+2-4 sentence explanation of this concept.
+
+## Details
+
+Longer explanation with specifics, numbers, quotes from the paper.
+
+## Fi Relevance
+
+How this relates to the Fi project - collar sensors, behavior classification, etc.
+
+## Related
+
+- [[fi-ml-moc]]
+- [[fi-moc]]
+
+---
+
+*Source: Author et al. (2024)*
 ```
+
+### Internal Mode
+
+With `--internal`, creates `internal/int-{slug}.md` with:
+- `source/internal` tag instead of `source/literature`
+- `int/{type}` tags (process, architecture, decision, convention, reference, how-to)
+- Owner field when extractable
 
 ---
 
@@ -233,121 +207,113 @@ ingested: 2024-01-15
 ### Research Paper
 
 ```bash
-# Ingest a machine learning paper
-claude-note ingest ~/papers/attention-paper.pdf
+claude-note ingest ~/papers/accelerometer-dog-behavior.pdf
 
 # Output:
-# Created: literature/lit-attention-is-all-you-need.md
-# Updated: transformers.md (added reference)
-# Updated: attention-mechanisms.md (added reference)
+# ✓ Converting accelerometer-dog-behavior.pdf (12s)
+#   142,847 characters extracted
+# ✓ Extracting knowledge with Claude (literature mode) (45s)
+#   8 concepts found
+# Creating notes in literature/...
+#   Created: lit-accelerometer-dog-behavior.md
+#   Created: lit-sliding-window-features.md
+#   Created: lit-random-forest-classification.md
+#   Merged into: lit-collar-placement-effects.md
+#   Created: lit-activity-recognition-accuracy.md
+#   ...
 ```
 
-### Technical Specification
+### Dry Run Preview
 
 ```bash
-# Ingest API spec with custom title
-claude-note ingest api-spec.docx --title "Payment Gateway API v2"
+claude-note ingest paper.pdf --dry-run
 
-# Output:
-# Created: literature/lit-payment-gateway-api-v2.md
-# Created: payment-processing.md (new topic)
+# === Dry Run Results (literature mode) ===
+# Source: Smith et al. (2024)
+# Type: paper
+# Summary: This paper presents a novel approach to...
+#
+# Would create 6 concept notes:
+#   - lit-novel-approach.md: Novel Approach to Classification
+#   - lit-feature-engineering.md: Feature Engineering Pipeline
+#   ...
+#
+# ────────────────────────────────────────────────────────
+# 📌 Key Takeaways:
+# ────────────────────────────────────────────────────────
+# The most interesting finding is that... [narrative summary]
+# ────────────────────────────────────────────────────────
 ```
 
 ### Team Documentation
 
 ```bash
-# Ingest internal doc
-claude-note ingest team-process.md --internal
+claude-note ingest deployment-process.md --internal
 
-# Output:
-# Created: internal/int-team-process.md
-```
-
-### Preview Mode
-
-```bash
-# See what would be created without writing
-claude-note ingest paper.pdf --dry-run
-
-# Output:
-# Would create: literature/lit-paper-title.md
-# Would update: existing-topic.md
-#
-# === Extracted Content ===
-# Summary: ...
-# Key Concepts: ...
-# [full preview]
+# Creating notes in internal/...
+#   Created: int-deployment-process.md
+#   Created: int-staging-environment.md
+#   Created: int-rollback-procedure.md
 ```
 
 ---
 
-## Duplicate Handling
+## Semantic Deduplication
 
-### Automatic Detection
+### How It Works
 
-When qmd is enabled, ingestion checks for existing similar content:
+When qmd is enabled, each extracted concept is checked against existing notes:
 
-```
-Ingesting: new-paper.pdf
+1. **Query:** Concept title + summary + slug
+2. **Search:** Vector similarity search in output directory
+3. **Threshold:** Default 0.75 (configurable)
+4. **Action:** If similar note found, assess whether to merge
 
-Checking for duplicates...
-Found similar: lit-existing-paper.md (87% match)
+### Merge Assessment
 
-Options:
-1. Merge into existing note
-2. Create separate note anyway
-3. Cancel ingestion
+Claude evaluates if the new source adds genuinely new information:
+- New techniques, numbers, or findings?
+- Different perspective or application?
+- Or just restating the same concept?
 
-Choice [1/2/3]:
-```
+If new info exists, it's appended under "## Additional Sources".
 
-### Merge Behavior
+### Configuration
 
-When merging:
-- New highlights appended
-- New concepts added (deduplicated)
-- Questions merged
-- Source reference added
+```toml
+[qmd]
+enabled = true
+ingest_dedup_enabled = true
+ingest_dedup_threshold = 0.75  # Similarity threshold
 
-### Force Override
-
-```bash
-# Skip duplicate check
-claude-note ingest paper.pdf --force
+# Merge settings
+ingest_merge_enabled = true
+max_sources_per_concept = 5    # Stop merging after N sources
 ```
 
 ---
 
 ## Configuration
 
-### Default Settings
+### Output Directories
 
-```toml
-[ingest]
-# Where literature notes go
-literature_dir = "literature"
+By default:
+- `literature/` for external research (papers, docs)
+- `internal/` for team documentation
 
-# Where internal notes go
-internal_dir = "internal"
+These are relative to your vault root.
 
-# Create topic notes for novel concepts
-create_topics = true
+### Model Override
 
-# Update existing topic notes with references
-update_topics = true
+```bash
+# Use a specific model for complex documents
+claude-note ingest paper.pdf --model claude-opus-4-20250514
 ```
 
-### QMD for Better Results
-
-Enable semantic search for:
-- Better duplicate detection
-- Smarter topic matching
-- More relevant related links
-
+Or set globally:
 ```toml
-[qmd]
-enabled = true
-ingest_dupe_threshold = 0.85
+[synthesis]
+model = "claude-opus-4-20250514"
 ```
 
 ---
@@ -357,33 +323,42 @@ ingest_dupe_threshold = 0.85
 ### 1. Use Descriptive Filenames
 
 The filename becomes the default title:
-- Good: `attention-is-all-you-need.pdf`
+- Good: `accelerometer-dog-behavior-classification.pdf`
 - Bad: `paper.pdf`, `doc1.pdf`
 
-Or use `--title`:
+Or use `--title` to override.
+
+### 2. Preview First
+
+Use `--dry-run` to see what would be extracted:
 ```bash
-claude-note ingest paper.pdf --title "Attention Is All You Need (2017)"
+claude-note ingest paper.pdf --dry-run
 ```
 
-### 2. Organize by Type
+Review the "Key Takeaways" section to verify extraction quality.
 
-- Research papers → default (literature/)
-- Team docs → `--internal`
-- External specs → default with appropriate tags
+### 3. Organize by Type
 
-### 3. Review and Refine
+- Research papers, external specs → default (`literature/`)
+- Team processes, architecture docs → `--internal`
 
-After ingestion:
-1. Check the created note
-2. Fix any extraction errors
-3. Add manual annotations
-4. Strengthen links to other notes
+### 4. Enable QMD
 
-### 4. Index After Batch Ingestion
+For best results, enable qmd semantic search:
+```toml
+[qmd]
+enabled = true
+```
 
-If ingesting many documents:
+This provides:
+- Better duplicate detection
+- Smarter concept merging
+- Relevant vault context during synthesis
+
+### 5. Index After Batch Ingestion
+
 ```bash
-# Ingest all papers
+# Ingest multiple papers
 for f in ~/papers/*.pdf; do
     claude-note ingest "$f"
 done
@@ -396,51 +371,52 @@ cd ~/vault && qmd index
 
 ## Troubleshooting
 
-### "pandoc not found"
+### "Could not convert PDF"
 
+Install a PDF converter:
 ```bash
-# Install pandoc
-brew install pandoc  # macOS
-sudo apt install pandoc  # Ubuntu
-
-# Verify
-which pandoc
+pip install pymupdf           # Best option
+# or
+brew install poppler          # pdftotext
+# or
+brew install pandoc           # Fallback
 ```
 
 ### Poor extraction quality
 
-- Try a different source format (DOCX often better than PDF)
-- Use `--model claude-opus-4-20250514` for complex documents
-- For scanned PDFs, use OCR first
+- Try `--model claude-opus-4-20250514` for complex documents
+- Use DOCX format when available (often better than PDF)
+- For scanned PDFs, OCR first with a dedicated tool
 
-### "File too large"
+### "Claude CLI timed out"
 
-Very large documents may exceed token limits:
+Large documents may exceed the default 180s timeout. The document is automatically truncated to ~100k characters (~25k tokens).
+
+For very large documents, consider splitting:
 ```bash
-# Split large PDFs first
+# Split large PDF
 pdftk large.pdf cat 1-50 output part1.pdf
 pdftk large.pdf cat 51-100 output part2.pdf
 
-# Ingest separately
+# Ingest parts
 claude-note ingest part1.pdf --title "Large Doc - Part 1"
 claude-note ingest part2.pdf --title "Large Doc - Part 2"
 ```
 
-### Wrong topics matched
+### Concepts not merging correctly
 
-If topics are mismatched:
-- Check your topic notes have good titles/aliases
-- Enable qmd for semantic matching
-- Use `--no-topics` and link manually
+- Check qmd is enabled and indexed
+- Adjust `ingest_dedup_threshold` (lower = more aggressive matching)
+- Review existing notes have good titles/summaries
 
 ---
 
-## Comparison with Session Synthesis
+## Comparison: Ingestion vs Session Synthesis
 
-| Aspect | Session Synthesis | Document Ingestion |
+| Aspect | Document Ingestion | Session Synthesis |
 |--------|-------------------|-------------------|
-| Source | Claude Code transcript | External document |
-| Trigger | Automatic (session end) | Manual command |
-| Output | Updates + inbox | Literature note + updates |
-| Structure | Learnings, decisions, patterns | Summary, concepts, highlights |
-| Best for | Work knowledge | Research, references |
+| **Source** | External PDF/DOCX | Claude Code transcript |
+| **Trigger** | Manual `ingest` command | Automatic on session end |
+| **Output** | Atomic concept notes | Session log + inbox items |
+| **Structure** | Source → Concepts | Timeline → Learnings |
+| **Best for** | Research, references | Work knowledge, decisions |

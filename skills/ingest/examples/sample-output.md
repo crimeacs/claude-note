@@ -80,8 +80,9 @@ Error response format recommended:
 1. **Extracts text** from the PDF using `pdftotext` or `pandoc`
 2. **Reads config** from `~/.config/claude-note/config.toml` to find vault path
 3. **Analyzes content** to identify key concepts, highlights, and questions
-4. **Creates the note** at `{vault_root}/literature/lit-rest-api-design-best-practices.md`
-5. **Confirms** what was created
+4. **Checks for duplicates** in existing vault notes
+5. **Creates the note** at `{vault_root}/literature/lit-rest-api-design-best-practices.md`
+6. **Confirms** what was created
 
 ## Internal Note Example
 
@@ -92,3 +93,17 @@ For internal documents, use `--internal`:
 ```
 
 Creates: `internal/int-auth-service-spec.md` with internal note format.
+
+## Dry Run Example
+
+Preview extraction without writing:
+
+```
+/ingest paper.pdf --dry-run
+```
+
+Output shows:
+- Extracted summary, concepts, highlights
+- Target file path
+- Any existing similar notes found
+- No files are written

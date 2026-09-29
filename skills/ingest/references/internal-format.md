@@ -147,8 +147,7 @@ To deploy a service:
 
 1. Create deploy request in DeployBot: `/deploy servicename main`
 2. Wait for on-call approval (ping in #oncall if urgent)
-3. Monitor canary for 15 minutes
-4. Confirm full rollout or rollback
+3. Confirm full rollout or rollback
 
 Rollback command: `/rollback servicename`
 
