@@ -33,6 +33,30 @@ The installer will:
 3. Set up the background service
 4. Print instructions for Claude Code hook configuration
 
+### Updating an existing install from a checkout
+
+`install.sh` is for first-time setup: it asks questions and rewrites
+`config.toml`. To put a checkout's code on a machine that is already set up
+(every laptop after the first install, or after `git pull`):
+
+```bash
+cd ~/src/claude-note && git pull
+scripts/install-from-checkout.sh --push-agent --codex-hooks
+```
+
+It installs the checkout with `uv tool install --reinstall`, restarts the
+worker if it is loaded, and records the path and commit in
+`~/.local/share/claude-note/installed-from.json`. It never touches the config,
+the vault or the worker plist. `--push-agent` (re)installs the daily push job
+and `--codex-hooks` the Codex hooks; both are idempotent. It refuses a
+checkout under a temp directory (it vanishes on reboot and nobody can tell what
+is running) and uncommitted changes in `src/` (`--allow-temp`,
+`--allow-dirty` override).
+
+`claude-note update` installs the latest release of `artemiin/claude-note`,
+which does not have the push or the Codex/Cursor importers; use the script
+above instead.
+
 ## How It Works
 
 1. **Hook Integration**: Claude Code hooks notify claude-note when sessions start/stop
@@ -222,3 +246,57 @@ This improves synthesis quality by providing relevant vault context.
 ## License
 
 MIT
+
+## Other assistants: Codex / ChatGPT app, Cursor, Claude.ai and ChatGPT exports
+
+| Assistant | How it is captured |
+|---|---|
+| Claude Code (terminal) | hooks in `~/.claude/settings.json` (above) |
+| Codex CLI and the ChatGPT desktop app (it runs Codex) | hooks in `~/.codex/hooks.json`: `claude-note install-codex-hooks` |
+| Cursor | read from Cursor's `state.vscdb` (read-only) by the worker every 30 min |
+| Claude desktop / claude.ai, ChatGPT web | Settings → Export data; leave the zip in `~/Downloads` or drop it in `~/Documents/claude-note-imports/` |
+
+The worker sweeps every 30 minutes for sources without a hook: Cursor chats,
+export zips (Claude `data-*.zip`, ChatGPT `<hash>-<date>.zip`, or any zip in
+`~/Documents/claude-note-imports/` that holds a `conversations.json`), and Codex
+rollouts the hook did not deliver. Each conversation is converted into a local
+transcript under `~/.local/share/claude-note/transcripts/` and processed once
+(content hash); a conversation that grows is processed again. Imported zips move
+to `~/Documents/claude-note-imports/done/`. Codex subagent threads and
+`codex exec` automation are skipped. The first sweep only looks back 7 days;
+backfill older history with `claude-note import --since 2025-01-01`. Heartbeat:
+`~/Library/Logs/claude-note/import-sweep.ok` (shown in `claude-note status`).
+
+```bash
+claude-note install-codex-hooks   # once; backs up ~/.codex/hooks.json
+claude-note import                # sweep now instead of waiting
+claude-note import ~/Downloads/data-2026-09-25.zip
+```
+
+Codex skips a new hooks file until it is trusted once: approve it in the app's
+hooks review, or run `codex` in a terminal and accept the prompt. Until then the
+30-minute sweep still picks the sessions up, just later.
+
+## Daily push to the shared Foresyn vault
+
+`claude-note push` sends curated notes to the Foresyn vault inbox
+(`inbox/<user>/<date>/<path with / as __>.md`) using `~/.foresyn/config.json`.
+Only notes whose frontmatter `type` is `pattern`, `gotcha`, `decision`,
+`reference`, `project` or `literature` go; session notes never do, nor anything
+with `share: false` or under a `private/` folder. API keys, tokens, passwords,
+private keys and credentialed connection strings are replaced with
+`[REDACTED: <kind>]` first; a note the scanner fails on is skipped. A note whose
+redacted content is unchanged since its last push sends no request.
+
+```bash
+claude-note push --dry-run        # counts only
+claude-note push --install-agent  # launchd, daily at 03:00 (log: ~/Library/Logs/claude-note/push.log)
+```
+
+A note that fails is named in `push.log` (`error: <path>: HTTP <status>: ...`).
+A request with no response, a 5xx or a 409 is retried once after 5 s; a lost
+response usually means the server wrote the note, and a repeat PUT of the same
+content is a no-op there. 401, 403 and 429 stop the run. Any error leaves the
+heartbeat untouched and the job exits 1; the note is retried on the next run.
+
+Heartbeat after a clean run: `~/Library/Logs/claude-note/push.ok`.

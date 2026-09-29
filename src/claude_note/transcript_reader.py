@@ -5,6 +5,7 @@ Parses Claude Code transcript JSONL and extracts content for synthesis.
 """
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Union
@@ -101,9 +102,138 @@ def _summarize_tool_output(tool_name: str, output: str, max_len: int = 200) -> s
     return output
 
 
+# Codex (CLI, and the ChatGPT desktop app, which runs Codex) prepends context it
+# injects itself as "user" messages; they are not what the person asked.
+_CODEX_INJECTED_PREFIXES = ("<", "# AGENTS.md instructions", "# Files mentioned by the user")
+
+
+_CODEX_PATCH_FILE = re.compile(r"\*\*\* (?:Update|Add|Delete) File: ([^\n\\\"'`]+)")
+
+
+def _is_codex_transcript(transcript_path: Path) -> bool:
+    """Codex rollouts are JSONL whose records carry a `payload` object."""
+    with open(transcript_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                return False
+            return isinstance(entry, dict) and isinstance(entry.get("payload"), dict)
+    return False
+
+
+def codex_session_meta(transcript_path) -> dict:
+    """First-record metadata of a Codex rollout: id, cwd, and whether it is a
+    background run (a subagent thread, or `codex exec` automation) that should
+    not become a note of its own. Empty dict if not a Codex rollout."""
+    try:
+        with open(transcript_path, "r") as f:
+            entry = json.loads(f.readline())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(entry, dict) or entry.get("type") != "session_meta":
+        return {}
+    payload = entry.get("payload")
+    if not isinstance(payload, dict):
+        return {}
+    source = payload.get("source")
+    background = source == "exec" or (isinstance(source, dict) and "subagent" in source)
+    return {"id": payload.get("id") or payload.get("session_id"), "cwd": payload.get("cwd", ""), "background": background}
+
+
+def _codex_texts(content, kinds: tuple) -> list[str]:
+    if isinstance(content, str):
+        return [content]
+    texts = []
+    for block in content or []:
+        if isinstance(block, dict) and block.get("type") in kinds:
+            text = block.get("text", "")
+            if isinstance(text, str) and text.strip():
+                texts.append(text.strip())
+    return texts
+
+
+def _read_codex_transcript(transcript_path: Path) -> TranscriptContent:
+    """Parse a Codex rollout (`~/.codex/sessions/**/rollout-*.jsonl`)."""
+    content = TranscriptContent(session_id=transcript_path.stem)
+    files_seen = set()
+    calls = {}
+
+    def touch(tool_name: str, tool_input: dict) -> None:
+        paths = list(_extract_file_paths(tool_name, tool_input))
+        # apply_patch bodies arrive raw, or embedded in an `exec` script as a
+        # string literal with escaped newlines; match the marker either way.
+        patch = tool_input.get("input") if isinstance(tool_input.get("input"), str) else ""
+        paths.extend(m.strip() for m in _CODEX_PATCH_FILE.findall(patch))
+        for path in paths:
+            if path and path not in files_seen:
+                content.files_touched.append(path)
+                files_seen.add(path)
+
+    with open(transcript_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            payload = entry.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            kind = entry.get("type")
+            ptype = payload.get("type")
+
+            if kind == "session_meta":
+                content.session_id = payload.get("id") or payload.get("session_id") or content.session_id
+            elif kind != "response_item":
+                continue
+            elif ptype == "message" and payload.get("role") == "user":
+                for text in _codex_texts(payload.get("content"), ("input_text", "text")):
+                    if not text.startswith(_CODEX_INJECTED_PREFIXES):
+                        content.user_prompts.append(text)
+            elif ptype == "message" and payload.get("role") == "assistant":
+                content.assistant_texts.extend(_codex_texts(payload.get("content"), ("output_text", "text")))
+            elif ptype in ("function_call", "custom_tool_call"):
+                name = payload.get("name", "unknown")
+                if ptype == "function_call":
+                    try:
+                        tool_input = json.loads(payload.get("arguments") or "{}")
+                    except json.JSONDecodeError:
+                        tool_input = {"arguments": payload.get("arguments", "")}
+                    if not isinstance(tool_input, dict):
+                        tool_input = {"arguments": tool_input}
+                else:
+                    tool_input = {"input": payload.get("input", "")}
+                tool_use = ToolUse(name=name, input=tool_input)
+                content.tool_uses.append(tool_use)
+                if payload.get("call_id"):
+                    calls[payload["call_id"]] = tool_use
+                touch(name, tool_input)
+            elif ptype in ("function_call_output", "custom_tool_call_output"):
+                tool_use = calls.get(payload.get("call_id"))
+                output = payload.get("output", "")
+                if isinstance(output, dict):
+                    output = output.get("content") or output.get("output") or json.dumps(output)
+                if tool_use and isinstance(output, str) and output:
+                    tool_use.output_summary = _summarize_tool_output(tool_use.name, output)
+            elif ptype == "reasoning":
+                for item in payload.get("summary") or []:
+                    text = item.get("text", "") if isinstance(item, dict) else ""
+                    if text.strip():
+                        content.thinking_snippets.append(text.strip()[:500])
+
+    return content
+
+
 def read_transcript(transcript_path: Union[str, Path]) -> TranscriptContent:
     """
-    Read and parse a transcript JSONL file.
+    Read and parse a transcript JSONL file: Claude Code's format, or a Codex
+    rollout (Codex CLI and the ChatGPT desktop app).
 
     Args:
         transcript_path: Path to the transcript JSONL file
@@ -115,6 +245,9 @@ def read_transcript(transcript_path: Union[str, Path]) -> TranscriptContent:
 
     if not transcript_path.exists():
         raise FileNotFoundError(f"Transcript not found: {transcript_path}")
+
+    if _is_codex_transcript(transcript_path):
+        return _read_codex_transcript(transcript_path)
 
     # Extract session_id from path (last component before .jsonl)
     session_id = transcript_path.stem

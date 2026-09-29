@@ -24,6 +24,14 @@ def main() -> int:
 
         hook_data = json.loads(raw_input)
 
+        # Codex subagent threads and `codex exec` automation are not sessions
+        # a person had; they would each become a note.
+        transcript = hook_data.get("transcript_path") or ""
+        if "/.codex/" in transcript:
+            from .transcript_reader import codex_session_meta
+            if codex_session_meta(transcript).get("background"):
+                return 0
+
         # Create event and enqueue
         event = models.QueuedEvent.from_hook_input(hook_data)
         queue_manager.enqueue_event(event)

@@ -9,6 +9,7 @@ import argparse
 import logging
 import signal
 import sys
+import threading
 import time
 from datetime import datetime
 
@@ -21,6 +22,7 @@ from . import open_questions
 from . import synthesizer
 from . import note_router
 from . import vault_indexer
+from . import importers
 from . import version_checker
 
 
@@ -280,8 +282,29 @@ def run_worker(foreground: bool = False, verbose: bool = False) -> int:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
+    # Sources without a hook (Cursor, export zips, untrusted Codex hooks) are
+    # swept on a background thread so a slow disk never stalls the queue.
+    sweeper = None
+    sweep_started = 0.0
+
     # Main poll loop
     while not _shutdown:
+        now = time.time()
+        if sweeper is not None and sweeper.is_alive():
+            if now - sweep_started > 600:
+                logger.warning("Import sweep running for >10 min; abandoning it")
+                sweeper = None
+        elif now - sweep_started >= importers.SWEEP_INTERVAL:
+            def _sweep():
+                try:
+                    counts = importers.sweep()
+                    logger.info(f"Import sweep: {counts}")
+                except Exception as e:
+                    logger.error(f"Import sweep failed: {e}")
+            sweeper = threading.Thread(target=_sweep, name="import-sweep", daemon=True)
+            sweeper.start()
+            sweep_started = now
+
         try:
             notes_written = poll_once(logger)
             if notes_written > 0:

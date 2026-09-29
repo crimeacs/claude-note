@@ -20,6 +20,11 @@ def get_note_filename(state: models.SessionState) -> str:
 
     # Use first 8 chars of session_id as short id
     short_id = state.session_id[:8]
+    # Codex ids are UUIDv7: the first 8 hex digits are a timestamp shared by
+    # sessions started within ~65 s of each other, so take the random tail.
+    sid = state.session_id
+    if len(sid) == 36 and sid[14] == "7":
+        short_id = sid[-8:]
 
     return f"claude-session-{date_str}-{short_id}.md"
 

@@ -138,6 +138,22 @@ def cmd_status(args) -> int:
     else:
         print("  (not built - run: claude-note index)")
 
+    # Import sweep heartbeat (Cursor, export zips, Codex rollouts)
+    from . import importers
+    print("\nImport Sweep")
+    if importers.HEARTBEAT.exists():
+        age = time.time() - importers.HEARTBEAT.stat().st_mtime
+        stale = "  STALE: is the worker running?" if age > 2 * importers.SWEEP_INTERVAL + 600 else ""
+        print(f"  Last run:  {_format_duration(age)} ago{stale}")
+        try:
+            import json
+            for problem in json.loads(importers.HEARTBEAT.read_text())["counts"].get("problems", []):
+                print(f"  PROBLEM: {problem}")
+        except (OSError, ValueError, KeyError):
+            pass
+    else:
+        print("  (never ran)")
+
     # Inbox
     print(f"\nInbox")
     if config.INBOX_PATH.exists():
@@ -154,6 +170,117 @@ def cmd_status(args) -> int:
 
     print()
 
+    return 0
+
+
+def cmd_import(args) -> int:
+    """Sweep Cursor, export zips and Codex rollouts now (the worker also does this)."""
+    from . import importers
+    since = datetime.strptime(args.since, "%Y-%m-%d") if args.since else None
+    counts = importers.sweep(since=since, zips=args.zips)
+    for source, count in counts.items():
+        print(f"  {source}: {count}")
+    print("Queued sessions are written by the worker (or run: claude-note drain).")
+    return 0
+
+
+CODEX_HOOK_EVENTS = {"UserPromptSubmit": 5, "Stop": 5, "SessionEnd": 3}
+
+
+def install_codex_hooks(hooks_path, command: str) -> bool:
+    """Add `claude-note enqueue` to Codex's hooks.json (backup first). Idempotent."""
+    import json
+    import shutil
+    from pathlib import Path
+
+    hooks_path = Path(hooks_path)
+    data = json.loads(hooks_path.read_text()) if hooks_path.exists() else {}
+    hooks = data.setdefault("hooks", {})
+    changed = False
+    for event, timeout in CODEX_HOOK_EVENTS.items():
+        groups = hooks.setdefault(event, [])
+        if any("claude-note enqueue" in h.get("command", "") for g in groups for h in g.get("hooks", [])):
+            continue
+        groups.append({"hooks": [{"type": "command", "command": command, "timeout": timeout}]})
+        changed = True
+    if changed:
+        if hooks_path.exists():
+            shutil.copy2(hooks_path, hooks_path.with_name(f"hooks.json.bak-{datetime.now():%Y%m%d-%H%M%S}"))
+        hooks_path.parent.mkdir(parents=True, exist_ok=True)
+        hooks_path.write_text(json.dumps(data, indent=2) + "\n")
+    return changed
+
+
+def cmd_install_codex_hooks(args) -> int:
+    import shutil
+    from pathlib import Path
+
+    exe = shutil.which("claude-note") or "claude-note"
+    path = Path(args.hooks_file).expanduser()
+    if install_codex_hooks(path, f"{exe} enqueue"):
+        print(f"Added claude-note hooks to {path} (any previous file is backed up alongside).")
+    else:
+        print(f"{path} already has the claude-note hooks.")
+    print("Codex skips new hooks until trusted: open the ChatGPT/Codex app and approve them")
+    print("in its hooks review, or run `codex` once in a terminal and accept the trust prompt.")
+    return 0
+
+
+def cmd_push(args) -> int:
+    """Push curated notes (redacted) to the shared Foresyn vault inbox."""
+    from . import push
+    if args.install_agent:
+        return install_push_agent()
+    counts = push.run(dry_run=args.dry_run, limit=args.limit)
+    label = "would push" if args.dry_run else "pushed"
+    print(f"{label}: {counts['pushed']}  unchanged: {counts['unchanged']}  redacted: {counts['redacted']}  "
+          f"skipped: {counts['skipped']}  skipped:stub: {counts['skipped_stub']}  errors: {counts['errors']}  (not eligible: {counts['not_eligible']})")
+    if counts.get("stopped"):
+        print(f"stopped early: {counts['stopped']}")
+    return 1 if counts["errors"] else 0
+
+
+PUSH_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.claude-note.push</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/timeout</string><string>-k</string><string>60</string><string>3600</string>
+    <string>{exe}</string><string>push</string>
+  </array>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StandardOutPath</key><string>{logs}/push.log</string>
+  <key>StandardErrorPath</key><string>{logs}/push.log</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>{path}</string></dict>
+</dict>
+</plist>
+"""
+
+
+def install_push_agent() -> int:
+    import os
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    exe = shutil.which("claude-note") or "claude-note"
+    logs = Path.home() / "Library/Logs/claude-note"
+    logs.mkdir(parents=True, exist_ok=True)
+    plist = Path.home() / "Library/LaunchAgents/com.claude-note.push.plist"
+    timeout = shutil.which("timeout") or shutil.which("gtimeout")
+    body = PUSH_PLIST.format(exe=exe, logs=logs, path=os.environ.get("PATH", "/usr/bin:/bin"))
+    if timeout:
+        body = body.replace("/usr/bin/timeout", timeout)
+    else:  # no coreutils timeout: push.py still enforces its own run deadline
+        body = body.replace("    <string>/usr/bin/timeout</string><string>-k</string><string>60</string><string>3600</string>\n", "")
+    plist.write_text(body)
+    uid = os.getuid()
+    subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist)], capture_output=True, timeout=30)
+    subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist)], check=True, timeout=30)
+    print(f"Installed {plist}: runs `claude-note push` daily at 03:00; log {logs}/push.log")
     return 0
 
 
@@ -426,6 +553,30 @@ def main() -> int:
         help="Run all cleanup types"
     )
     clean_parser.set_defaults(func=cmd_clean)
+
+    # import command
+    import_parser = subparsers.add_parser(
+        "import", help="Pick up Cursor chats, Claude/ChatGPT export zips, Codex rollouts now"
+    )
+    import_parser.add_argument("zips", nargs="*", help="Export zip(s) to import explicitly")
+    import_parser.add_argument("--since", help="Backfill sessions updated since YYYY-MM-DD")
+    import_parser.set_defaults(func=cmd_import)
+
+    # push command
+    push_parser = subparsers.add_parser(
+        "push", help="Push curated notes (redacted) to the shared Foresyn vault inbox"
+    )
+    push_parser.add_argument("--dry-run", "-n", action="store_true", help="Count only; no network")
+    push_parser.add_argument("--limit", type=int, default=0, help="Push at most N notes this run")
+    push_parser.add_argument("--install-agent", action="store_true", help="Install the daily 03:00 launchd agent")
+    push_parser.set_defaults(func=cmd_push)
+
+    # install-codex-hooks command
+    codex_parser = subparsers.add_parser(
+        "install-codex-hooks", help="Add claude-note to ~/.codex/hooks.json (Codex CLI and ChatGPT app)"
+    )
+    codex_parser.add_argument("--hooks-file", default="~/.codex/hooks.json")
+    codex_parser.set_defaults(func=cmd_install_codex_hooks)
 
     # ingest command
     ingest_parser = subparsers.add_parser(
