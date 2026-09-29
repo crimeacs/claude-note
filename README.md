@@ -33,6 +33,30 @@ The installer will:
 3. Set up the background service
 4. Print instructions for Claude Code hook configuration
 
+### Updating an existing install from a checkout
+
+`install.sh` is for first-time setup: it asks questions and rewrites
+`config.toml`. To put a checkout's code on a machine that is already set up
+(every laptop after the first install, or after `git pull`):
+
+```bash
+cd ~/src/claude-note && git pull
+scripts/install-from-checkout.sh --push-agent --codex-hooks
+```
+
+It installs the checkout with `uv tool install --reinstall`, restarts the
+worker if it is loaded, and records the path and commit in
+`~/.local/share/claude-note/installed-from.json`. It never touches the config,
+the vault or the worker plist. `--push-agent` (re)installs the daily push job
+and `--codex-hooks` the Codex hooks; both are idempotent. It refuses a
+checkout under a temp directory (it vanishes on reboot and nobody can tell what
+is running) and uncommitted changes in `src/` (`--allow-temp`,
+`--allow-dirty` override).
+
+`claude-note update` installs the latest release of `artemiin/claude-note`,
+which does not have the push or the Codex/Cursor importers; use the script
+above instead.
+
 ## How It Works
 
 1. **Hook Integration**: Claude Code hooks notify claude-note when sessions start/stop
@@ -68,6 +92,7 @@ Claude Code Session
 
 ```bash
 claude-note status       # Check worker and queue status
+claude-note update       # Check for and apply updates
 claude-note drain        # Process all pending sessions now
 claude-note clean        # Cleanup duplicate sessions, old locks
 claude-note index        # Rebuild vault index for synthesis context
@@ -267,5 +292,11 @@ redacted content is unchanged since its last push sends no request.
 claude-note push --dry-run        # counts only
 claude-note push --install-agent  # launchd, daily at 03:00 (log: ~/Library/Logs/claude-note/push.log)
 ```
+
+A note that fails is named in `push.log` (`error: <path>: HTTP <status>: ...`).
+A request with no response, a 5xx or a 409 is retried once after 5 s; a lost
+response usually means the server wrote the note, and a repeat PUT of the same
+content is a no-op there. 401, 403 and 429 stop the run. Any error leaves the
+heartbeat untouched and the job exits 1; the note is retried on the next run.
 
 Heartbeat after a clean run: `~/Library/Logs/claude-note/push.ok`.
