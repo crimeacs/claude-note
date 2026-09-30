@@ -80,7 +80,7 @@ class PushTests(unittest.TestCase):
         sent = {c[2]["source_path"]: c for c in client.calls}
         self.assertNotIn(AWS, sent["pattern-a.md"][1])
         meta = sent["pattern-a.md"][2]
-        self.assertEqual(set(meta), {"source", "author", "laptop", "source_path", "content_sha256", "note_type", "redactions"})
+        self.assertEqual(set(meta), {"source", "author", "assistant", "laptop", "source_path", "content_sha256", "note_type", "redactions"})
         self.assertEqual((meta["source"], meta["note_type"], meta["redactions"]), ("claude-note", "pattern", 1))
 
         # Second run: nothing changed, so no request at all.

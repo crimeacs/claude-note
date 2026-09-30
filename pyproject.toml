@@ -26,7 +26,7 @@ classifiers = [
 dependencies = []  # Pure stdlib, no dependencies
 
 [project.scripts]
-claude-note = "claude_note.cli:main"
+claude-note = "claude_note.entry:main"
 
 [project.urls]
 Homepage = "https://github.com/artemiin/claude-note"

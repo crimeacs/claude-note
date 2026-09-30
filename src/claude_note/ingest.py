@@ -618,6 +618,13 @@ def _merge_concept_sources(
 # Note Creation
 # =============================================================================
 
+def _author_line() -> str:
+    """`author: <email>` plus newline for frontmatter, or "" when unknown."""
+    from . import provenance
+    author = provenance.author_email()
+    return f"author: {author}\n" if author else ""
+
+
 def slugify(text: str) -> str:
     """Convert text to kebab-case slug."""
     # Lowercase and replace spaces/underscores with hyphens
@@ -684,7 +691,7 @@ tags:
   - {tags[2]}
 source_file: "{source_file.name}"
 ingested: {date}
----
+{_author_line()}---
 
 # {extraction.get("key_citation", source_file.stem)}
 
@@ -782,7 +789,7 @@ tags:
   - {f"{chr(10)}  - ".join(tags)}
 source: "{source_link}"
 added: {date}
----
+{_author_line()}---
 
 # {title}
 
