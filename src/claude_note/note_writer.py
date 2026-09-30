@@ -6,6 +6,7 @@ from pathlib import Path
 
 from . import config
 from . import models
+from . import provenance
 
 
 def get_note_filename(state: models.SessionState) -> str:
@@ -240,6 +241,9 @@ def generate_note_content(state: models.SessionState) -> str:
 
     duration = calculate_duration(state)
     timeline = format_timeline(state.events)
+    provenance_lines = "".join(
+        f"{key}: {value}\n" for key, value in provenance.stamp(
+            {}, provenance.assistant_for(state.transcript_path)).items())
 
     # Build the note
     content = f"""---
@@ -249,7 +253,7 @@ tags:
 aliases: []
 created: {date_str}
 session_id: {state.session_id}
----
+{provenance_lines}---
 
 # Claude Session {date_str}
 

@@ -69,6 +69,9 @@ def _format_duration(seconds: float) -> str:
 
 def cmd_status(args) -> int:
     """Handle status command - show queue and session status."""
+    if getattr(args, "json", False):
+        from . import health
+        return health.main()
     from . import version_checker
 
     # Header with version
@@ -185,10 +188,12 @@ def cmd_import(args) -> int:
 
 
 CODEX_HOOK_EVENTS = {"UserPromptSubmit": 5, "Stop": 5, "SessionEnd": 3}
+# Claude Code hook timeouts are seconds too.
+CLAUDE_HOOK_EVENTS = {"PostToolUse": 10, "UserPromptSubmit": 10, "Stop": 10}
 
 
-def install_codex_hooks(hooks_path, command: str) -> bool:
-    """Add `claude-note enqueue` to Codex's hooks.json (backup first). Idempotent."""
+def _install_hooks(hooks_path, command: str, events: dict) -> bool:
+    """Add `claude-note enqueue` to a hooks JSON file (backup first). Idempotent."""
     import json
     import shutil
     from pathlib import Path
@@ -197,7 +202,7 @@ def install_codex_hooks(hooks_path, command: str) -> bool:
     data = json.loads(hooks_path.read_text()) if hooks_path.exists() else {}
     hooks = data.setdefault("hooks", {})
     changed = False
-    for event, timeout in CODEX_HOOK_EVENTS.items():
+    for event, timeout in events.items():
         groups = hooks.setdefault(event, [])
         if any("claude-note enqueue" in h.get("command", "") for g in groups for h in g.get("hooks", [])):
             continue
@@ -205,10 +210,35 @@ def install_codex_hooks(hooks_path, command: str) -> bool:
         changed = True
     if changed:
         if hooks_path.exists():
-            shutil.copy2(hooks_path, hooks_path.with_name(f"hooks.json.bak-{datetime.now():%Y%m%d-%H%M%S}"))
+            shutil.copy2(hooks_path, hooks_path.with_name(f"{hooks_path.name}.bak-{datetime.now():%Y%m%d-%H%M%S}"))
         hooks_path.parent.mkdir(parents=True, exist_ok=True)
-        hooks_path.write_text(json.dumps(data, indent=2) + "\n")
+        tmp = hooks_path.with_name(hooks_path.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n")
+        tmp.replace(hooks_path)
     return changed
+
+
+def install_codex_hooks(hooks_path, command: str) -> bool:
+    """Add `claude-note enqueue` to Codex's hooks.json (backup first). Idempotent."""
+    return _install_hooks(hooks_path, command, CODEX_HOOK_EVENTS)
+
+
+def install_claude_hooks(settings_path, command: str) -> bool:
+    """Add `claude-note enqueue` to Claude Code's settings.json, keeping every other setting."""
+    return _install_hooks(settings_path, command, CLAUDE_HOOK_EVENTS)
+
+
+def cmd_install_claude_hooks(args) -> int:
+    import shutil
+    from pathlib import Path
+
+    exe = shutil.which("claude-note") or "claude-note"
+    path = Path(args.settings_file).expanduser()
+    if install_claude_hooks(path, f"{exe} enqueue"):
+        print(f"Added claude-note hooks to {path} (any previous file is backed up alongside).")
+    else:
+        print(f"{path} already has the claude-note hooks.")
+    return 0
 
 
 def cmd_install_codex_hooks(args) -> int:
@@ -489,6 +519,8 @@ def main() -> int:
 
     # status command
     status_parser = subparsers.add_parser("status", help="Show queue/session status")
+    status_parser.add_argument("--json", action="store_true",
+                               help="Machine-readable health report (works before setup; exit 1 if unhealthy)")
     status_parser.set_defaults(func=cmd_status)
 
     # update command
@@ -577,6 +609,13 @@ def main() -> int:
     )
     codex_parser.add_argument("--hooks-file", default="~/.codex/hooks.json")
     codex_parser.set_defaults(func=cmd_install_codex_hooks)
+
+    # install-claude-hooks command
+    claude_hooks_parser = subparsers.add_parser(
+        "install-claude-hooks", help="Add claude-note to Claude Code's ~/.claude/settings.json"
+    )
+    claude_hooks_parser.add_argument("--settings-file", default="~/.claude/settings.json")
+    claude_hooks_parser.set_defaults(func=cmd_install_claude_hooks)
 
     # ingest command
     ingest_parser = subparsers.add_parser(

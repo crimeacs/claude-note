@@ -11,7 +11,9 @@ Contract with the server-side merge (keep exact):
   PUT {baseUrl}/api/v1/vault/document?organization_id=<org>
   body {path, content, parent_revision, metadata}
   path = inbox/<person>/<YYYY-MM-DD>/<relative path, "/" -> "__">.md
-  metadata = {source, author, laptop, source_path, content_sha256, note_type, redactions}
+  metadata = {source, author, assistant, laptop, source_path, content_sha256, note_type, redactions}
+  (author: the owner's email, else the note's `author:` frontmatter; assistant:
+  the note's `assistant:` frontmatter, "" for notes that predate it)
 """
 
 import getpass
@@ -20,7 +22,6 @@ import json
 import re
 import signal
 import socket
-import subprocess
 import sys
 import time
 import urllib.error
@@ -31,6 +32,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import config
+from . import provenance
 
 PUSH_TYPES = {"pattern", "gotcha", "decision", "reference", "project", "literature"}
 STATE_FILE = Path.home() / ".local/share/claude-note/push-state.json"
@@ -119,10 +121,7 @@ def remote_path(person: str, day: str, rel: Path) -> str:
 
 def identity() -> tuple[str, str]:
     """(person, author email)."""
-    try:
-        email = subprocess.run(["git", "config", "user.email"], capture_output=True, text=True, timeout=5).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        email = ""
+    email = provenance.author_email()
     person = (getpass.getuser() or email.split("@")[0]).lower()
     return person, email
 
@@ -265,7 +264,11 @@ def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit:
         if limit and counts["pushed"] >= limit:
             stop_reason = f"--limit {limit} reached"
             break
-        metadata = {"source": "claude-note", "author": email, "laptop": laptop, "source_path": str(rel),
+        fm = frontmatter(text)
+        assistant = fm.get("assistant", "").lower()
+        metadata = {"source": "claude-note", "author": email or fm.get("author", ""),
+                    "assistant": assistant if assistant in provenance.ASSISTANTS else "",
+                    "laptop": laptop, "source_path": str(rel),
                     "content_sha256": sha, "note_type": note_type, "redactions": n}
         status, body = _put_once_more_if_transient(client, remote_path(person, day, rel), content, metadata)
         if status == 200:

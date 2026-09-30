@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Entry point for python -m claude_note."""
-from .cli import main
+from .entry import main
 import sys
 
 if __name__ == "__main__":

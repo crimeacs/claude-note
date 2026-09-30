@@ -103,6 +103,7 @@ class KnowledgePack:
     open_questions: list[OpenQuestion] = field(default_factory=list)
     howtos: list[HowTo] = field(default_factory=list)
     note_ops: list[NoteOp] = field(default_factory=list)
+    assistant: str = ""                    # provenance.ASSISTANTS; set by us, not the model
 
     def to_dict(self) -> dict:
         d = {
@@ -118,6 +119,8 @@ class KnowledgePack:
         }
         if self.time:
             d["time"] = self.time
+        if self.assistant:
+            d["assistant"] = self.assistant
         return d
 
     def to_json(self, indent: int = 2) -> str:

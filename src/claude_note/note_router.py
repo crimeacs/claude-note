@@ -14,6 +14,7 @@ from . import config
 from . import managed_blocks
 from . import knowledge_pack
 from . import qmd_search
+from . import provenance
 
 
 def _format_frontmatter(fm: dict) -> str:
@@ -85,7 +86,8 @@ def create_note(
     return note_path
 
 
-def apply_note_op(op: knowledge_pack.NoteOp, vault_root: Path = None, session_id: str = None) -> bool:
+def apply_note_op(op: knowledge_pack.NoteOp, vault_root: Path = None, session_id: str = None,
+                  assistant: str = "") -> bool:
     """
     Apply a single note operation.
 
@@ -93,6 +95,7 @@ def apply_note_op(op: knowledge_pack.NoteOp, vault_root: Path = None, session_id
         op: NoteOp object
         vault_root: Override vault root
         session_id: Session ID for auto-generating block IDs
+        assistant: Which assistant the session came from (stamped on new notes)
 
     Returns:
         True if operation succeeded
@@ -126,7 +129,7 @@ def apply_note_op(op: knowledge_pack.NoteOp, vault_root: Path = None, session_id
                 create_if_missing=True,
             )
 
-        frontmatter = op.frontmatter or {"tags": ["claude-note"]}
+        frontmatter = provenance.stamp(op.frontmatter or {"tags": ["claude-note"]}, assistant)
         create_note(path, frontmatter, op.body_markdown, vault_root)
         return True
 
@@ -582,7 +585,8 @@ def apply_note_ops(pack: knowledge_pack.KnowledgePack, mode: str = "inbox", vaul
         for op in pack.note_ops:
             try:
                 # Pass session_id for auto-generating managed block IDs
-                success = apply_note_op(op, vault_root, session_id=pack.session_id)
+                success = apply_note_op(op, vault_root, session_id=pack.session_id,
+                                        assistant=pack.assistant)
                 if success:
                     if op.op == "create":
                         # Check if it was actually created or fell back to update

@@ -14,6 +14,7 @@ from typing import Optional
 
 from . import config
 from . import knowledge_pack
+from . import provenance
 from . import transcript_reader
 from . import vault_indexer
 from . import qmd_search
@@ -411,12 +412,15 @@ def synthesize_from_state(state, vault_index: vault_indexer.VaultIndex = None, m
     if vault_index is None:
         vault_index = vault_indexer.get_index()
 
-    return synthesize_session(
+    pack = synthesize_session(
         transcript,
         vault_index,
         cwd=state.cwd,
         model=model,
     )
+    if pack is not None:
+        pack.assistant = provenance.assistant_for(state.transcript_path)
+    return pack
 
 
 def resynthesize_session(session_id: str, model: str = None) -> Optional[knowledge_pack.KnowledgePack]:
@@ -446,9 +450,12 @@ def resynthesize_session(session_id: str, model: str = None) -> Optional[knowled
     # Get fresh vault index
     vault_index = vault_indexer.build_index()
 
-    return synthesize_session(
+    pack = synthesize_session(
         transcript,
         vault_index,
         cwd=state.cwd,
         model=model,
     )
+    if pack is not None:
+        pack.assistant = provenance.assistant_for(state.transcript_path)
+    return pack

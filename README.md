@@ -47,11 +47,45 @@ scripts/install-from-checkout.sh --push-agent --codex-hooks
 It installs the checkout with `uv tool install --reinstall`, restarts the
 worker if it is loaded, and records the path and commit in
 `~/.local/share/claude-note/installed-from.json`. It never touches the config,
-the vault or the worker plist. `--push-agent` (re)installs the daily push job
-and `--codex-hooks` the Codex hooks; both are idempotent. It refuses a
-checkout under a temp directory (it vanishes on reboot and nobody can tell what
-is running) and uncommitted changes in `src/` (`--allow-temp`,
-`--allow-dirty` override).
+the vault or the worker plist. `--push-agent` (re)installs the daily push job,
+`--claude-hooks` the Claude Code hooks and `--codex-hooks` the Codex hooks; all
+are idempotent. It refuses a checkout under a temp directory (it vanishes on
+reboot and nobody can tell what is running) and uncommitted changes in `src/`
+(`--allow-temp`, `--allow-dirty` override).
+
+### Installing from another program (no Terminal, no questions)
+
+The same script sets up a new machine when run with `--non-interactive`, from
+a git checkout or from a plain copy of the source (the Sweat app bundles one;
+a copy records its ref in a `SOURCE_REF` file, or pass `--source-ref`):
+
+```bash
+scripts/install-from-checkout.sh --non-interactive --install-uv \
+    --vault ~/Documents/claude-notes --author you@company.com \
+    --push-agent --claude-hooks
+```
+
+It closes stdin and never prompts. It writes `config.toml` only if there is
+none, creates the vault from `vault-template/` and installs and starts the
+worker LaunchAgent only if missing, and sets `author` in `config.toml` when
+`--author` is given. `--install-uv` fetches uv with astral's standalone
+installer into `~/.local/bin` (shell profiles untouched) when it is missing;
+without it a missing uv exits 3. Exit codes: 0 installed, 1 failed, 2 bad
+option, 3 missing prerequisite.
+
+Afterwards, `claude-note status --json` prints one health report (config,
+author, worker and push agents, last clean push, import sweep, hooks, which of
+`uv`, `claude`, `qmd` and `foresyn` are installed, and a `problems` list). It
+works before anything is configured, needs no network, and exits 1 when
+`problems` is not empty.
+
+### Where a note came from
+
+Every note claude-note writes carries `assistant:` (`claude-code`, `codex`,
+`cursor`, `claude-app` or `chatgpt`, from where the transcript came from) and
+`author:` (`CLAUDE_NOTE_AUTHOR`, else `author` in `config.toml`, else the email
+in `~/.foresyn/config.json`, else the global git email). The daily push sends
+both in the document metadata.
 
 `claude-note update` installs the latest release of `artemiin/claude-note`,
 which does not have the push or the Codex/Cursor importers; use the script
