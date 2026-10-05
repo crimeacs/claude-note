@@ -17,6 +17,24 @@ from . import qmd_search
 from . import provenance
 
 
+NOTE_TYPES = ("pattern", "gotcha", "decision", "reference", "project", "literature")
+
+
+def with_type(fm: dict) -> dict:
+    """The frontmatter with a `type`: the model's when valid, else the first tag
+    naming a type, else `reference`. The daily push shares only typed notes, and
+    before 1.6.0 no synthesized note had one, so none ever left the laptop."""
+    out = dict(fm)
+    given = str(out.get("type") or "").strip().lower()
+    if given in NOTE_TYPES:
+        out["type"] = given
+        return out
+    raw_tags = out.get("tags") or []
+    note_tags = [str(t).strip().lower() for t in (raw_tags if isinstance(raw_tags, list) else [raw_tags])]
+    out["type"] = next((t for t in note_tags if t in NOTE_TYPES), "reference")
+    return out
+
+
 def _format_frontmatter(fm: dict) -> str:
     """Format frontmatter dict as YAML."""
     lines = ["---"]
@@ -129,7 +147,7 @@ def apply_note_op(op: knowledge_pack.NoteOp, vault_root: Path = None, session_id
                 create_if_missing=True,
             )
 
-        frontmatter = provenance.stamp(op.frontmatter or {"tags": ["claude-note"]}, assistant)
+        frontmatter = provenance.stamp(with_type(op.frontmatter or {"tags": ["claude-note"]}), assistant)
         create_note(path, frontmatter, op.body_markdown, vault_root)
         return True
 

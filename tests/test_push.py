@@ -166,3 +166,64 @@ class PushTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InferTypeTests(unittest.TestCase):
+    """Synthesized notes had no `type` before 1.6.0, so the push shared none of them."""
+
+    def synth(self, tags, extra="assistant: claude-code\n"):
+        tag_block = "".join(f"  - {t}\n" for t in tags)
+        return f"---\ntags:\n{tag_block}{extra}---\n\n# Title\n{FILLER}\n"
+
+    def test_untyped_synthesized_note_gets_a_type_from_its_tags(self):
+        self.assertEqual(push.eligible(Path("a.md"), self.synth(["automation", "gotcha", "pattern"])), "gotcha")
+        self.assertEqual(push.eligible(Path("a.md"), self.synth(["research", "sweat-ai"])), "reference")
+        self.assertEqual(push.eligible(Path("a.md"), "---\ntags: [claude-note, decision]\n---\nx"), "decision")
+
+    def test_logs_inbox_sessions_and_unshared_stay_home(self):
+        self.assertIsNone(push.eligible(Path("a.md"), self.synth(["log", "claude-note"])))
+        self.assertIsNone(push.eligible(Path("claude-note-inbox.md"), self.synth(["log", "claude-note", "inbox"])))
+        self.assertIsNone(push.eligible(Path("claude-session-2026-10-05-ab.md"), self.synth(["pattern"])))
+        self.assertIsNone(push.eligible(Path("a.md"), self.synth(["pattern"], "assistant: codex\nshare: false\n")))
+        self.assertIsNone(push.eligible(Path("private/a.md"), self.synth(["pattern"])))
+
+    def test_a_persons_untyped_note_is_not_inferred(self):
+        self.assertIsNone(push.eligible(Path("a.md"), "---\ntags:\n  - pattern\n---\nmine"))
+        self.assertIsNone(push.eligible(Path("a.md"), "no frontmatter"))
+
+    def test_explicit_type_still_wins(self):
+        self.assertIsNone(push.eligible(Path("a.md"), self.synth(["pattern"], "assistant: codex\ntype: log\n")))
+        self.assertEqual(push.eligible(Path("a.md"), self.synth(["pattern"], "assistant: codex\ntype: project\n")), "project")
+
+
+class WithTypeTests(unittest.TestCase):
+    def test_create_frontmatter_always_has_a_type(self):
+        from claude_note.note_router import with_type
+        self.assertEqual(with_type({"tags": ["x", "decision"]})["type"], "decision")
+        self.assertEqual(with_type({"tags": ["x"]})["type"], "reference")
+        self.assertEqual(with_type({"type": "Gotcha", "tags": ["pattern"]})["type"], "gotcha")
+        self.assertEqual(with_type({"type": "concept", "tags": ["pattern"]})["type"], "pattern")
+
+
+class NoteCountTests(unittest.TestCase):
+    def test_status_counts_sessions_knowledge_and_shareable(self):
+        from claude_note import health
+        vault = Path(tempfile.mkdtemp())
+        (vault / "claude-session-2026-10-05-ab.md").write_text("---\ntags:\n  - log\n---\nx")
+        (vault / "synth.md").write_text("---\ntags:\n  - pattern\nassistant: claude-code\n---\nx")
+        (vault / "mine.md").write_text("no frontmatter")
+        (vault / ".claude-note").mkdir()
+        (vault / ".claude-note/q.md").write_text("x")
+        health.PUSH_STATE = vault / "none.json"
+        got = health._notes(vault)
+        self.assertEqual((got["sessions"], got["knowledge"], got["shareable"], got["pushed"]), (1, 2, 1, 0))
+
+    def test_synthesis_failures_are_read_from_the_worker_log(self):
+        from claude_note import health
+        vault = Path(tempfile.mkdtemp())
+        (vault / ".claude-note/logs").mkdir(parents=True)
+        (vault / ".claude-note/logs/worker-2026-10-05.log").write_text(
+            "2026-10-05 [ERROR] Synthesis failed for session ab: Claude CLI not found. Is it installed?\n")
+        got = health._synthesis(vault)
+        self.assertEqual(got["failed"], 1)
+        self.assertIn("Claude CLI not found", got["last_error"])

@@ -75,7 +75,9 @@ option, 3 missing prerequisite.
 
 Afterwards, `claude-note status --json` prints one health report (config,
 author, worker and push agents, last clean push, import sweep, hooks, which of
-`uv`, `claude`, `qmd` and `foresyn` are installed, and a `problems` list). It
+`uv`, `claude`, `qmd` and `foresyn` are installed, `notes` (session logs,
+knowledge notes, how many the push will share and how many it has sent),
+`synthesis` (failures in the newest worker log), and a `problems` list). It
 works before anything is configured, needs no network, and exits 1 when
 `problems` is not empty.
 
@@ -292,8 +294,11 @@ MIT
 
 The worker sweeps every 30 minutes for sources without a hook: Cursor chats,
 export zips (Claude `data-*.zip`, ChatGPT `<hash>-<date>.zip`, or any zip in
-`~/Documents/claude-note-imports/` that holds a `conversations.json`), and Codex
-rollouts the hook did not deliver. Each conversation is converted into a local
+`~/Documents/claude-note-imports/` that holds a `conversations.json`), Codex
+rollouts the hook did not deliver, and interactive Claude Code sessions in
+`~/.claude/projects` the hook did not deliver (sessions from before the hooks were
+installed, or from a Claude Code without them; `claude -p` and SDK runs are
+skipped, and at most 10 are queued per sweep since each costs one synthesis). Each conversation is converted into a local
 transcript under `~/.local/share/claude-note/transcripts/` and processed once
 (content hash); a conversation that grows is processed again. Imported zips move
 to `~/Documents/claude-note-imports/done/`. Codex subagent threads and
@@ -316,7 +321,10 @@ hooks review, or run `codex` in a terminal and accept the prompt. Until then the
 `claude-note push` sends curated notes to the Foresyn vault inbox
 (`inbox/<user>/<date>/<path with / as __>.md`) using `~/.foresyn/config.json`.
 Only notes whose frontmatter `type` is `pattern`, `gotcha`, `decision`,
-`reference`, `project` or `literature` go; session notes never do, nor anything
+`reference`, `project` or `literature` go. A note claude-note synthesized
+without a `type` (all of them before 1.6.0; new ones always get one) is typed by
+its first tag naming a type, else `reference`; a note a person wrote without a
+`type` is left alone. Session notes never go, nor anything
 with `share: false` or under a `private/` folder. API keys, tokens, passwords,
 private keys and credentialed connection strings are replaced with
 `[REDACTED: <kind>]` first; a note the scanner fails on is skipped. A note whose

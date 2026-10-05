@@ -283,7 +283,9 @@ Extract knowledge into this exact JSON schema:
 4. **Keep summaries concise** (2-4 sentences for concepts)
 5. **For note_ops:**
    - "upsert_block": Updates existing note with a managed block. Use managed_block_id like "synth-findings" or "synth-howto"
-   - "create": Only for genuinely NEW topics with no existing note
+   - "create": Only for genuinely NEW topics with no existing note. Its frontmatter must have
+     `type`: pattern (a reusable way of doing something), gotcha (a failure and its fix),
+     decision (a choice and why), project (state of a piece of work) or reference (facts)
    - "append": Add to a section in existing note (use sparingly)
 6. **Don't extract:**
    - Trivial file reads/writes with no learning
@@ -328,6 +330,12 @@ def parse_knowledge_pack(output: str) -> knowledge_pack.KnowledgePack:
         raise ValueError(f"Failed to parse JSON: {e}\nOutput was: {output[:500]}")
 
 
+def _claude_bin() -> str:
+    """The claude CLI: launchd's PATH misses nvm, bun and npm-global installs."""
+    from .health import _which
+    return _which("claude") or "claude"
+
+
 def synthesize_session(
     transcript: transcript_reader.TranscriptContent,
     vault_index: vault_indexer.VaultIndex,
@@ -363,7 +371,7 @@ def synthesize_session(
 
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt, "--model", model],
+            [_claude_bin(), "-p", prompt, "--model", model],
             capture_output=True,
             text=True,
             env=env,

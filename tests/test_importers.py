@@ -43,6 +43,7 @@ class ImporterTests(unittest.TestCase):
         importers.CURSOR_DB = self.tmp / "none.vscdb"
         importers.CURSOR_WORKSPACES = self.tmp / "ws"
         importers.CODEX_SESSIONS = self.tmp / "codex"
+        importers.CLAUDE_PROJECTS = self.tmp / "claude-projects"
         config.QUEUE_DIR = self.tmp / "queue"
         config.STATE_DIR = self.tmp / "state"
         for d in importers.WATCH_DIRS:
@@ -132,6 +133,50 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(importers.sweep()["codex"], 1)
         self.assertEqual({e.session_id for e in self._events()}, {"sess-a"})
         self.assertEqual(importers.sweep()["codex"], 0)
+
+    def test_claude_code_sweep_takes_interactive_sessions_the_hook_missed(self):
+        proj = importers.CLAUDE_PROJECTS / "-Users-me-repo"
+        proj.mkdir(parents=True)
+
+        def session(sid, entrypoint, age=3600):
+            path = proj / f"{sid}.jsonl"
+            path.write_text("\n".join(json.dumps(r) for r in [
+                {"type": "user", "sessionId": sid, "cwd": "/repo", "entrypoint": entrypoint,
+                 "message": {"role": "user", "content": "fix the push"}},
+                {"type": "assistant", "sessionId": sid, "message": {"role": "assistant",
+                 "content": [{"type": "text", "text": "done"}]}},
+            ]) + "\n")
+            old = time.time() - age
+            os.utime(path, (old, old))
+
+        session("cc-a", "cli")
+        session("cc-b", "sdk-cli")            # claude -p: automation
+        session("cc-c", "cli", age=60)        # still active
+        session("cc-d", "claude-vscode")
+        session("cc-e", "cli")
+        (proj / "cc-a").mkdir()               # a subagent folder is not globbed
+        (proj / "cc-a/agent-x.jsonl").write_text("{}\n")
+        config.STATE_DIR.mkdir(parents=True)
+        (config.STATE_DIR / "cc-e.json").write_text("{}")  # the hook already has it
+
+        self.assertEqual(importers.sweep()["claude-code"], 2)
+        self.assertEqual({e.session_id for e in self._events()}, {"cc-a", "cc-d"})
+        self.assertEqual(importers.sweep()["claude-code"], 0)
+
+    def test_claude_code_sweep_is_capped_per_run(self):
+        proj = importers.CLAUDE_PROJECTS / "p"
+        proj.mkdir(parents=True)
+        for n in range(3):
+            path = proj / f"s{n}.jsonl"
+            path.write_text("\n".join(json.dumps(r) for r in [
+                {"type": "user", "sessionId": f"s{n}", "entrypoint": "cli", "message": {"role": "user", "content": "q"}},
+                {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "a"}]}},
+            ]) + "\n")
+            old = time.time() - 3600 - n
+            os.utime(path, (old, old))
+        seen = {}
+        self.assertEqual(importers.sweep_claude_code(seen, 0, limit=2), 2)
+        self.assertEqual(importers.sweep_claude_code(seen, 0, limit=2), 1)
 
     def test_install_codex_hooks_is_idempotent_and_keeps_existing(self):
         path = self.tmp / "hooks.json"

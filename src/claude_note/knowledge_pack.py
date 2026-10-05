@@ -203,7 +203,7 @@ def get_schema_description() -> str:
         {
             "op": "create | upsert_block | append",
             "path": "string - note filename (e.g., 'my-note.md')",
-            "frontmatter": {"tags": [...], ...},  // for create only
+            "frontmatter": {"type": "pattern | gotcha | decision | reference | project", "tags": [...], ...},  // for create only; type is required
             "body_markdown": "string - content to write",
             "managed_block_id": "string",  // for upsert_block only
             "section": "string"  // for append only (e.g., '## Synthesized')
