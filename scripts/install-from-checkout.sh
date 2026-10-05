@@ -154,6 +154,15 @@ EOF
     echo "Wrote $CONFIG (vault $VAULT, synthesis $MODE, qmd $QMD)"
 fi
 
+# A config this script wrote in "log" mode because the claude CLI was missing then
+# is switched to "route" once claude is present, or sessions never become notes.
+# A config a person wrote (no "written by" header) is left alone.
+if [[ -f "$CONFIG" ]] && grep -q 'written by install-from-checkout.sh' "$CONFIG" \
+    && grep -qE '^mode[[:space:]]*=[[:space:]]*"log"' "$CONFIG" && command -v claude >/dev/null; then
+    sed -E 's|^mode[[:space:]]*=[[:space:]]*"log"|mode = "route"|' "$CONFIG" > "$CONFIG.tmp" && mv "$CONFIG.tmp" "$CONFIG"
+    echo "Synthesis switched from log to route (claude CLI found)"
+fi
+
 if [[ -n "$AUTHOR" ]]; then
     [[ -f "$CONFIG" ]] || { echo "no $CONFIG to record the author in; run with --non-interactive for a new machine" >&2; exit 1; }
     if grep -qE '^author[[:space:]]*=' "$CONFIG"; then

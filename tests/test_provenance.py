@@ -140,13 +140,21 @@ class HealthTests(unittest.TestCase):
         self.assertTrue(any("not configured" in p for p in out["problems"]))
         json.dumps(out)  # serializable
 
+    mode = "route"
+
+    def test_log_mode_with_claude_present_is_a_problem(self):
+        self.mode = "log"
+        with self.assertRaises(AssertionError) as caught:
+            self.test_healthy_machine()
+        self.assertIn("synthesis is off", str(caught.exception))
+
     def test_healthy_machine(self):
         with tempfile.TemporaryDirectory() as home:
             home = Path(home)
             vault = home / "vault"
             vault.mkdir()
             (home / "xdg/claude-note").mkdir(parents=True)
-            (home / "xdg/claude-note/config.toml").write_text(f'vault_root = "{vault}"\n[synthesis]\nmode = "log"\n')
+            (home / "xdg/claude-note/config.toml").write_text(f'vault_root = "{vault}"\n[synthesis]\nmode = "{self.mode}"\n')
             (home / "LaunchAgents").mkdir()
             (home / "LaunchAgents/com.claude-note.worker.plist").write_text("x")
             (home / "LaunchAgents/com.claude-note.push.plist").write_text("x")
@@ -160,9 +168,11 @@ class HealthTests(unittest.TestCase):
                     mock.patch.object(health, "STATE_DIR", home / "state"), \
                     mock.patch.object(health, "LAUNCH_AGENTS", home / "LaunchAgents"), \
                     mock.patch.object(health, "_launchd_loaded", return_value=True), \
+                    mock.patch.object(health, "_which", return_value="/usr/local/bin/tool"), \
                     mock.patch.object(provenance, "author_email", return_value="me@example.com"):
                 out = health.report()
         self.assertEqual(out["problems"], [])
+        self.assertEqual(out["notes"]["knowledge"], 0)
         self.assertTrue(out["ok"])
         self.assertTrue(out["hooks"]["claude_code"])
 

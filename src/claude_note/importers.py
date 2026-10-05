@@ -6,6 +6,9 @@ Pick up sessions from assistants that have no usable transcript hook.
   ~/Documents/claude-note-imports.
 - Codex / ChatGPT-app rollouts whose hook has not fired (hooks are skipped
   until trusted), so capture works before that one-time step.
+- Claude Code sessions the hook never saw: those from before the hooks were
+  installed (the first sweep looks back FIRST_RUN_LOOKBACK_DAYS, `import --since`
+  further) and those from a Claude Code whose settings lacked the hook.
 
 Each conversation is written as a Claude-Code-shaped JSONL transcript under
 ~/.local/share/claude-note/transcripts (local only) and queued as a
@@ -36,10 +39,12 @@ WATCH_DIRS = [HOME / "Downloads", IMPORTS_DIR]
 CURSOR_DB = HOME / "Library/Application Support/Cursor/User/globalStorage/state.vscdb"
 CURSOR_WORKSPACES = HOME / "Library/Application Support/Cursor/User/workspaceStorage"
 CODEX_SESSIONS = HOME / ".codex/sessions"
+CLAUDE_PROJECTS = HOME / ".claude/projects"
 
 SWEEP_INTERVAL = 1800           # seconds between sweeps inside the worker
 FIRST_RUN_LOOKBACK_DAYS = 7     # first sweep does not backfill all history
 CODEX_IDLE_SECONDS = 600        # a rollout untouched this long is finished
+CLAUDE_CODE_MAX_PER_SWEEP = 10  # each queued session costs one synthesis call; the rest waits a sweep
 
 
 # --------------------------------------------------------------------------
@@ -341,6 +346,73 @@ def sweep_codex(seen: dict, since_ts: float, sessions_dir: Path = None) -> int:
     return queued
 
 
+def _claude_code_meta(path: Path) -> dict:
+    """sessionId, cwd and entrypoint from the first lines of a Claude Code transcript."""
+    meta = {}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for n, line in enumerate(f):
+                if n > 50 or len(meta) == 3:
+                    break
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                for src, dst in (("sessionId", "id"), ("cwd", "cwd"), ("entrypoint", "entrypoint")):
+                    if row.get(src) and dst not in meta:
+                        meta[dst] = row[src]
+    except OSError:
+        pass
+    return meta
+
+
+def sweep_claude_code(seen: dict, since_ts: float, projects_dir: Path = None,
+                      limit: int = CLAUDE_CODE_MAX_PER_SWEEP) -> int:
+    """Queue interactive Claude Code sessions the hook did not deliver.
+
+    Scripted runs (`claude -p`, the SDK: entrypoint `sdk-*`) are skipped: they
+    are automation, including claude-note's own synthesis and the Sweat app's
+    Ask, and on a busy Mac they outnumber real sessions 50 to 1. Subagent
+    transcripts live one level deeper and are not globbed. Newest first, at most
+    `limit` per sweep; the rest stay unseen for the next sweep.
+    """
+    from .transcript_reader import read_transcript
+    from . import session_tracker
+
+    projects_dir = projects_dir or CLAUDE_PROJECTS
+    now = time.time()
+    candidates = []
+    for path in projects_dir.glob("*/*.jsonl"):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < since_ts or now - mtime < CODEX_IDLE_SECONDS:
+            continue
+        if seen.get(f"claude-code:{path.stem}") == mtime:
+            continue
+        candidates.append((mtime, path))
+    queued = 0
+    for mtime, path in sorted(candidates, reverse=True):
+        if queued >= limit:
+            break
+        key = f"claude-code:{path.stem}"
+        meta = _claude_code_meta(path)
+        session_id = meta.get("id") or path.stem
+        if str(meta.get("entrypoint", "")).startswith("sdk"):
+            seen[key] = mtime
+            continue
+        if key not in seen and session_tracker.get_state_file(session_id).exists():
+            seen[key] = mtime  # the hook already delivered this session
+            continue
+        content = read_transcript(path)
+        if content.user_prompts and content.assistant_texts:
+            _enqueue(session_id, path, meta.get("cwd", ""), content.user_prompts[0], "claude-code")
+            queued += 1
+        seen[key] = mtime
+    return queued
+
+
 # --------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------
@@ -352,7 +424,8 @@ def sweep(since: Optional[datetime] = None, zips: Iterable[Path] = ()) -> dict:
     counts, problems = {}, []
     for name, fn in (("zips", lambda: sweep_zips(seen, problems)),
                      ("cursor", lambda: sweep_cursor(seen, since_ts)),
-                     ("codex", lambda: sweep_codex(seen, since_ts))):
+                     ("codex", lambda: sweep_codex(seen, since_ts)),
+                     ("claude-code", lambda: sweep_claude_code(seen, since_ts))):
         try:
             counts[name] = fn()
         except Exception as e:  # one broken source must not stop the others

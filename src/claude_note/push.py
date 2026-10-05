@@ -2,7 +2,9 @@
 Daily push of curated notes to the shared Foresyn vault.
 
 Only knowledge notes leave the laptop: frontmatter `type` in PUSH_TYPES, not
-`share: false`, not under a `private/` folder. Session notes (raw transcripts)
+`share: false`, not under a `private/` folder. A knowledge note claude-note
+synthesized without a `type` (every one before 1.6.0) gets one inferred from its
+tags, else `reference`; see `infer_type`. Session notes (raw transcripts)
 never do. Every note is redacted before upload; a note the scanner cannot
 check is skipped for the run. Unchanged notes (same sha as the last push of
 that source path) cause no request at all.
@@ -92,15 +94,71 @@ def frontmatter(text: str) -> dict:
     return out
 
 
+# Tags that mark a note as a session log or the synthesis inbox: never knowledge.
+NOT_KNOWLEDGE_TAGS = {"log", "inbox", "session"}
+
+
+def tags(text: str) -> list[str]:
+    """The frontmatter `tags`, as a flow list (`[a, b]`) or a block list (`- a`)."""
+    m = re.match(r"---\r?\n(.*?)\r?\n---", text, re.S)
+    if not m:
+        return []
+    lines = m.group(1).splitlines()
+    for i, line in enumerate(lines):
+        kv = re.match(r"tags:\s*(.*)$", line)
+        if not kv:
+            continue
+        inline = kv.group(1).strip()
+        if inline.startswith("["):
+            return [t.strip().strip("\"'").lower() for t in inline.strip("[]").split(",") if t.strip()]
+        if inline:
+            return [inline.strip("\"'").lower()]
+        out = []
+        for item in lines[i + 1:]:
+            it = re.match(r"\s*-\s*(.+)$", item)
+            if not it:
+                break
+            out.append(it.group(1).strip().strip("\"'").lower())
+        return out
+    return []
+
+
+def infer_type(text: str) -> Optional[str]:
+    """A push type for an untyped note claude-note synthesized, else None.
+
+    claude-note's synthesizer never wrote `type:` before 1.6.0, so every note it
+    created was skipped by the push: on a teammate's Mac 49 of 49 notes were "not
+    eligible" and nothing reached the company vault. A synthesized note is known
+    by the `assistant:` stamp claude-note puts on every note it writes (or its
+    `claude-note` tag); session logs and the inbox are tagged `log` and stay home.
+    The type is the first tag naming one, else `reference`. Notes a person wrote
+    without a `type` are not claude-note's to share and stay untouched.
+    """
+    fm = frontmatter(text)
+    note_tags = tags(text)
+    if not (fm.get("assistant") or "claude-note" in note_tags):
+        return None
+    if NOT_KNOWLEDGE_TAGS & set(note_tags):
+        return None
+    for tag in note_tags:
+        if tag in PUSH_TYPES:
+            return tag
+    return "reference"
+
+
 def eligible(rel: Path, text: str) -> Optional[str]:
     """The note type if this note may leave the laptop, else None."""
     if any(p.startswith(".") or p == "private" for p in rel.parts[:-1]):
         return None
+    if rel.name.startswith("claude-session-"):
+        return None  # a raw session log, whatever its frontmatter says
     fm = frontmatter(text)
-    note_type = fm.get("type", "").lower()
-    if note_type not in PUSH_TYPES or fm.get("share", "").lower() == "false":
+    if fm.get("share", "").lower() == "false":
         return None
-    return note_type
+    note_type = fm.get("type", "").lower()
+    if not note_type:
+        return infer_type(text)
+    return note_type if note_type in PUSH_TYPES else None
 
 
 STUB_MIN_CHARS = 200
