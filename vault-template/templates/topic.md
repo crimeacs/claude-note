@@ -1,4 +1,5 @@
 ---
+type: reference
 tags:
   - topic
 aliases: []
@@ -23,4 +24,4 @@ created: {{date}}
 
 ## Related
 
-- [[]]
+<!-- Link only to existing relevant notes. -->

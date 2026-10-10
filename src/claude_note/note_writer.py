@@ -1,5 +1,6 @@
 """Markdown note generation for session notes."""
 
+import hashlib
 import re
 from datetime import datetime
 from pathlib import Path
@@ -26,13 +27,19 @@ def get_note_filename(state: models.SessionState) -> str:
     sid = state.session_id
     if len(sid) == 36 and sid[14] == "7":
         short_id = sid[-8:]
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", short_id):
+        short_id = hashlib.sha256(sid.encode("utf-8")).hexdigest()[:8]
 
     return f"claude-session-{date_str}-{short_id}.md"
 
 
 def get_note_path(state: models.SessionState) -> Path:
-    """Get full path for session note."""
-    return config.VAULT_ROOT / get_note_filename(state)
+    """Keep raw capture apart from knowledge; retain old root notes in place."""
+    filename = get_note_filename(state)
+    legacy_path = config.VAULT_ROOT / filename
+    if legacy_path.exists():
+        return legacy_path
+    return config.VAULT_ROOT / "sessions" / filename
 
 
 def calculate_duration(state: models.SessionState) -> str:
@@ -247,6 +254,7 @@ def generate_note_content(state: models.SessionState) -> str:
 
     # Build the note
     content = f"""---
+type: session
 tags:
   - log
   - claude-note
@@ -276,9 +284,6 @@ session_id: {state.session_id}
 
 (Questions discovered during session)
 
-## Related
-
-- [[obsidian-workflow]]
 """
 
     return content
@@ -292,6 +297,7 @@ def write_session_note(state: models.SessionState) -> Path:
     Returns the path to the written note.
     """
     note_path = get_note_path(state)
+    note_path.parent.mkdir(parents=True, exist_ok=True)
     content = generate_note_content(state)
 
     # Atomic write

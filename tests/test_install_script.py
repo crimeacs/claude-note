@@ -6,6 +6,7 @@ tests.
 """
 
 import json
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -113,6 +114,39 @@ class BundledInstallTests(unittest.TestCase):
         out = self.run_script()
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertFalse((self.home / ".config/claude-note/config.toml").exists())
+
+    def test_missing_starters_are_added_without_replacing_vault_preferences(self):
+        template = self.bundle / "vault-template"
+        (template / ".obsidian").mkdir(exist_ok=True)
+        (template / ".obsidian/graph.json").write_text('{"starter": true}')
+        (template / ".obsidian/types.json").write_text('{"types": {}}')
+        (template / "templates/new-type.md").write_text("new starter")
+        vault = self.home / "notes"
+        (vault / ".obsidian").mkdir(parents=True)
+        (vault / ".obsidian/graph.json").write_text('{"custom": true}')
+        (vault / "templates").mkdir()
+        (vault / "templates/new-type.md").write_text("custom template")
+        result = self.run_script("--non-interactive", "--vault", str(vault))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((vault / ".obsidian/graph.json").read_text(), '{"custom": true}')
+        self.assertEqual((vault / "templates/new-type.md").read_text(), "custom template")
+        self.assertTrue((vault / ".obsidian/types.json").exists())
+        self.assertTrue((vault / "templates/decision.md").exists())
+
+    def test_source_metadata_escapes_paths_and_worker_plist_escapes_vault(self):
+        renamed = self.tmp / 'bundle "quoted"'
+        self.bundle.rename(renamed)
+        self.bundle = renamed
+        vault = self.home / "Research & Notes"
+        result = self.run_script("--non-interactive", "--vault", str(vault))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        source = json.loads((self.home / ".local/share/claude-note/installed-from.json").read_text())
+        self.assertEqual(source["path"], str(self.bundle.resolve()))
+        self.assertEqual(source["repository"], "https://github.com/crimeacs/claude-note.git")
+        if sys.platform == "darwin":
+            with (self.home / "Library/LaunchAgents/com.claude-note.worker.plist").open("rb") as f:
+                worker = plistlib.load(f)
+            self.assertTrue(worker["StandardOutPath"].startswith(str(vault)))
 
 
 if __name__ == "__main__":

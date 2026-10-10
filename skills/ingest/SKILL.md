@@ -1,186 +1,70 @@
 ---
 name: ingest
-description: Ingest PDFs, DOCX, and URLs into your knowledge vault as atomic, interconnected notes. Extracts concepts with semantic deduplication. Use when you want to turn research papers, documentation, or team docs into permanent knowledge.
+description: Turn a supplied research paper, article, or internal document into source-backed atomic notes in the configured claude-note vault. Use for document ingestion, including URLs fetched into a local file first.
 argument-hint: [file-or-url] [--internal] [--dry-run]
 allowed-tools: Read, Write, Bash, WebFetch
 ---
 
-# Document Ingestion Skill
+# Document ingestion
 
-Turn external documents into structured, linkable knowledge notes with semantic deduplication.
+Use the installed `claude-note ingest` command to preserve the vault's writing,
+provenance and merge behavior. The CLI accepts one local `.pdf`, `.docx`, `.md`,
+or `.txt` file per invocation. It calls the local Claude CLI for extraction.
 
-## Quick Start
-
-```
-/ingest ~/Downloads/attention-paper.pdf
-/ingest https://example.com/api-docs --internal
-/ingest spec.docx --title "API Specification v2"
-/ingest paper.pdf --dry-run  # Preview without writing
-```
-
-## Features
-
-- **Semantic deduplication**: Merges similar concepts instead of creating duplicates
-- **Atomic notes**: Extracts 3-15 typed concepts per document
-- **Multi-source accumulation**: Concepts grow richer with each new source
-- **Dual mode**: Literature (research) vs Internal (team docs)
-
-## Modes
-
-- **Literature** (default): Creates `literature/lit-{slug}.md` for external research, papers, articles
-- **Internal** (`--internal`): Creates `internal/int-{slug}.md` for team docs, internal specs, processes
-
-## Arguments
-
-| Argument | Description |
-|----------|-------------|
-| `[file-or-url]` | Path to document (.pdf, .docx, .md, .txt) or URL |
-| `--internal` | Create internal note instead of literature note |
-| `--title "..."` | Override the note title (default: derived from filename/URL) |
-| `--dry-run` | Preview what would be extracted without writing files |
-
-## Prerequisites
-
-This skill requires `claude-note` CLI for full functionality (deduplication, PDF parsing).
-
-Check if installed:
 ```bash
-claude-note --version
+claude-note ingest "/path/to/paper.pdf"
+claude-note ingest "/path/to/runbook.md" --internal --title "Service Runbook"
+claude-note ingest "/path/to/paper.pdf" --dry-run
 ```
 
-Install if needed:
-```bash
-# Using uv (recommended)
-uv tool install git+https://github.com/crimeacs/claude-note.git
+Resolve the configured vault before writing. `CLAUDE_NOTE_VAULT_ROOT` overrides
+`vault_root` in `${XDG_CONFIG_HOME:-~/.config}/claude-note/config.toml`.
+`claude-note health` reports configuration; `claude-note ingest --help` lists
+supported flags. If no destination is configured or inferable from the user's
+request, ask for the destination. Routine ingestion and evidence-backed merges
+within the authorized vault do not require another permission prompt.
 
-# Or using pipx
-pipx install git+https://github.com/crimeacs/claude-note.git
-```
+## Sources and output
 
-**Without CLI**: The skill still works for basic ingestion using built-in tools (pdftotext, pandoc), but advanced features like semantic deduplication require the CLI.
+For a URL, fetch its readable content, save an explicitly named local document,
+and include the original URL in that source. Then pass the saved file to the CLI.
+Retain the URL on the resulting source note. Do not pass a URL directly to the
+CLI or claim the CLI fetches web pages. For several files, invoke the command
+once per file.
 
-## Process
+Literature mode writes `literature/lit-*.md` with `type: literature`; internal
+mode writes `internal/int-*.md` with `type: source`. Each document has a source
+index and source-linked concept notes. Use the amount of knowledge the document
+supports; no fixed concept count is a quality target. Keep source findings,
+interpretation and unanswered questions distinguishable. Add only verified
+existing relationships, preserving project boundaries and human annotations.
 
-When the user invokes `/ingest`, follow these steps:
+Read [literature-format.md](references/literature-format.md) for external sources
+or [internal-format.md](references/internal-format.md) for internal material.
+[Sample output](examples/sample-output.md) illustrates the source/concept pair.
 
-### 1. Read the Document
+## Existing knowledge
 
-**For files:**
-- Use the Read tool for `.md` and `.txt` files
-- For `.pdf` files: use Bash with `pdftotext` or `pandoc` to extract text
-- For `.docx` files: use Bash with `pandoc -t plain` to extract text
+Exact filenames are checked first. Semantic ingestion candidates require QMD
+`enabled = true`, an explicit collection for this vault, and
+`ingest_dedup_enabled = true` in `[qmd]`. This optional feature uses vector
+retrieval and may load an embedding model. A search rank is a candidate signal,
+not proof of equivalence: the CLI resolves the result to a real file in the
+configured output directory and asks Claude whether source-backed information
+is worth adding. An unrelated collection or a source index is never a concept
+merge target. When QMD is disabled or unavailable, exact filename handling and
+new-note creation still work.
 
-**For URLs:**
-- Use WebFetch to retrieve the content
+The source index links to actual created or merged concepts. Existing source
+indexes update a managed block; other human text is preserved. If a filename is
+already owned by another source or an unrelated note, report the conflict and
+choose an appropriate distinct source title within the user's scope. Never
+replace human content merely because titles or scores are similar.
 
-### 2. Get Configuration
+## Finish
 
-Read the vault path from `~/.config/claude-note/config.toml`:
-```bash
-cat ~/.config/claude-note/config.toml
-```
-
-Look for `vault_root = "..."` to find where notes should be created.
-
-If no config exists, ask the user where to create notes.
-
-### 3. Extract Knowledge
-
-Analyze the content and extract:
-- **Summary**: 2-3 sentence overview of what the document covers
-- **Key Concepts**: Main ideas, terminology, and definitions (3-7 concepts)
-- **Highlights**: Important findings, quotes, or actionable insights
-- **Questions**: Open questions or things worth exploring further
-- **Related Topics**: Connections to other knowledge areas
-
-### 4. Check for Duplicates
-
-Before creating a new note, check if a similar note exists:
-```bash
-ls {vault_path}/literature/ 2>/dev/null | grep -i "{keywords}"
-ls {vault_path}/internal/ 2>/dev/null | grep -i "{keywords}"
-```
-
-If a similar note exists, ask the user if they want to:
-1. Merge new content into the existing note
-2. Create a separate note anyway
-3. Cancel
-
-### 5. Create the Note
-
-Write a structured note using the appropriate format:
-- Literature notes: See [literature-format.md](references/literature-format.md)
-- Internal notes: See [internal-format.md](references/internal-format.md)
-
-**Filename conventions:**
-- Literature: `literature/lit-{slug}.md`
-- Internal: `internal/int-{slug}.md`
-
-Where `{slug}` is a kebab-case version of the title (max 50 chars).
-
-### 6. Confirm
-
-Tell the user what was created and offer to open the note.
-
-## Example Workflow
-
-User: `/ingest ~/Downloads/transformer-paper.pdf`
-
-1. Extract text from PDF:
-   ```bash
-   pdftotext ~/Downloads/transformer-paper.pdf - 2>/dev/null || pandoc ~/Downloads/transformer-paper.pdf -t plain
-   ```
-
-2. Read config:
-   ```bash
-   cat ~/.config/claude-note/config.toml
-   ```
-
-3. Analyze the content and extract knowledge
-
-4. Create note at `{vault_root}/literature/lit-attention-is-all-you-need.md`
-
-5. Confirm to user what was created
-
-## URL Ingestion
-
-For URLs, use WebFetch to get the content:
-
-```
-/ingest https://docs.example.com/api-guide --internal
-```
-
-WebFetch will retrieve the content, then follow the same extraction process.
-
-## Dry Run
-
-Preview what would be extracted without writing files:
-
-```
-/ingest paper.pdf --dry-run
-```
-
-This shows the extracted knowledge and where it would be saved, but doesn't create any files.
-
-## Tips
-
-- Use descriptive filenames or `--title` for better slugs
-- Review created notes and add manual annotations
-- Link to existing topic notes in your vault using `[[note-name]]` syntax
-- For large documents, focus on the most important 3-5 concepts
-- Use `--dry-run` to preview before committing
-
-## See Also
-
-- [literature-format.md](references/literature-format.md) - Template for literature notes
-- [internal-format.md](references/internal-format.md) - Template for internal notes
-- [sample-output.md](examples/sample-output.md) - Example of a created note
-
-## CLI Alternative
-
-For batch processing or automation, use the CLI command instead:
-```bash
-claude-note ingest ~/papers/*.pdf
-```
-
-The CLI calls Claude API programmatically and is better for processing multiple documents.
+Inspect the returned paths and source backlinks. Summarize what was created,
+merged or skipped, and any extraction/merge failures. A dry run extracts and
+previews without writing vault notes; it still invokes the extraction model.
+Do not claim semantic candidates were searched during a dry run: merging happens
+only during the write phase. Publication or external sharing is a separate act.

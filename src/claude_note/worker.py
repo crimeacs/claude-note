@@ -148,9 +148,12 @@ def run_synthesis(state: models.SessionState, logger: logging.Logger) -> bool:
         logger.info(f"Synthesizing session {state.session_id[:8]}...")
         pack = synthesizer.synthesize_from_state(state, vault_index)
 
-        if pack is None or pack.is_empty():
-            logger.info(f"Session {state.session_id[:8]}: no knowledge extracted")
+        if pack is None:
+            logger.warning(f"Session {state.session_id[:8]}: synthesis returned no result")
             return False
+        if pack.is_empty():
+            logger.info(f"Session {state.session_id[:8]}: no knowledge extracted")
+            return True
 
         # Update session note summary with synthesis results
         update_session_summary(state, pack, logger)
@@ -169,7 +172,7 @@ def run_synthesis(state: models.SessionState, logger: logging.Logger) -> bool:
             for err in results["errors"]:
                 logger.warning(f"Synthesis error: {err}")
 
-        return True
+        return not results["errors"]
 
     except Exception as e:
         logger.error(f"Synthesis failed for session {state.session_id[:8]}: {e}")
@@ -188,6 +191,9 @@ def process_session(session_id: str, events: list, logger: logging.Logger) -> bo
             return False
 
         try:
+            previous = session_tracker.load_session_state(session_id)
+            processed = set(previous.processed_event_ids) if previous else set()
+            new_events = [event for event in events if event.event_id not in processed]
             # Update session state from events
             state = session_tracker.update_session_from_events(session_id, events)
 
@@ -201,12 +207,13 @@ def process_session(session_id: str, events: list, logger: logging.Logger) -> bo
                 return False
 
             # Check if we should write now
-            immediate = session_tracker.should_flush_immediately(events)
+            immediate = session_tracker.should_flush_immediately(new_events)
             debounce_ok = state.should_write(config.DEBOUNCE_SECONDS)
 
             # Skip if already written after last event (even for immediate events)
             already_written = session_tracker.is_session_written(state)
             if already_written:
+                session_tracker.run_pending_synthesis(state, lambda s: run_synthesis(s, logger))
                 logger.debug(f"Session {session_id[:8]}: already written, skipping")
                 return False
 
@@ -226,12 +233,12 @@ def process_session(session_id: str, events: list, logger: logging.Logger) -> bo
                 if count > 0:
                     logger.info(f"Promoted {count} questions to open-questions.md")
 
-                # Run synthesis on Stop/SessionEnd (if enabled)
-                run_synthesis(state, logger)
+                session_tracker.schedule_synthesis(state)
 
             # Mark as written (update state object directly, then save once)
             state.last_write_ts = datetime.utcnow().isoformat() + "Z"
             session_tracker.save_session_state(state)
+            session_tracker.run_pending_synthesis(state, lambda s: run_synthesis(s, logger))
 
             return True
 
@@ -252,6 +259,8 @@ def poll_once(logger: logging.Logger) -> int:
         if event.session_id not in sessions:
             sessions[event.session_id] = []
         sessions[event.session_id].append(event)
+    for session_id in session_tracker.get_pending_synthesis_sessions():
+        sessions.setdefault(session_id, [])
 
     notes_written = 0
     for session_id, events in sessions.items():

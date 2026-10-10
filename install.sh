@@ -5,12 +5,27 @@
 # Installs claude-note using uv for session logging with Claude Code.
 #
 # Usage:
-#   curl -sSL https://raw.githubusercontent.com/artemiin/claude-note/main/install.sh | bash
+#   curl -sSL https://raw.githubusercontent.com/crimeacs/claude-note/main/install.sh | bash
 #   # or
 #   ./install.sh
 #
 
 set -e
+
+copy_missing_tree() {
+    local source="$1" target="$2" entry destination
+    mkdir -p "$target"
+    for entry in "$source"/* "$source"/.[!.]* "$source"/..?*; do
+        [[ -e "$entry" || -L "$entry" ]] || continue
+        destination="$target/${entry##*/}"
+        if [[ -d "$entry" && ! -L "$entry" ]]; then
+            copy_missing_tree "$entry" "$destination"
+        elif [[ ! -e "$destination" && ! -L "$destination" ]]; then
+            cp "$entry" "$destination"
+        fi
+    done
+    return 0
+}
 
 # Colors for output
 RED='\033[0;31m'
@@ -21,7 +36,7 @@ NC='\033[0m' # No Color
 
 # Installation paths
 CONFIG_DIR="${HOME}/.config/claude-note"
-REPO_URL="https://github.com/artemiin/claude-note.git"
+REPO_URL="https://github.com/crimeacs/claude-note.git"
 
 # Detect OS
 OS="$(uname -s)"
@@ -242,10 +257,18 @@ if [[ -d "$TEMPLATE_DIR" ]]; then
             echo -e "  ${GREEN}✓${NC} Created open-questions.md"
         fi
 
-        # Copy templates directory
-        if [[ ! -d "${VAULT_PATH}/templates" ]]; then
-            cp -r "${TEMPLATE_DIR}/templates" "${VAULT_PATH}/"
-            echo -e "  ${GREEN}✓${NC} Created templates/"
+        # Fill missing starter files without replacing the owner's templates
+        # or Obsidian preferences when rerunning the installer.
+        if [[ -d "${TEMPLATE_DIR}/templates" ]]; then
+            mkdir -p "${VAULT_PATH}/templates"
+            copy_missing_tree "${TEMPLATE_DIR}/templates" "${VAULT_PATH}/templates"
+        fi
+        if [[ -d "${TEMPLATE_DIR}/.obsidian" ]]; then
+            mkdir -p "${VAULT_PATH}/.obsidian"
+            copy_missing_tree "${TEMPLATE_DIR}/.obsidian" "${VAULT_PATH}/.obsidian"
+        fi
+        if [[ ! -e "${VAULT_PATH}/obsidian-workflow.md" && -f "${TEMPLATE_DIR}/obsidian-workflow.md" ]]; then
+            cp "${TEMPLATE_DIR}/obsidian-workflow.md" "${VAULT_PATH}/"
         fi
     else
         echo "  Skipping templates"
@@ -432,9 +455,9 @@ echo
 echo "1. Add hooks to Claude Code (~/.claude/settings.json):"
 echo
 echo '   "hooks": {'
-echo '     "PostToolUse": [{ "hooks": [{ "type": "command", "command": "claude-note enqueue", "timeout": 5000 }] }],'
-echo '     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "claude-note enqueue", "timeout": 5000 }] }],'
-echo '     "Stop": [{ "hooks": [{ "type": "command", "command": "claude-note enqueue", "timeout": 5000 }] }]'
+echo '     "PostToolUse": [{ "hooks": [{ "type": "command", "command": "claude-note enqueue", "timeout": 10 }] }],'
+echo '     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "claude-note enqueue", "timeout": 10 }] }],'
+echo '     "Stop": [{ "hooks": [{ "type": "command", "command": "claude-note enqueue", "timeout": 10 }] }]'
 echo '   }'
 echo
 echo "2. Check status:"

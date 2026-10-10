@@ -46,14 +46,16 @@ def _launchd_loaded(label: str) -> bool:
 
 
 def _heartbeat(path: Path, stale_after: float) -> dict:
-    if not path.exists():
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
         return {"last_ok": None, "age_seconds": None, "stale": True, "counts": {}}
-    age = time.time() - path.stat().st_mtime
+    age = time.time() - mtime
     try:
         counts = json.loads(path.read_text()).get("counts", {})
     except (OSError, ValueError, AttributeError):
         counts = {}
-    return {"last_ok": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(path.stat().st_mtime)),
+    return {"last_ok": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(mtime)),
             "age_seconds": int(age), "stale": age > stale_after, "counts": counts}
 
 
@@ -88,9 +90,23 @@ PUSH_STATE = STATE_DIR / "push-state.json"
 def _notes(vault: Path) -> dict:
     """What the loop produced: session logs, knowledge notes, how many of those the
     push will share, and how many it has sent. One frontmatter read per note."""
-    out = {"sessions": 0, "knowledge": 0, "shareable": 0, "pushed": 0, "complete": True}
+    out = {"sessions": 0, "knowledge": 0, "shareable": 0, "pushed": 0,
+           "legacy_unbound": 0, "complete": True}
     try:
-        out["pushed"] = len(json.loads(PUSH_STATE.read_text()))
+        receipts = json.loads(PUSH_STATE.read_text())
+        if isinstance(receipts, dict) and receipts.get("version") == 2:
+            known = set()
+            destinations = receipts.get("destinations")
+            for destination in destinations.values() if isinstance(destinations, dict) else []:
+                if isinstance(destination, dict) and isinstance(destination.get("notes"), dict):
+                    known.update(destination["notes"])
+            out["pushed"] = len(known)
+            legacy = receipts.get("legacy")
+            out["legacy_unbound"] = len(set(legacy) - known) if isinstance(legacy, dict) else 0
+        elif isinstance(receipts, dict):
+            # Old receipts have no destination: report them without claiming
+            # they were pushed to today's configured workspace.
+            out["legacy_unbound"] = len(receipts)
     except (OSError, ValueError, TypeError):
         pass
     try:
@@ -120,11 +136,40 @@ def _notes(vault: Path) -> dict:
     return out
 
 
+def _synthesis_state(vault: Path) -> dict:
+    """Bounded retry diagnostics without importing the configured runtime."""
+    out = {"pending": 0, "failed_pending": 0, "state_complete": True}
+    deadline = time.monotonic() + NOTE_SCAN_DEADLINE
+    for path in (vault / ".claude-note/state").glob("*.json"):
+        if time.monotonic() > deadline:
+            out["state_complete"] = False
+            break
+        if path.name == "vault_index.json" or path.is_symlink() or not path.is_file():
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read(4 * 1024 * 1024 + 1)
+            if len(text) > 4 * 1024 * 1024:
+                out["state_complete"] = False
+                continue
+            state = json.loads(text)
+        except (OSError, ValueError, UnicodeError):
+            continue
+        if not isinstance(state, dict) or not state.get("session_id") or state.get("synthesis_pending") is not True:
+            continue
+        out["pending"] += 1
+        attempts = state.get("synthesis_attempts")
+        if isinstance(attempts, int) and attempts > 0:
+            out["failed_pending"] += 1
+    return out
+
+
 def _synthesis(vault: Path) -> dict:
     """Failures in the newest worker log: a synthesis that cannot run (no claude
     CLI on the worker's PATH, an unknown model) leaves session logs and no notes."""
     logs = sorted((vault / ".claude-note/logs").glob("worker-[0-9]*.log"))
-    out = {"failed": 0, "succeeded": 0, "last_error": None, "log": str(logs[-1]) if logs else None}
+    out = {"failed": 0, "succeeded": 0, "last_error": None, "log": str(logs[-1]) if logs else None,
+           **_synthesis_state(vault)}
     if not logs:
         return out
     try:
@@ -145,7 +190,8 @@ def _synthesis(vault: Path) -> dict:
 
 def report() -> dict:
     config_path, cfg = _config()
-    vault_root = os.environ.get("CLAUDE_NOTE_VAULT_ROOT") or cfg.get("vault_root") or ""
+    vault_root = (os.environ.get("CLAUDE_NOTE_VAULT") or os.environ.get("CLAUDE_NOTE_VAULT_ROOT")
+                  or cfg.get("vault_root") or "")
     vault = Path(vault_root).expanduser() if vault_root else None
     try:
         installed_from = json.loads((STATE_DIR / "installed-from.json").read_text())
@@ -158,6 +204,12 @@ def report() -> dict:
             **_heartbeat(LOGS / "push.ok", PUSH_STALE_HOURS * 3600)}
     sweep = _heartbeat(LOGS / "import-sweep.ok", IMPORT_STALE_SECONDS)
     sweep_counts = sweep.pop("counts")
+    try:
+        attempt = json.loads((LOGS / "import-sweep.json").read_text())
+        if isinstance(attempt, dict) and isinstance(attempt.get("counts"), dict):
+            sweep_counts = attempt["counts"]
+    except (OSError, ValueError):
+        pass
     sweep["problems"] = list(sweep_counts.get("problems", [])) if isinstance(sweep_counts, dict) else []
     queue_dir = vault / ".claude-note/queue" if vault else None
 
@@ -168,7 +220,8 @@ def report() -> dict:
         "vault_root": str(vault) if vault else None,
         "vault_exists": bool(vault and vault.is_dir()),
         "author": provenance.author_email(),
-        "synth_mode": (cfg.get("synthesis") or {}).get("mode", "route") if vault_root else None,
+        "synth_mode": (os.environ.get("CLAUDE_NOTE_MODE", (cfg.get("synthesis") or {}).get("mode", "route"))
+                       if vault_root else None),
         "installed_from": installed_from,
         "binaries": {name: _which(name) for name in ("claude-note", "uv", "claude", "qmd", "foresyn")},
         "worker": {"agent_installed": worker_plist.exists(), "loaded": _launchd_loaded(WORKER_LABEL)},
@@ -191,22 +244,28 @@ def report() -> dict:
     if sys.platform == "darwin":
         if not out["worker"]["loaded"]:
             problems.append("worker not running (launchd com.claude-note.worker)")
-        if not push["agent_installed"]:
-            problems.append("daily push not installed (claude-note push --install-agent)")
-        elif push["last_ok"] is None:
+        if not push["agent_installed"] or push["last_ok"] is None:
             pass  # installed but has not reached 03:00 yet: not a problem
         elif push["stale"]:
             problems.append(f"last clean push {push['age_seconds'] // 3600} h ago; see {LOGS}/push.log")
-    if not out["hooks"]["claude_code"]:
-        problems.append("Claude Code hooks missing (claude-note install-claude-hooks)")
+    if not any(out["hooks"].values()) and (sweep["last_ok"] is None or sweep["stale"]):
+        problems.append("capture not configured: install assistant hooks or run a clean import sweep")
     if not out["binaries"]["claude"] and out["synth_mode"] not in (None, "log"):
         problems.append("claude CLI not found: sessions are logged but not synthesized")
     if out["binaries"]["claude"] and out["synth_mode"] == "log":
-        problems.append(f"synthesis is off (mode = \"log\" in {config_path}): sessions are logged "
+        mode_source = "CLAUDE_NOTE_MODE" if "CLAUDE_NOTE_MODE" in os.environ else str(config_path)
+        problems.append(f"synthesis is off (mode = \"log\" from {mode_source}): sessions are logged "
                         "but never become notes; set mode = \"route\"")
     synth = out["synthesis"] or {}
     if synth.get("failed") and not synth.get("succeeded"):
         problems.append(f"synthesis failing: {synth.get('last_error')}")
+    if synth.get("failed_pending"):
+        problems.append(f"synthesis pending retry for {synth['failed_pending']} session(s); see the worker log")
+    if out["worker"]["loaded"] and sweep["stale"]:
+        if sweep["last_ok"] is None:
+            problems.append("import sweep has not completed successfully; see the worker log")
+        else:
+            problems.append(f"last clean import sweep {sweep['age_seconds'] // 60} min ago; see the worker log")
     problems.extend(f"import: {p}" for p in sweep["problems"])
     out["problems"] = problems
     out["ok"] = not problems

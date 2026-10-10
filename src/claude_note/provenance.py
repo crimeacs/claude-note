@@ -28,6 +28,7 @@ _IMPORTER_SOURCES = {
     "claude-ai": "claude-app",
     "chatgpt": "chatgpt",
     "codex": "codex",
+    "claude-code": "claude-code",
 }
 
 FORESYN_CONFIG = Path.home() / ".foresyn/config.json"
@@ -76,6 +77,8 @@ def _foresyn_email() -> str:
     try:
         cfg = json.loads(FORESYN_CONFIG.read_text())
     except (OSError, ValueError):
+        return ""
+    if not isinstance(cfg, dict):
         return ""
     for key in ("email", "userEmail", "user_email"):
         value = cfg.get(key)

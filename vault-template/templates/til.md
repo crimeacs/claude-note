@@ -1,4 +1,5 @@
 ---
+type: reference
 tags:
   - til
 created: {{date}}

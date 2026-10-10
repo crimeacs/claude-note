@@ -9,10 +9,22 @@ from pathlib import Path
 from . import __version__
 from . import config
 
-REPO_URL = "https://github.com/artemiin/claude-note"
-RELEASES_API = "https://api.github.com/repos/artemiin/claude-note/releases/latest"
+REPO_URL = "https://github.com/crimeacs/claude-note"
+RELEASES_API = "https://api.github.com/repos/crimeacs/claude-note/releases/latest"
 CHECK_INTERVAL_HOURS = 24
 VERSION_CHECK_FILE = config.STATE_DIR / "version-check.json"
+
+
+def managed_source() -> dict | None:
+    """A checkout or app bundle must keep its own update channel and pinned ref."""
+    path = Path.home() / ".local/share/claude-note/installed-from.json"
+    try:
+        source = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if isinstance(source, dict) and source.get("source") in ("git", "bundle"):
+        return source
+    return None
 
 
 def get_latest_version() -> str | None:
@@ -46,6 +58,8 @@ def should_check() -> bool:
         return True
     try:
         data = json.loads(VERSION_CHECK_FILE.read_text())
+        if data.get("repository") != REPO_URL:
+            return True
         last_check = datetime.fromisoformat(data.get("last_check", ""))
         return datetime.now(timezone.utc) - last_check > timedelta(hours=CHECK_INTERVAL_HOURS)
     except Exception:
@@ -59,11 +73,14 @@ def save_check_result(latest: str | None, update_available: bool):
         "last_check": datetime.now(timezone.utc).isoformat(),
         "latest_version": latest,
         "update_available": update_available,
+        "repository": REPO_URL,
     }))
 
 
 def check_for_update(logger) -> bool:
     """Check for updates and log if available. Returns True if update available."""
+    if managed_source():
+        return False
     if not should_check():
         # Use cached result
         try:
@@ -90,6 +107,10 @@ def check_for_update(logger) -> bool:
 
 def get_update_status() -> dict:
     """Get current update status for CLI display."""
+    source = managed_source()
+    if source:
+        return {"current": __version__, "latest": None, "update_available": False,
+                "managed_source": source}
     # Force fresh check for explicit status query
     latest = get_latest_version()
     if latest is None:

@@ -1,0 +1,24 @@
+{
+  "synthetic": true,
+  "scenario": "Lost response after committed SQLite insert",
+  "server_behavior": "UNIQUE(operation_key) + upsert ON CONFLICT DO NOTHING",
+  "broken": {
+    "key_strategy": "fresh key per attempt",
+    "rows_after_lost_response": 1,
+    "rows_after_retry": 2,
+    "retry_returned_original": false
+  },
+  "fixed": {
+    "key_strategy": "same key per operation",
+    "rows_after_lost_response": 1,
+    "rows_after_retry": 1,
+    "retry_returned_original": true
+  },
+  "assertions": "passed",
+  "clips": [
+    "First insert committed; response lost.",
+    "Fresh key retry: 2 rows.",
+    "Same operation key + UNIQUE + upsert: 1 row.",
+    "Retry returned the existing job."
+  ]
+}

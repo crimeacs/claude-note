@@ -127,9 +127,16 @@ def _get_config_value(key: str, section: Optional[str] = None, default: Any = No
     return default
 
 
+def _as_bool(value: Any) -> bool:
+    """Environment overrides must honor false rather than truthy strings."""
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "on"}
+    return bool(value)
+
+
 def _require_vault_root() -> Path:
     """Get vault root, raising clear error if not configured."""
-    vault_root = _get_config_value("vault_root")
+    vault_root = os.environ.get("CLAUDE_NOTE_VAULT") or _get_config_value("vault_root")
 
     if vault_root is None:
         config_path = _get_config_path()
@@ -222,7 +229,7 @@ SYNTH_TIMEOUT = int(_get_config_value("timeout", section="synthesis", default=30
 # =============================================================================
 
 TIMELINE_MAX_ENTRIES = int(_get_config_value("timeline_max_entries", default=100))
-INBOX_DEDUP_ENABLED = _get_config_value("inbox_dedup_enabled", default=True)
+INBOX_DEDUP_ENABLED = _as_bool(_get_config_value("inbox_dedup_enabled", default=True))
 INBOX_DEDUP_THRESHOLD = float(_get_config_value("inbox_dedup_threshold", default=0.7))
 INBOX_DEDUP_LOOKBACK = int(_get_config_value("inbox_dedup_lookback", default=50))
 
@@ -235,14 +242,17 @@ if isinstance(_qmd_enabled, str):
     _qmd_enabled = _qmd_enabled.lower() == "true"
 
 QMD_SYNTH_ENABLED = _qmd_enabled
+QMD_COLLECTION = str(_get_config_value("collection", section="qmd", default=""))
+QMD_SEARCH_MODE = str(_get_config_value("search_mode", section="qmd", default="keyword"))
+QMD_TIMEOUT = float(_get_config_value("qmd_timeout", section="qmd", default=10))
 QMD_SYNTH_MAX_NOTES = int(_get_config_value("synth_max_notes", section="qmd", default=5))
 QMD_MIN_SCORE = float(_get_config_value("min_score", section="qmd", default=0.3))
-QMD_LINK_ENHANCE_ENABLED = _get_config_value("link_enhance_enabled", section="qmd", default=True)
-QMD_INGEST_DEDUP_ENABLED = _get_config_value("ingest_dedup_enabled", section="qmd", default=True)
+QMD_LINK_ENHANCE_ENABLED = _as_bool(_get_config_value("link_enhance_enabled", section="qmd", default=True))
+QMD_INGEST_DEDUP_ENABLED = _as_bool(_get_config_value("ingest_dedup_enabled", section="qmd", default=False))
 QMD_INGEST_DEDUP_THRESHOLD = float(_get_config_value("ingest_dedup_threshold", section="qmd", default=0.75))
 
 # Merge mode: when a similar concept is found, merge sources instead of skipping
-INGEST_MERGE_ENABLED = _get_config_value("ingest_merge_enabled", default=True)
+INGEST_MERGE_ENABLED = _as_bool(_get_config_value("ingest_merge_enabled", default=True))
 INGEST_MAX_SOURCES_PER_CONCEPT = int(_get_config_value("max_sources_per_concept", default=5))
 
 
@@ -266,4 +276,6 @@ def get_config_summary() -> dict:
         "synth_model": SYNTH_MODEL,
         "open_questions_file": str(OPEN_QUESTIONS_FILE),
         "qmd_enabled": QMD_SYNTH_ENABLED,
+        "qmd_collection": QMD_COLLECTION,
+        "qmd_search_mode": QMD_SEARCH_MODE,
     }

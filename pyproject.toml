@@ -1,7 +1,7 @@
 [project]
 name = "claude-note"
 dynamic = ["version"]
-description = "Session logging and knowledge synthesis for Claude Code"
+description = "Multi-assistant session capture and knowledge synthesis for shared Markdown vaults"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -29,9 +29,9 @@ dependencies = []  # Pure stdlib, no dependencies
 claude-note = "claude_note.entry:main"
 
 [project.urls]
-Homepage = "https://github.com/artemiin/claude-note"
-Repository = "https://github.com/artemiin/claude-note"
-Issues = "https://github.com/artemiin/claude-note/issues"
+Homepage = "https://github.com/crimeacs/claude-note"
+Repository = "https://github.com/crimeacs/claude-note"
+Issues = "https://github.com/crimeacs/claude-note/issues"
 
 [build-system]
 requires = ["hatchling"]

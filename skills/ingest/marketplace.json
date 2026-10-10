@@ -1,9 +1,9 @@
 {
   "name": "ingest",
-  "description": "Turn documents into atomic knowledge notes with semantic deduplication",
+  "description": "Turn documents into typed source indexes and source-backed atomic notes",
   "version": "1.0.0",
   "author": "crimeacs",
-  "repository": "https://github.com/crimeacs/claude-ingest-skill",
+  "repository": "https://github.com/crimeacs/claude-note",
   "keywords": [
     "knowledge-management",
     "obsidian",

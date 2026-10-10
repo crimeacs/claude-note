@@ -1,0 +1,99 @@
+{
+  "evidence_type": "synthetic-mocked-hook-probe",
+  "disclosure": "Synthetic input and mocked retrieval; not a live assistant event recording.",
+  "reviewed_source": {
+    "logical_source": "local-custom-claude-recall-hook",
+    "sha256": "b6df4e1279fa1f0d9e635fd2455bc65d7de4c878c1709594f54ac1d52e9fa8c7"
+  },
+  "probe_sha256": "ed2bf1d7ffc7a2bf17625b3966de5fe6477bc9f89d58df942fe57da89e760b17",
+  "prompt": "Why did the upload retry duplicate a note?",
+  "synthetic_source_note": {
+    "file": "qmd://notes/demo-retry-idempotency.md",
+    "title": "Use a stable key when retrying uploads",
+    "snippet": "A retry after a lost response can duplicate a write. Reuse the same destination and content identity, then check the returned revision before repeating the operation."
+  },
+  "boundaries": {
+    "qmd": "mocked; no real index queried",
+    "relevance_judge": "mocked unavailable; exercises pooled BM25 fallback",
+    "freshest_note_lookup": "mocked; no private note opened",
+    "memory_warning_lookup": "mocked; no project memory opened",
+    "network": "blocked",
+    "external_processes": "blocked",
+    "credentials": "not read",
+    "assistant_event_delivery": "not tested",
+    "retrieval_quality_or_latency": "not measured"
+  },
+  "queries": [
+    [
+      "<qmd>",
+      "search",
+      "upload retry duplicate note",
+      "-n",
+      "10",
+      "--json"
+    ],
+    [
+      "<qmd>",
+      "search",
+      "upload retry duplicate",
+      "-n",
+      "10",
+      "--json"
+    ],
+    [
+      "<qmd>",
+      "search",
+      "upload duplicate",
+      "-n",
+      "10",
+      "--json"
+    ],
+    [
+      "<qmd>",
+      "search",
+      "upload retry duplicate note",
+      "-n",
+      "10",
+      "--json",
+      "-c",
+      "agentmem"
+    ],
+    [
+      "<qmd>",
+      "search",
+      "upload retry duplicate",
+      "-n",
+      "10",
+      "--json",
+      "-c",
+      "agentmem"
+    ],
+    [
+      "<qmd>",
+      "search",
+      "upload duplicate",
+      "-n",
+      "10",
+      "--json",
+      "-c",
+      "agentmem"
+    ]
+  ],
+  "hook_output": {
+    "hookSpecificOutput": {
+      "hookEventName": "UserPromptSubmit",
+      "additionalContext": "Possibly relevant prior knowledge from the qmd unified index (claude-notes vault, Foresyn vault, Claude Code project memories, agent rules).\nThese are BM25 keyword hits, NOT verified answers - open one before relying on it (`mcp__qmd__get`, or `qmd get <path>`).\nIf none of them fit, that means this lookup missed, NOT that the vault is empty: search it yourself with better terms before answering (`qmd search \"<content words>\" -n 12`; `qmd vsearch` when the vocabulary is unknown).\n\n- Use a stable key when retrying uploads  [qmd://notes/demo-retry-idempotency.md]\n    A retry after a lost response can duplicate a write. Reuse the same destination and content identity, then check the returned revision before repeating the operation.\n\nIf this task produces a durable lesson, write it back so it compounds (see the qmd-memory rule)."
+    }
+  },
+  "assertions": {
+    "prompt_event_output": true,
+    "source_link_injected": true,
+    "synthetic_lesson_injected": true,
+    "source_read_required": true,
+    "write_back_requested": true,
+    "cross_project_memory_queried": true,
+    "query_narrows": true,
+    "result_contains_no_home_path": true
+  },
+  "passed": true
+}

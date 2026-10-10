@@ -7,6 +7,7 @@ Useful for testing and manual processing.
 """
 
 import sys
+from datetime import datetime
 
 from . import config
 from . import queue_manager
@@ -30,15 +31,17 @@ def run_synthesis_for_drain(state) -> bool:
         vault_index = vault_indexer.get_index()
         pack = synthesizer.synthesize_from_state(state, vault_index)
 
-        if pack is None or pack.is_empty():
+        if pack is None:
             return False
+        if pack.is_empty():
+            return True
 
         results = note_router.apply_note_ops(pack, mode=config.SYNTH_MODE)
 
         if results["inbox_updated"]:
             print(f"  Synthesized: {len(pack.concepts)} concepts, {len(pack.decisions)} decisions")
 
-        return True
+        return not results["errors"]
 
     except Exception as e:
         print(f"  Synthesis error: {e}")
@@ -57,6 +60,8 @@ def drain_all() -> tuple:
         if event.session_id not in sessions:
             sessions[event.session_id] = []
         sessions[event.session_id].append(event)
+    for session_id in session_tracker.get_pending_synthesis_sessions():
+        sessions.setdefault(session_id, [])
 
     sessions_processed = 0
     notes_written = 0
@@ -85,6 +90,9 @@ def drain_all() -> tuple:
 
                 # Skip already-written sessions (same as worker.py)
                 if session_tracker.is_session_written(state):
+                    if state.synthesis_pending:
+                        sessions_processed += 1
+                        session_tracker.run_pending_synthesis(state, run_synthesis_for_drain, force=True)
                     continue
 
                 sessions_processed += 1
@@ -99,12 +107,13 @@ def drain_all() -> tuple:
                 if count > 0:
                     print(f"  Promoted {count} questions")
 
-                # Run synthesis (if enabled)
-                run_synthesis_for_drain(state)
-
-                # Mark as written
-                session_tracker.mark_session_written(session_id)
+                # Note writing and synthesis have separate completion markers.
+                # Saving this state must not overwrite a timestamp written by
+                # mark_session_written through a different in-memory object.
+                state.last_write_ts = datetime.utcnow().isoformat() + "Z"
+                session_tracker.schedule_synthesis(state)
                 session_tracker.save_session_state(state)
+                session_tracker.run_pending_synthesis(state, run_synthesis_for_drain, force=True)
 
             except Exception as e:
                 print(f"Error processing session {session_id[:8]}: {e}")

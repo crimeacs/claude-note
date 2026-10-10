@@ -1,0 +1,100 @@
+{
+  "search": "-[type:session] -file:claude-note-inbox -path:templates/",
+  "showTags": false,
+  "showAttachments": false,
+  "hideUnresolved": true,
+  "showOrphans": false,
+  "collapse-filter": false,
+  "collapse-color-groups": false,
+  "collapse-display": false,
+  "collapse-forces": false,
+  "colorGroups": [
+    {
+      "query": "[type:pattern]",
+      "color": {
+        "a": 1,
+        "rgb": 4182452
+      }
+    },
+    {
+      "query": "[type:gotcha]",
+      "color": {
+        "a": 1,
+        "rgb": 16735324
+      }
+    },
+    {
+      "query": "[type:decision]",
+      "color": {
+        "a": 1,
+        "rgb": 11107327
+      }
+    },
+    {
+      "query": "[type:reference]",
+      "color": {
+        "a": 1,
+        "rgb": 5085951
+      }
+    },
+    {
+      "query": "[type:project]",
+      "color": {
+        "a": 1,
+        "rgb": 16755008
+      }
+    },
+    {
+      "query": "[type:log]",
+      "color": {
+        "a": 1,
+        "rgb": 9345958
+      }
+    },
+    {
+      "query": "[type:literature]",
+      "color": {
+        "a": 1,
+        "rgb": 16740312
+      }
+    },
+    {
+      "query": "[type:source]",
+      "color": {
+        "a": 1,
+        "rgb": 13214247
+      }
+    },
+    {
+      "query": "[type:feedback]",
+      "color": {
+        "a": 1,
+        "rgb": 3069299
+      }
+    },
+    {
+      "query": "[type:meta]",
+      "color": {
+        "a": 1,
+        "rgb": 16777215
+      }
+    },
+    {
+      "query": "[type:session]",
+      "color": {
+        "a": 1,
+        "rgb": 4541268
+      }
+    }
+  ],
+  "showArrow": true,
+  "textFadeMultiplier": -1.5,
+  "nodeSizeMultiplier": 1.15,
+  "lineSizeMultiplier": 0.6,
+  "centerStrength": 0.4,
+  "repelStrength": 13,
+  "linkStrength": 0.6,
+  "linkDistance": 120,
+  "scale": 1,
+  "close": false
+}

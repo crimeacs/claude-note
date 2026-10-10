@@ -6,7 +6,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional
 
 from . import config
 from . import models
@@ -267,3 +267,53 @@ def is_session_written(state: models.SessionState) -> bool:
     last_write = datetime.fromisoformat(state.last_write_ts.rstrip("Z"))
     last_event = datetime.fromisoformat(state.last_event_ts.rstrip("Z"))
     return last_write >= last_event
+
+
+def schedule_synthesis(state: models.SessionState) -> None:
+    """A new completed turn supersedes the previous synthesis retry schedule."""
+    state.synthesis_pending = config.SYNTH_MODE != "log" and bool(state.transcript_path)
+    state.synthesis_attempts = 0
+    state.last_synthesis_attempt_ts = None
+
+
+def synthesis_retry_due(state: models.SessionState) -> bool:
+    if not state.synthesis_pending:
+        return False
+    if not state.last_synthesis_attempt_ts:
+        return True
+    try:
+        last = datetime.fromisoformat(state.last_synthesis_attempt_ts.rstrip("Z"))
+        delay = min(3600, 60 * 2 ** min(max(state.synthesis_attempts - 1, 0), 6))
+        return (datetime.utcnow() - last).total_seconds() >= delay
+    except (ValueError, TypeError):
+        return True
+
+
+def run_pending_synthesis(state: models.SessionState, synthesize: Callable,
+                          force: bool = False) -> Optional[bool]:
+    """Retry synthesis separately from note writing, persisting crash recovery."""
+    if not state.synthesis_pending or (not force and not synthesis_retry_due(state)):
+        return None
+    if config.SYNTH_MODE == "log":
+        state.synthesis_pending = False
+        save_session_state(state)
+        return None
+    state.synthesis_attempts += 1
+    state.last_synthesis_attempt_ts = datetime.utcnow().isoformat() + "Z"
+    save_session_state(state)
+    success = bool(synthesize(state))
+    state.synthesis_pending = not success
+    save_session_state(state)
+    return success
+
+
+def get_pending_synthesis_sessions() -> list[str]:
+    """Retries survive queue retention and a worker restart."""
+    if not config.STATE_DIR.is_dir():
+        return []
+    pending = []
+    for path in config.STATE_DIR.glob("*.json"):
+        state = load_session_state(path.stem)
+        if state and state.synthesis_pending:
+            pending.append(state.session_id)
+    return pending

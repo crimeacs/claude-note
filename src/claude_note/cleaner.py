@@ -5,6 +5,8 @@ Provides tools to clean up bloated notes, deduplicate inbox entries,
 compress session timelines, and remove orphan state files.
 """
 
+import hashlib
+import json
 import re
 import time
 from datetime import datetime
@@ -14,7 +16,6 @@ from typing import Optional
 from . import config
 from . import models
 from . import note_writer
-from . import note_router
 from . import managed_blocks
 
 
@@ -61,6 +62,14 @@ def clean_state_dir(max_age_days: int = 7, dry_run: bool = True) -> dict:
         try:
             stat = state_file.stat()
             if stat.st_mtime < cutoff:
+                # Retry state is the durable work item once queue files age out.
+                # Leave unreadable state in place for recovery, too.
+                try:
+                    state_data = json.loads(state_file.read_text(encoding="utf-8"))
+                except (ValueError, OSError):
+                    continue
+                if not isinstance(state_data, dict) or state_data.get("synthesis_pending"):
+                    continue
                 results["bytes_freed"] += stat.st_size
                 results["states_removed"] += 1
                 if not dry_run:
@@ -183,13 +192,14 @@ def compress_session_timeline(note_path: Path, dry_run: bool = True) -> Optional
 
 def dedupe_inbox(inbox_path: Path = None, similarity_threshold: float = 0.7, dry_run: bool = True) -> dict:
     """
-    Deduplicate inbox entries by merging similar ones.
+    Deduplicate exact inbox extractions, preserving new evidence and corrections.
 
-    Groups similar entries and suggests merges (or executes them if not dry_run).
+    New entries carry extraction fingerprints. Legacy entries are comparable
+    only by identical body content, ignoring their date/time/title header.
 
     Args:
         inbox_path: Path to inbox file (defaults to config)
-        similarity_threshold: Jaccard similarity threshold
+        similarity_threshold: Legacy argument retained for call compatibility; ignored
         dry_run: If True, only report proposed merges
 
     Returns:
@@ -221,21 +231,24 @@ def dedupe_inbox(inbox_path: Path = None, similarity_threshold: float = 0.7, dry
     if len(matches) < 2:
         return results
 
-    # Import dedup functions from note_router
-    normalize = note_router._normalize_title
-    similarity = note_router._compute_similarity
-
-    # Build groups of similar entries
+    # Build exact groups. An unchanged marker alone is insufficient: a human
+    # may have annotated the entry after capture, so compare its body as well.
     entries = []
-    for match in matches:
+    for index, match in enumerate(matches):
         date, time_str, title = match.groups()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+        body = content[match.end():end].strip()
+        marker = re.search(r"<!-- claude-note:extraction:([a-f0-9]{64}) -->", body)
+        without_marker = re.sub(r"<!-- claude-note:extraction:[a-f0-9]{64} -->", "", body).strip()
+        fingerprint = marker.group(1) if marker else "legacy"
+        body_hash = hashlib.sha256(without_marker.encode("utf-8")).hexdigest()
         entries.append({
             "date": date,
             "time": time_str or "",
             "title": title,
-            "normalized": normalize(title),
+            "identity": (fingerprint, body_hash),
             "start": match.start(),
-            "end": match.end(),
+            "end": end,
         })
 
     # Find duplicate groups
@@ -253,8 +266,7 @@ def dedupe_inbox(inbox_path: Path = None, similarity_threshold: float = 0.7, dry
             if j in used or j <= i:
                 continue
 
-            sim = similarity(entry["normalized"], other["normalized"])
-            if sim >= similarity_threshold:
+            if entry["identity"] == other["identity"]:
                 group.append(other)
                 used.add(j)
 
@@ -289,17 +301,8 @@ def dedupe_inbox(inbox_path: Path = None, similarity_threshold: float = 0.7, dry
 
             new_content = content
             for entry in entries_to_remove:
-                # Find the end of this entry (next ## or EOF)
-                next_match = None
-                for match in matches:
-                    if match.start() > entry["start"]:
-                        next_match = match
-                        break
-
-                entry_end = next_match.start() if next_match else len(new_content)
-
                 # Remove from start of ## to start of next ## (or EOF)
-                new_content = new_content[:entry["start"]] + new_content[entry_end:]
+                new_content = new_content[:entry["start"]] + new_content[entry["end"]:]
 
             # Atomic write
             temp_path = inbox_path.with_suffix(".tmp")
@@ -313,7 +316,7 @@ def consolidate_managed_blocks(note_path: Path, dry_run: bool = True) -> dict:
     """
     Consolidate redundant managed blocks in a topic note.
 
-    Identifies blocks with very similar content and suggests merging them.
+    Identifies blocks with identical content; similar wording can be a correction.
 
     Args:
         note_path: Path to the note file
@@ -345,10 +348,9 @@ def consolidate_managed_blocks(note_path: Path, dry_run: bool = True) -> dict:
             blocks.append({
                 "id": block_id,
                 "content": content,
-                "words": set(re.findall(r'\w+', content.lower())),
             })
 
-    # Find similar blocks (high word overlap)
+    # Find exact duplicate blocks; word overlap is not a deletion criterion.
     used = set()
     groups = []
 
@@ -363,12 +365,7 @@ def consolidate_managed_blocks(note_path: Path, dry_run: bool = True) -> dict:
             if j in used or j <= i:
                 continue
 
-            # Compute Jaccard similarity on words
-            intersection = block["words"] & other["words"]
-            union = block["words"] | other["words"]
-            sim = len(intersection) / len(union) if union else 0
-
-            if sim >= 0.8:  # High threshold for content similarity
+            if block["content"].strip() == other["content"].strip():
                 group.append(other)
                 used.add(j)
 
@@ -409,7 +406,8 @@ def find_session_notes(date: str = None) -> list[Path]:
     vault_root = config.VAULT_ROOT
 
     pattern = f"claude-session-{date}-*.md" if date else "claude-session-*.md"
-    return sorted(vault_root.glob(pattern))
+    return sorted(path for path in [*vault_root.glob(pattern), *(vault_root / "sessions").glob(pattern)]
+                  if path.is_file() and not path.is_symlink())
 
 
 def find_topic_notes() -> list[Path]:

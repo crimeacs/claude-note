@@ -4,9 +4,12 @@ Note router for claude-note synthesizer.
 Applies note operations from KnowledgePack to the vault.
 """
 
+import hashlib
+import json
 import logging
+import os
 import re
-from datetime import datetime
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -17,22 +20,60 @@ from . import qmd_search
 from . import provenance
 
 
-NOTE_TYPES = ("pattern", "gotcha", "decision", "reference", "project", "literature")
+NOTE_TYPES = knowledge_pack.NOTE_TYPES
+logger = logging.getLogger(__name__)
 
 
 def with_type(fm: dict) -> dict:
-    """The frontmatter with a `type`: the model's when valid, else the first tag
-    naming a type, else `reference`. The daily push shares only typed notes, and
-    before 1.6.0 no synthesized note had one, so none ever left the laptop."""
+    """Keep an explicit semantic type, with a visible legacy fallback.
+
+    Types describe the role of a note; they do not grant publishing eligibility.
+    Tag inference is only a compatibility aid for older extraction output.
+    """
     out = dict(fm)
     given = str(out.get("type") or "").strip().lower()
     if given in NOTE_TYPES:
         out["type"] = given
-        return out
+        return {"type": out.pop("type"), **out}
     raw_tags = out.get("tags") or []
     note_tags = [str(t).strip().lower() for t in (raw_tags if isinstance(raw_tags, list) else [raw_tags])]
     out["type"] = next((t for t in note_tags if t in NOTE_TYPES), "reference")
-    return out
+    logger.warning("Missing or invalid note type %r; using %r. Set type explicitly to preserve the note's meaning.",
+                   fm.get("type"), out["type"])
+    return {"type": out.pop("type"), **out}
+
+
+def resolve_note_path(path: str, vault_root: Path) -> Path:
+    """Resolve an untrusted Markdown route within the vault's knowledge area.
+
+    A model route must never reach outside the vault or mutate its settings,
+    templates, capture logs, or agent instructions.
+    """
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError("Note path must be a non-empty relative Markdown path")
+    if path != path.strip() or "\\" in path or ":" in path or any(ord(c) < 32 for c in path):
+        raise ValueError(f"Invalid note path: {path!r}")
+    candidate = Path(path)
+    if candidate.is_absolute() or any(p in (".", "..") or p.startswith(".") for p in path.split("/")):
+        raise ValueError(f"Note path must stay inside the vault: {path!r}")
+    if not candidate.suffix:
+        candidate = candidate.with_suffix(".md")
+    elif candidate.suffix.lower() != ".md":
+        raise ValueError(f"Note path must use the .md extension: {path!r}")
+    legacy_session = re.fullmatch(r"claude-session-\d{4}-\d{2}-\d{2}-.+\.md", candidate.name, re.IGNORECASE)
+    if (candidate.parts[0].lower() in ("templates", "sessions")
+            or candidate.name.lower() in ("claude.md", "agents.md") or legacy_session):
+        raise ValueError(f"Note path targets a protected vault file: {path!r}")
+    root = Path(vault_root).resolve()
+    target = root / candidate
+    if not target.resolve().is_relative_to(root):
+        raise ValueError(f"Note path escapes the vault: {path!r}")
+    for part in (target, *target.parents):
+        if part == root:
+            break
+        if part.is_symlink():
+            raise ValueError(f"Note path traverses a symlink: {path!r}")
+    return target
 
 
 def _format_frontmatter(fm: dict) -> str:
@@ -40,20 +81,20 @@ def _format_frontmatter(fm: dict) -> str:
     lines = ["---"]
 
     for key, value in fm.items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", key):
+            raise ValueError(f"Invalid frontmatter key: {key!r}")
         if isinstance(value, list):
             lines.append(f"{key}:")
             for item in value:
-                lines.append(f"  - {item}")
+                lines.append(f"  - {json.dumps(str(item), ensure_ascii=False)}")
         elif isinstance(value, bool):
             lines.append(f"{key}: {'true' if value else 'false'}")
         elif isinstance(value, (int, float)):
             lines.append(f"{key}: {value}")
         else:
-            # Quote strings with special chars
-            if ":" in str(value) or '"' in str(value):
-                lines.append(f'{key}: "{value}"')
-            else:
-                lines.append(f"{key}: {value}")
+            # JSON strings are YAML-compatible and safely quote newlines,
+            # colons, quotes and values YAML would otherwise coerce.
+            lines.append(f"{key}: {json.dumps(str(value), ensure_ascii=False)}")
 
     lines.append("---")
     return "\n".join(lines)
@@ -83,23 +124,26 @@ def create_note(
     if vault_root is None:
         vault_root = config.VAULT_ROOT
 
-    # Ensure .md extension
-    if not path.endswith(".md"):
-        path = path + ".md"
-
-    note_path = vault_root / path
+    note_path = resolve_note_path(path, vault_root)
 
     if note_path.exists():
         raise FileExistsError(f"Note already exists: {note_path}")
 
     # Build content
-    fm_str = _format_frontmatter(frontmatter)
+    fm_str = _format_frontmatter(with_type(frontmatter))
     content = f"{fm_str}\n\n{body_markdown}"
 
-    # Atomic write
-    temp_path = note_path.with_suffix(".tmp")
-    temp_path.write_text(content, encoding="utf-8")
-    temp_path.rename(note_path)
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    # Use a private temporary file and an exclusive link: concurrent creates
+    # must never overwrite an existing, potentially human-edited note.
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=note_path.parent,
+                                     prefix=".claude-note-", delete=False) as temp:
+        temp_path = Path(temp.name)
+        temp.write(content)
+    try:
+        os.link(temp_path, note_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
     return note_path
 
@@ -121,25 +165,22 @@ def apply_note_op(op: knowledge_pack.NoteOp, vault_root: Path = None, session_id
     if vault_root is None:
         vault_root = config.VAULT_ROOT
 
-    # Ensure .md extension
-    path = op.path
-    if not path.endswith(".md"):
-        path = path + ".md"
-
-    note_path = vault_root / path
+    try:
+        note_path = resolve_note_path(op.path, vault_root)
+    except ValueError as exc:
+        logger.warning("Rejected note operation: %s", exc)
+        return False
+    if op.managed_block_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", op.managed_block_id):
+        logger.warning("Rejected invalid managed block ID: %r", op.managed_block_id)
+        return False
 
     if op.op == "create":
+        block_id = op.managed_block_id
+        if not block_id:
+            identity = session_id or op.body_markdown
+            block_id = "synth-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
         if note_path.exists():
             # Note exists - use managed block for clean updates
-            # Auto-generate block_id from session if not provided
-            block_id = op.managed_block_id
-            if not block_id:
-                date = datetime.utcnow().strftime("%Y-%m-%d")
-                if session_id:
-                    block_id = f"synth-{session_id[:8]}-{date}"
-                else:
-                    block_id = f"synth-{date}"
-
             return managed_blocks.write_managed_block(
                 note_path,
                 block_id,
@@ -148,7 +189,9 @@ def apply_note_op(op: knowledge_pack.NoteOp, vault_root: Path = None, session_id
             )
 
         frontmatter = provenance.stamp(with_type(op.frontmatter or {"tags": ["claude-note"]}), assistant)
-        create_note(path, frontmatter, op.body_markdown, vault_root)
+        content = (managed_blocks._make_start_marker(block_id) + "\n" + op.body_markdown
+                   + "\n" + managed_blocks._make_end_marker(block_id))
+        create_note(op.path, frontmatter, content, vault_root)
         return True
 
     elif op.op == "upsert_block":
@@ -168,143 +211,20 @@ def apply_note_op(op: knowledge_pack.NoteOp, vault_root: Path = None, session_id
             return False
 
         section = op.section or "## Synthesized"
+        identity = json.dumps([session_id or "", op.path, section, op.body_markdown], ensure_ascii=False)
+        block_id = "append-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+        if managed_blocks.read_managed_block(note_path, block_id) is not None:
+            return True
+        content = (managed_blocks._make_start_marker(block_id) + "\n" + op.body_markdown
+                   + "\n" + managed_blocks._make_end_marker(block_id))
         return managed_blocks.append_to_section(
             note_path,
             section,
-            op.body_markdown,
+            content,
             create_section=True,
         )
 
     return False
-
-
-def _normalize_title(title: str) -> str:
-    """
-    Normalize title for similarity comparison.
-
-    Strips dates, times, common suffixes, and converts to lowercase words.
-    """
-    # Remove dates (YYYY-MM-DD, DD/MM/YYYY, etc.)
-    title = re.sub(r'\d{4}-\d{2}-\d{2}', '', title)
-    title = re.sub(r'\d{2}/\d{2}/\d{4}', '', title)
-
-    # Remove times (HH:MM:SS, HH:MM)
-    title = re.sub(r'\d{2}:\d{2}(:\d{2})?', '', title)
-
-    # Remove common suffixes
-    suffixes = [
-        'session', 'update', 'continued', 'part 2', 'part 3',
-        'follow-up', 'followup', 'revisited', 'debugging'
-    ]
-    for suffix in suffixes:
-        title = re.sub(rf'\b{suffix}\b', '', title, flags=re.IGNORECASE)
-
-    # Extract words only
-    words = re.findall(r'\w+', title.lower())
-
-    return ' '.join(words)
-
-
-def _compute_similarity(title1: str, title2: str) -> float:
-    """
-    Compute Jaccard similarity between two normalized titles.
-
-    Returns a value between 0 (no overlap) and 1 (identical).
-    """
-    words1 = set(title1.split())
-    words2 = set(title2.split())
-
-    if not words1 or not words2:
-        return 0.0
-
-    intersection = words1 & words2
-    union = words1 | words2
-
-    return len(intersection) / len(union) if union else 0.0
-
-
-def _find_similar_entry(pack: knowledge_pack.KnowledgePack, inbox_path: Path, threshold: float = 0.7, lookback: int = 50) -> Optional[str]:
-    """
-    Check if a similar entry already exists in the inbox.
-
-    Args:
-        pack: KnowledgePack to check
-        inbox_path: Path to inbox file
-        threshold: Similarity threshold (0-1)
-        lookback: Number of recent entries to check
-
-    Returns:
-        Matching entry title if found, None otherwise
-    """
-    if not inbox_path.exists():
-        return None
-
-    content = inbox_path.read_text(encoding="utf-8")
-
-    # Extract entry titles from inbox
-    entry_pattern = re.compile(r"^## (?:\d{4}-\d{2}-\d{2})(?:\s+\d{2}:\d{2}:\d{2})?\s*-\s*(.+)$", re.MULTILINE)
-    matches = entry_pattern.findall(content)
-
-    # Check only recent entries
-    recent_titles = matches[:lookback] if len(matches) > lookback else matches
-
-    # Normalize the new pack's title
-    new_title_normalized = _normalize_title(pack.title)
-
-    for existing_title in recent_titles:
-        existing_normalized = _normalize_title(existing_title)
-        similarity = _compute_similarity(new_title_normalized, existing_normalized)
-
-        if similarity >= threshold:
-            return existing_title
-
-    return None
-
-
-def _find_similar_content_qmd(pack: knowledge_pack.KnowledgePack, min_score: float = 0.6) -> Optional[str]:
-    """
-    Check if semantically similar content exists using qmd vector search.
-
-    This catches duplicates that use different wording but cover the same topic.
-
-    Args:
-        pack: KnowledgePack to check
-        min_score: Minimum similarity threshold (0-1)
-
-    Returns:
-        Matching note path if found, None otherwise
-    """
-    try:
-        if not qmd_search.is_qmd_available():
-            return None
-
-        # Build query from pack highlights and concepts
-        query_parts = []
-        if pack.title:
-            query_parts.append(pack.title)
-        if pack.highlights:
-            query_parts.extend(pack.highlights[:2])
-        for concept in pack.concepts[:2]:
-            query_parts.append(concept.name)
-
-        if not query_parts:
-            return None
-
-        query = " ".join(query_parts)
-
-        # Search for similar content
-        results = qmd_search.find_similar_content(query, limit=3, min_score=min_score)
-
-        if results:
-            # Return the best match that isn't the inbox
-            for result in results:
-                if "inbox" not in result.path.lower():
-                    return result.path
-
-        return None
-
-    except Exception:
-        return None
 
 
 def _enhance_concept_links(pack: knowledge_pack.KnowledgePack, min_score: float = 0.4) -> None:
@@ -320,7 +240,8 @@ def _enhance_concept_links(pack: knowledge_pack.KnowledgePack, min_score: float 
         min_score: Minimum similarity score for link suggestions
     """
     # Check if link enhancement is enabled
-    if not config.QMD_LINK_ENHANCE_ENABLED:
+    collection = getattr(config, "QMD_COLLECTION", "")
+    if not config.QMD_SYNTH_ENABLED or not config.QMD_LINK_ENHANCE_ENABLED or not collection:
         return
 
     try:
@@ -338,15 +259,20 @@ def _enhance_concept_links(pack: knowledge_pack.KnowledgePack, min_score: float 
             query = " ".join(query_parts)
 
             # Search for related notes
-            results = qmd_search.search_vector(query, limit=5, min_score=min_score)
+            if config.QMD_SEARCH_MODE == "vector":
+                results = qmd_search.search_vector(query, limit=5, min_score=min_score, collection=collection)
+            else:
+                results = qmd_search.search_keyword(qmd_search.keyword_query(query), limit=5, collection=collection)
 
             # Get existing links as a set for deduplication
             existing_links = set(concept.links_suggested or [])
             added_count = 0
 
             for result in results:
-                # Extract note name without extension
-                note_name = Path(result.path).stem
+                path = qmd_search.resolve_result_path(result.path, config.VAULT_ROOT, collection)
+                if not path or not path.is_file():
+                    continue
+                note_name = path.relative_to(config.VAULT_ROOT.resolve()).with_suffix("").as_posix()
 
                 # Skip self-references and duplicates
                 if note_name.lower() == concept.name.lower().replace(" ", "-"):
@@ -361,7 +287,7 @@ def _enhance_concept_links(pack: knowledge_pack.KnowledgePack, min_score: float 
                 added_count += 1
 
             # Update the concept's links_suggested
-            concept.links_suggested = list(existing_links)
+            concept.links_suggested = sorted(existing_links)
 
             if added_count > 0:
                 logger.debug(f"Enhanced '{concept.name}' with {added_count} semantic links")
@@ -370,6 +296,15 @@ def _enhance_concept_links(pack: knowledge_pack.KnowledgePack, min_score: float 
         # Silent fallback - don't break routing
         logger = logging.getLogger("claude-note")
         logger.debug(f"Link enhancement failed: {e}")
+
+
+def _extraction_fingerprint(pack: knowledge_pack.KnowledgePack) -> str:
+    """Identify exact extraction content, never merely a similar subject."""
+    content = pack.to_dict()
+    for key in ("session_id", "date", "time", "title", "assistant"):
+        content.pop(key, None)
+    payload = json.dumps(content, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def format_inbox_entry(pack: knowledge_pack.KnowledgePack) -> str:
@@ -389,6 +324,8 @@ def format_inbox_entry(pack: knowledge_pack.KnowledgePack) -> str:
         lines.append(f"## {pack.date} {pack.time} - {pack.title}")
     else:
         lines.append(f"## {pack.date} - {pack.title}")
+    lines.append("")
+    lines.append(f"<!-- claude-note:extraction:{_extraction_fingerprint(pack)} -->")
     lines.append("")
 
     # Highlights
@@ -458,7 +395,8 @@ def append_to_inbox(pack: knowledge_pack.KnowledgePack, inbox_path: Path = None,
     Append a KnowledgePack to the inbox file.
 
     Creates the inbox if it doesn't exist.
-    Skips append if a similar entry already exists (deduplication).
+    Skips append only when the exact extracted content was already captured.
+    Related topics and corrections remain independent evidence.
 
     Args:
         pack: KnowledgePack object
@@ -473,21 +411,9 @@ def append_to_inbox(pack: knowledge_pack.KnowledgePack, inbox_path: Path = None,
 
     # Check for duplicates if enabled
     if not skip_dedup and config.INBOX_DEDUP_ENABLED:
-        threshold = config.INBOX_DEDUP_THRESHOLD
-        lookback = config.INBOX_DEDUP_LOOKBACK
-
-        # First: check title similarity (fast)
-        similar = _find_similar_entry(pack, inbox_path, threshold, lookback)
-        if similar:
-            logger = logging.getLogger("claude-note")
-            logger.info(f"Skipping duplicate inbox entry: '{pack.title}' similar to '{similar}'")
-            return None
-
-        # Second: check semantic similarity via qmd (if available)
-        similar_content = _find_similar_content_qmd(pack, min_score=0.6)
-        if similar_content:
-            logger = logging.getLogger("claude-note")
-            logger.info(f"Skipping semantically similar entry: '{pack.title}' similar to '{similar_content}'")
+        marker = f"<!-- claude-note:extraction:{_extraction_fingerprint(pack)} -->"
+        if inbox_path.exists() and marker in inbox_path.read_text(encoding="utf-8"):
+            logger.info("Skipping exact duplicate inbox extraction: %s", pack.title)
             return None
 
     entry = format_inbox_entry(pack)
@@ -495,6 +421,7 @@ def append_to_inbox(pack: knowledge_pack.KnowledgePack, inbox_path: Path = None,
     if not inbox_path.exists():
         # Create new inbox
         header = """---
+type: meta
 tags:
   - log
   - claude-note
@@ -587,7 +514,11 @@ def apply_note_ops(pack: knowledge_pack.KnowledgePack, mode: str = "inbox", vaul
     # Always append to inbox (unless pack is empty or duplicate)
     if not pack.is_empty():
         try:
-            inbox_result = append_to_inbox(pack)
+            try:
+                inbox_relative = config.INBOX_PATH.relative_to(config.VAULT_ROOT)
+            except ValueError:
+                inbox_relative = Path(config.INBOX_PATH.name)
+            inbox_result = append_to_inbox(pack, Path(vault_root) / inbox_relative)
             if inbox_result is not None:
                 results["inbox_updated"] = True
             # If None, it was skipped due to deduplication (not an error)
@@ -602,19 +533,13 @@ def apply_note_ops(pack: knowledge_pack.KnowledgePack, mode: str = "inbox", vaul
     if mode == "route":
         for op in pack.note_ops:
             try:
+                existed = resolve_note_path(op.path, vault_root).exists()
                 # Pass session_id for auto-generating managed block IDs
                 success = apply_note_op(op, vault_root, session_id=pack.session_id,
                                         assistant=pack.assistant)
                 if success:
-                    if op.op == "create":
-                        # Check if it was actually created or fell back to update
-                        note_path = vault_root / (op.path if op.path.endswith(".md") else op.path + ".md")
-                        if note_path.exists():
-                            # Could be either - check if we created it fresh
-                            # For now, always report as created since that was the intent
-                            results["notes_created"].append(op.path)
-                        else:
-                            results["notes_created"].append(op.path)
+                    if op.op == "create" and not existed:
+                        results["notes_created"].append(op.path)
                     else:
                         results["notes_updated"].append(op.path)
                 else:
