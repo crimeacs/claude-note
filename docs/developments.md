@@ -36,9 +36,18 @@ The latest baseline already included multi-assistant capture, provenance, the ch
 - Audience scopes form reader sets; cross-tenant or wider-audience synthesis is not justified by a similar title or service-role key.
 - Relevance thresholds need human labels, task-level evaluation splits, and pinned models. A per-note floor does not certify the whole retrieved block.
 - Hook configuration, exercised delivery, and operational health are distinct claims.
+- Recall before action needs explicit agent search or a custom host integration that returns source-linked leads. Capture, synthesis-time retrieval, and prompt recall are separate paths.
 
 These are documented design lessons. Claude Note does not bundle the external authorization server, shared consolidation worker, task context-pack service, hosted relevance scorer, or fleet sync scheduler.
+
+## Knowledge-loop demo
+
+[Remember. Then act.](knowledge-loop-demo.md) is a 112-second walkthrough for technical builders, with captions, a controlled retry example, and an inspectable media manifest. It shows recall, source verification, a tested change, capture, correction, and reindexing. The custom prompt-recall integration is labeled separately from bundled capture hooks.
+
+The film and its receipts preserve the reviewed source snapshot from PR #8, including on-screen proposal labels. Repository merges do not change that historical evidence or update installed services. Install from the intended checkout and compare its recorded commit when verifying an update; the package version alone cannot identify the installed source revision.
 
 ## Validation boundary
 
 The repository test suite uses synthetic transcripts, disposable vaults, mocked model/API calls, and fake installer executables. Local CLI help and the installed QMD keyword interface are checked separately. Repository validation does not exercise private accounts, upload personal notes, install this branch over a running service, or publish a release tag.
+
+The demo's offline recall probe checks context formatting with synthetic input and mocked retrieval; it does not test host delivery, retrieval quality, or latency. Its SQLite replay verifies one controlled retry boundary, not a production backend or customer outcome. The delivered MP4 passed full decode, playback review, and audio/video checks described in its [manifest](examples/knowledge-loop/media-manifest.json).

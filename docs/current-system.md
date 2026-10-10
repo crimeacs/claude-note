@@ -33,7 +33,10 @@ flowchart TD
     Y --> O[Structured knowledge and note operations]
     O --> V[Router and controlled Markdown writes]
     V --> N
-    N --> I[Local note index and QMD refresh]
+    N --> I[Package local note index]
+    N --> J[QMD index]
+    U[Operator or external scheduler: qmd update / embed] --> J
+    J --> R
     N --> P[Optional curated-note push]
     P --> X[External shared staging inbox]
 ```
@@ -43,6 +46,25 @@ Hooks enqueue quickly; the worker does the expensive work later. Importers provi
 The worker can write a session record even when synthesis is disabled or unavailable. Seeing session notes therefore proves capture reached the writer, not that reusable knowledge was extracted. The synthesis mode, model availability, errors, and resulting curated notes must be checked separately. See [worker.py](../src/claude_note/worker.py), [synthesizer.py](../src/claude_note/synthesizer.py), and [synthesis modes](synthesis-modes.md).
 
 Synthesis proposes structured knowledge and note operations. The router and writer control the actual filesystem effects. Managed blocks provide an owned region for updates while preserving surrounding human prose; they are not permission to replace an entire human-authored document. The current local note-operation vocabulary is defined in [knowledge_pack.py](../src/claude_note/knowledge_pack.py), with application in [note_router.py](../src/claude_note/note_router.py) and [managed_blocks.py](../src/claude_note/managed_blocks.py).
+
+## Recall before action
+
+Capture and synthesis-time retrieval do not make prior knowledge appear in the next assistant prompt. A separate recall path starts with the current task, searches an allowed collection, and gives the assistant source-linked leads. The assistant must then read full sources, check scope and supersession against current evidence, act, test, and record durable corrections. See the [demo and copyable operating rule](knowledge-loop-demo.md#recall-before-action).
+
+```mermaid
+flowchart LR
+    T[Current task] --> H[Explicit agent search or external host recall]
+    Q[Scoped QMD index] --> H
+    H --> L[Source-linked leads]
+    L --> V[Read full source and verify applicability]
+    V --> A[Act and test]
+    A --> C[Capture evidence and typed corrections]
+    C --> K[Curated knowledge]
+    K --> U[Operator or external scheduler refreshes QMD]
+    U --> Q
+```
+
+The bundled Claude Code and Codex hooks enqueue capture events. A custom Claude Code prompt hook can inject recall context, but that integration is external to this repository. The reviewed Codex setup uses explicit recall instructions and capture hooks; it does not establish automatic Codex recall. A hook's context is advisory, not proof that an agent read the evidence or obeyed an operating rule. QMD refresh scheduling is also operator or external-scheduler responsibility.
 
 ## Four different kinds of movement
 

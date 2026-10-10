@@ -1,0 +1,60 @@
+{
+  "title": "Remember. Then act.",
+  "produced_at": "2026-10-10",
+  "audience": "technical builders",
+  "reviewed_code": {
+    "repository": "https://github.com/crimeacs/claude-note",
+    "pull_request": 8,
+    "commit": "e80fb97ffd782ebf82d67b83000ef92e39ceed1b"
+  },
+  "historical_status": "The film was produced while PR #8 was under review; its proposed labels describe that snapshot.",
+  "video": {
+    "duration_seconds": 112,
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "frames": 3360,
+    "codec": "H.264",
+    "audio": "AAC, 48 kHz, stereo",
+    "integrated_loudness_lufs": -14.08,
+    "true_peak_dbtp": -1.49
+  },
+  "verification": {
+    "full_decode": "passed",
+    "full_playback": "reviewed",
+    "black_intervals_over_0_2_seconds": 0,
+    "silence_intervals_at_least_0_7_seconds": 0,
+    "recall_probe": "offline synthetic input with mocked retrieval, not assistant-event delivery",
+    "retry_example": "in-memory SQLite teaching example, not a production outcome"
+  },
+  "files": {
+    "docs/assets/knowledge-loop-poster.jpg": {
+      "bytes": 84422,
+      "sha256": "698e3339bf49a82438d31b68d5dac5a34b7513a222d5ebeb5193c56cb37953d7"
+    },
+    "docs/assets/knowledge-loop.mp4": {
+      "bytes": 9913347,
+      "sha256": "4740bffe7a21ae4df1d4817f1d8ae4783d3dd1db082fabcb2f06d425b06283cf"
+    },
+    "docs/assets/knowledge-loop.vtt": {
+      "bytes": 1476,
+      "sha256": "0f7c31887a06819b3bee0d67de2f5a57b7c8b1508ac903c8ffda0a4525e121e4"
+    },
+    "docs/examples/knowledge-loop/gotcha-note.md": {
+      "bytes": 1833,
+      "sha256": "f3def65d73827bd5f198971040df1c060adf79667a285499bafb05424e8b0e81"
+    },
+    "docs/examples/knowledge-loop/recall-probe.json": {
+      "bytes": 3343,
+      "sha256": "154850dc612c731a79e1ef796d71146a3a96176e3f2045417b683d7fe28a5144"
+    },
+    "docs/examples/knowledge-loop/retry-example.py": {
+      "bytes": 3111,
+      "sha256": "a90d07faa5cf2fbbcd2649836f021f273ea12e8c371cee5f418c248c44a6398e"
+    },
+    "docs/examples/knowledge-loop/retry-result.json": {
+      "bytes": 701,
+      "sha256": "9ac6add3a3cccb35637afa98816de23d6778a7a6b77849339075ef75bf378c0a"
+    }
+  }
+}

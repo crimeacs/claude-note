@@ -6,6 +6,14 @@ Claude Note began as a Claude Code → Obsidian logger. This fork now includes m
 
 It runs locally with Python's standard library. Synthesis invokes your installed Claude CLI; selected transcript content and retrieved source excerpts go to that CLI's configured model service. Obsidian is optional.
 
+## Watch the knowledge loop
+
+[![Remember. Then act. — knowledge-loop demo](docs/assets/knowledge-loop-poster.jpg)](docs/assets/knowledge-loop.mp4)
+
+[Watch or download the 112-second demo](docs/assets/knowledge-loop.mp4) · [Captions](docs/assets/knowledge-loop.vtt) · [Walkthrough, evidence, and agent operating rule](docs/knowledge-loop-demo.md)
+
+The demo follows a synthetic retry bug through recall, source verification, a tested fix, capture, and correction. It distinguishes this package from custom prompt-recall and shared-memory integrations. It was produced while PR #8 was under review; its on-screen proposal labels describe that source snapshot.
+
 ## What it does
 
 | Stage | Behavior |
@@ -18,6 +26,12 @@ It runs locally with Python's standard library. Synthesis invokes your installed
 | Operate | JSON health report, import and push heartbeats, installed-source provenance, and reproducible checkout updates. |
 
 [Current system architecture](docs/current-system.md) explains the wider memory system, including integrations that are **external** to this package. [Development notes](docs/developments.md) records the changes in this modernization.
+
+### Recall before action
+
+Before repeating work, search the intended knowledge collection, open relevant sources, verify their scope and current status against the task, then act and test. Write durable corrections back as typed notes and refresh the relevant index. A search snippet is a lead, not a verified answer.
+
+Bundled Claude Code and Codex hooks **capture events**. They do not inject prior knowledge before an answer. Claude Note's QMD adapter supplies synthesis and linking; prompt-time recall needs an explicit agent search or a separate host integration. See the [copyable operating rule and hook boundaries](docs/knowledge-loop-demo.md#recall-before-action).
 
 ## Install
 
@@ -50,6 +64,8 @@ scripts/install-from-checkout.sh --claude-hooks --codex-hooks
 ```
 
 The installer records the checkout path and commit in `~/.local/share/claude-note/installed-from.json`. Source-managed installations keep that source: `claude-note update` directs you to the original checkout or bundled app rather than replacing it with another fork. Unmanaged release installs use this repository's releases.
+
+Merging a PR updates repository source. Update the intended checkout and reinstall to change the running installation, then verify event delivery and worker output. Compare the recorded source commit, since a version label alone does not establish which checkout is installed.
 
 ## Capture sources
 
@@ -158,6 +174,7 @@ The JSON health report works before configuration, makes bounded local probes wi
 | [Getting started](docs/getting-started.md) | Install and verify the first capture. |
 | [Commands](docs/commands.md) / [configuration](docs/configuration.md) | Actual supported interfaces. |
 | [Architecture](docs/architecture.md) / [current system](docs/current-system.md) | Implementation and integration boundaries. |
+| [Knowledge-loop demo](docs/knowledge-loop-demo.md) | Video, controlled evidence, and recall before action. |
 | [Hooks](docs/hook-setup.md) / [services](docs/service-setup.md) | Capture and worker operation. |
 | [Synthesis modes](docs/synthesis-modes.md) / [ingestion](docs/document-ingestion.md) | Knowledge production and review. |
 | [QMD](docs/qmd-integration.md) / [troubleshooting](docs/troubleshooting.md) | Retrieval and failure diagnosis. |

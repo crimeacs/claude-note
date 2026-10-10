@@ -1,0 +1,65 @@
+WEBVTT
+
+NOTE
+Optional explanatory captions; this film has no spoken narration.
+Architecture walkthrough with an illustrative task and controlled synthetic tests.
+
+1
+00:00:00.000 --> 00:00:08.000
+A new session can repeat a solved bug
+when the lesson is not retrieved.
+
+2
+00:00:08.000 --> 00:00:16.000
+Claude: custom prompt recall.
+Codex: explicit recall tools and rules.
+
+3
+00:00:16.000 --> 00:00:25.000
+Search relevant notes, vault and memories.
+Treat source-linked matches as leads.
+
+4
+00:00:25.000 --> 00:00:35.000
+Open the source; check the correction,
+its evidence and its scope.
+
+5
+00:00:35.000 --> 00:00:44.000
+Here, a fresh key on every retry
+creates a second operation identity.
+
+6
+00:00:44.000 --> 00:00:54.000
+Reuse one key for the same operation.
+The example server enforces uniqueness.
+
+7
+00:00:54.000 --> 00:01:04.000
+Same key + UNIQUE + upsert: one stored row
+in the controlled SQLite test.
+
+8
+00:01:04.000 --> 00:01:12.000
+Capture hooks queue session evidence.
+A worker processes the transcript later.
+
+9
+00:01:12.000 --> 00:01:22.000
+Proposed PR #8 preserves richer evidence.
+Keep verified outcomes apart from proposals.
+
+10
+00:01:22.000 --> 00:01:32.000
+Keep source-linked corrections.
+Attribution does not establish approval.
+
+11
+00:01:32.000 --> 00:01:41.000
+The note is the source; QMD is its index.
+Update text; embed vectors separately.
+
+12
+00:01:41.000 --> 00:01:52.000
+Save the fix for the next task.
+Recall → verify → act → capture → correct.
