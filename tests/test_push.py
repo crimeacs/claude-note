@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import tempfile
@@ -23,8 +24,10 @@ def note(note_type, body="", extra=""):
 
 
 class FakeClient:
-    def __init__(self):
+    def __init__(self, base="https://vault.example.com", org="org-a"):
         self.calls = []
+        self.base = base
+        self.org = org
 
     def put(self, path, content, metadata):
         self.calls.append((path, content, metadata))
@@ -75,8 +78,9 @@ class PushTests(unittest.TestCase):
         self.assertEqual((counts["pushed"], counts["redacted"], counts["unchanged"]), (2, 1, 0))
         paths = sorted(c[0] for c in client.calls)
         self.assertTrue(paths[0].startswith("inbox/"))
-        self.assertTrue(paths[0].endswith("/pattern-a.md"))
-        self.assertTrue(paths[1].endswith("/topics__gotcha-b.md"))
+        self.assertTrue(any(path.endswith("/pattern-a.md") for path in paths))
+        self.assertRegex(next(path for path in paths if "/_nested/" in path),
+                         r"/_nested/topics__gotcha-b--[0-9a-f]{16}\.md$")
         sent = {c[2]["source_path"]: c for c in client.calls}
         self.assertNotIn(AWS, sent["pattern-a.md"][1])
         meta = sent["pattern-a.md"][2]
@@ -92,6 +96,112 @@ class PushTests(unittest.TestCase):
         # An edit is pushed again.
         (self.vault / "topics/gotcha-b.md").write_text(note("gotcha", "edited"))
         self.assertEqual(push.run(vault=self.vault, client=FakeClient())["pushed"], 1)
+
+    def test_receipts_are_specific_to_organization_and_endpoint(self):
+        self.assertEqual(push.run(vault=self.vault, client=FakeClient())["pushed"], 2)
+        # Cosmetic endpoint spelling does not create another destination.
+        same = FakeClient(base="https://VAULT.EXAMPLE.COM/")
+        self.assertEqual(push.run(vault=self.vault, client=same)["unchanged"], 2)
+        self.assertEqual(same.calls, [])
+        other_org = FakeClient(org="org-b")
+        self.assertEqual(push.run(vault=self.vault, client=other_org)["pushed"], 2)
+        other_host = FakeClient(base="https://another.example.com", org="org-b")
+        self.assertEqual(push.run(vault=self.vault, client=other_host)["pushed"], 2)
+        self.assertEqual(push.run(vault=self.vault, client=FakeClient())["unchanged"], 2)
+        state = json.loads(push.STATE_FILE.read_text())
+        self.assertEqual(state["version"], 2)
+        self.assertEqual(len(state["destinations"]), 3)
+
+    def test_receipts_do_not_cross_local_vaults_or_owners(self):
+        from unittest import mock
+        with mock.patch.object(push, "identity", return_value=("owner-a", "a@example.com")):
+            push.run(vault=self.vault, client=FakeClient())
+        with mock.patch.object(push, "identity", return_value=("owner-b", "b@example.com")):
+            self.assertEqual(push.run(vault=self.vault, client=FakeClient())["pushed"], 2)
+        other_vault = Path(tempfile.mkdtemp())
+        (other_vault / "pattern-a.md").write_text((self.vault / "pattern-a.md").read_text())
+        with mock.patch.object(push, "identity", return_value=("owner-a", "a@example.com")):
+            self.assertEqual(push.run(vault=other_vault, client=FakeClient())["pushed"], 1)
+
+    def test_legacy_receipts_stay_unbound_until_explicit_resend(self):
+        import contextlib
+        import io
+        legacy = {rel: hashlib.sha256(push.redact((self.vault / rel).read_text())[0].encode()).hexdigest()
+                  for rel in ("pattern-a.md", "topics/gotcha-b.md")}
+        push.STATE_FILE.write_text(json.dumps(legacy))
+        err = io.StringIO()
+        client = FakeClient()
+        with contextlib.redirect_stderr(err):
+            counts = push.run(vault=self.vault, client=client)
+        self.assertEqual((counts["pushed"], counts["unchanged"], counts["legacy_deferred"]), (0, 0, 2))
+        self.assertEqual(client.calls, [])
+        self.assertIn("--resend-legacy", err.getvalue())
+        self.assertFalse(push.HEARTBEAT.exists())
+        state = json.loads(push.STATE_FILE.read_text())
+        self.assertEqual(state["legacy"], legacy)
+        self.assertTrue(all(not record["notes"] for record in state["destinations"].values()))
+
+        self.assertEqual(push.run(vault=self.vault, client=FakeClient(), resend_legacy=True)["pushed"], 2)
+        self.assertEqual(push.run(vault=self.vault, client=FakeClient())["unchanged"], 2)
+        self.assertTrue(push.HEARTBEAT.exists())
+        # Once there is known history, a deliberately changed target receives it.
+        self.assertEqual(push.run(vault=self.vault, client=FakeClient(org="org-b"))["pushed"], 2)
+
+    def test_edit_of_legacy_note_is_sent_as_new_content(self):
+        original = (self.vault / "pattern-a.md").read_text()
+        old_sha = hashlib.sha256(push.redact(original)[0].encode()).hexdigest()
+        push.STATE_FILE.write_text(json.dumps({"pattern-a.md": old_sha}))
+        (self.vault / "pattern-a.md").write_text(original + "\nA newly verified correction.\n")
+        counts = push.run(vault=self.vault, client=FakeClient())
+        self.assertEqual((counts["pushed"], counts["legacy_deferred"]), (2, 0))
+
+    def test_legacy_dry_run_never_rebinds_state_or_contacts_destination(self):
+        original = (self.vault / "pattern-a.md").read_text()
+        old_sha = hashlib.sha256(push.redact(original)[0].encode()).hexdigest()
+        before = json.dumps({"pattern-a.md": old_sha})
+        push.STATE_FILE.write_text(before)
+        client = FakeClient()
+        counts = push.run(vault=self.vault, client=client, dry_run=True, resend_legacy=True)
+        self.assertEqual(counts["pushed"], 2)
+        self.assertEqual(client.calls, [])
+        self.assertEqual(push.STATE_FILE.read_text(), before)
+        self.assertFalse(push.HEARTBEAT.exists())
+
+    def test_remote_paths_are_unique_without_changing_root_filenames(self):
+        prefix = "inbox/person/2026-01-01"
+        root = push.remote_path("person", "2026-01-01", Path("a__b.md"))
+        nested = push.remote_path("person", "2026-01-01", Path("a/b.md"))
+        self.assertEqual(root, f"{prefix}/a__b.md")
+        self.assertNotEqual(root, nested)
+        self.assertEqual(nested, push.remote_path("person", "2026-01-01", Path("a/b.md")))
+        self.assertNotEqual(push.remote_path("person", "2026-01-01", Path("a/b__c.md")),
+                            push.remote_path("person", "2026-01-01", Path("a__b/c.md")))
+
+    def test_privacy_controls_match_in_dry_run_and_upload_selection(self):
+        # Remove the ordinary eligible fixture notes, then exercise only the
+        # privacy cases. A dry run and a real run must nominate the same files.
+        (self.vault / "pattern-a.md").unlink()
+        (self.vault / "topics/gotcha-b.md").unlink()
+        fixtures = {
+            "blocked-comment.md": "share: false # keep this private\n",
+            "blocked-quoted.md": 'share: "false" # local only\n',
+            "blocked-malformed.md": "share: fasle\n",
+            "allowed.md": "share: true # consciously share\n",
+        }
+        for name, control in fixtures.items():
+            (self.vault / name).write_text(note("pattern", "A reusable finding.", control))
+        (self.vault / "blocked-bom.md").write_text("\ufeff" + note("pattern", extra="share: false\n"))
+        (self.vault / "blocked-unterminated.md").write_text(
+            "---\ntype: pattern\nshare: false\n" + FILLER)
+        (self.vault / "allowed-bom.md").write_text("\ufeff" + note("pattern", extra="share: true\n"))
+        dry_client = FakeClient()
+        dry = push.run(vault=self.vault, client=dry_client, dry_run=True)
+        self.assertEqual((dry["pushed"], dry_client.calls), (2, []))
+        client = FakeClient()
+        actual = push.run(vault=self.vault, client=client)
+        self.assertEqual(actual["pushed"], dry["pushed"])
+        self.assertEqual(sorted(metadata["source_path"] for _, _, metadata in client.calls),
+                         ["allowed-bom.md", "allowed.md"])
 
     def test_stub_notes_are_skipped(self):
         stubs = {
@@ -194,6 +304,48 @@ class InferTypeTests(unittest.TestCase):
     def test_explicit_type_still_wins(self):
         self.assertIsNone(push.eligible(Path("a.md"), self.synth(["pattern"], "assistant: codex\ntype: log\n")))
         self.assertEqual(push.eligible(Path("a.md"), self.synth(["pattern"], "assistant: codex\ntype: project\n")), "project")
+
+    def test_false_share_scalars_with_quotes_and_yaml_comments_stay_local(self):
+        for control in ("false", "FALSE # privacy", '"false" # privacy', "'false' # privacy",
+                        "'FALSE'", '"false # not a boolean"'):
+            with self.subTest(control=control):
+                self.assertIsNone(push.eligible(Path("a.md"), note("pattern", extra=f"share: {control}\n")))
+        self.assertIsNone(push.eligible(Path("a.md"), note("pattern", extra='"share": false # private\n')))
+        self.assertIsNone(push.eligible(Path("a.md"), note("pattern", extra="'share' : 'false' # private\n")))
+
+    def test_malformed_or_unsupported_share_values_fail_closed(self):
+        for control in ("", "fasle", "no", "yes", "0", "[]", "{}", "null", '"false',
+                        "true#not-a-yaml-comment", "true unexpected", "'true' unexpected", "|"):
+            with self.subTest(control=control):
+                self.assertIsNone(push.eligible(Path("a.md"), note("pattern", extra=f"share: {control}\n")))
+        for controls in ("share: false\nshare: true\n", "share: true\nshare: true\n"):
+            self.assertIsNone(push.eligible(Path("a.md"), note("pattern", extra=controls)))
+
+    def test_bom_notes_honor_privacy_type_and_session_tags(self):
+        for newline in ("\n", "\r\n"):
+            for control, expected in (("false # private", None), ("true", "pattern")):
+                with self.subTest(newline=newline, control=control):
+                    text = "\ufeff" + note("pattern", extra=f"share: {control}\n").replace("\n", newline)
+                    self.assertEqual(push.eligible(Path("a.md"), text), expected)
+                    self.assertEqual(push.frontmatter(text)["type"], "pattern")
+        self.assertEqual(push.eligible(Path("a.md"), "\ufeff" + note("pattern")), "pattern")
+        self.assertIsNone(push.eligible(Path("a.md"), "\ufeff" + self.synth(["log", "claude-note"])))
+
+    def test_unterminated_frontmatter_explicitly_fails_closed(self):
+        for prefix in ("", "\ufeff"):
+            for control in ("share: false\n", "share: true\n", ""):
+                for suffix in ("", "---truncated\n"):
+                    with self.subTest(prefix=prefix, control=control, suffix=suffix):
+                        text = prefix + "---\ntype: pattern\n" + control + suffix + FILLER
+                        self.assertFalse(push._share_allowed(text))
+                        self.assertIsNone(push.eligible(Path("a.md"), text))
+            self.assertFalse(push._share_allowed(prefix + "---"))
+
+    def test_explicit_true_and_absent_share_keep_existing_eligibility(self):
+        for control in ("true", "TRUE # approved", '"true" # approved', "'true' # approved"):
+            with self.subTest(control=control):
+                self.assertEqual(push.eligible(Path("a.md"), note("pattern", extra=f"share: {control}\n")), "pattern")
+        self.assertEqual(push.eligible(Path("a.md"), note("pattern")), "pattern")
 
 
 class WithTypeTests(unittest.TestCase):

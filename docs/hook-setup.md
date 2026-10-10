@@ -1,192 +1,30 @@
-# Claude Code Hook Setup
+# Hook setup and verification
 
-Claude Note integrates with Claude Code through hooks. This document explains how to configure them.
+Use the idempotent installers instead of replacing the host's settings:
 
-## Overview
-
-Claude Code fires hooks at key moments:
-- **PostToolUse**: After any tool is used
-- **UserPromptSubmit**: When user sends a message
-- **Stop**: When session ends
-
-Claude Note listens to these events to track sessions and trigger synthesis.
-
-## Configuration
-
-### Option 1: Global Settings
-
-Edit `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "PostToolUse": [
-      {
-        "hooks": [
-          { "type": "command", "command": "claude-note enqueue", "timeout": 5000 }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          { "type": "command", "command": "claude-note enqueue", "timeout": 5000 }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          { "type": "command", "command": "claude-note enqueue", "timeout": 5000 }
-        ]
-      }
-    ]
-  }
-}
+```bash
+claude-note install-claude-hooks
+claude-note install-codex-hooks
 ```
 
-### Option 2: Per-Project Settings
+Existing unrelated settings remain, and changed files receive a timestamped backup. Claude Code settings default to `~/.claude/settings.json`; Codex hooks default to `~/.codex/hooks.json`. Use `--settings-file` or `--hooks-file` for another location.
 
-Create `.claude/settings.json` in your project root with the same content.
+| Host | Registered events | Timeout units |
+| --- | --- | --- |
+| Claude Code | `PostToolUse`, `UserPromptSubmit`, `Stop` | Seconds, 10 each. |
+| Codex | `UserPromptSubmit`, `Stop`, `SessionEnd` | Seconds, 5 / 5 / 3. |
 
-## Hook Details
+Each command invokes the installed `claude-note enqueue` executable. Hook support and trust depend on the installed host. A `Stop` event means the assistant stopped responding; it does not necessarily mean the conversation ended.
 
-### PostToolUse
+## Verify delivery
 
-Fired after every tool use (file read, edit, bash command, etc.).
+1. Inspect `claude-note status --json` for hook configuration and worker health.
+2. Trust the hook file in the host if prompted.
+3. Perform a controlled assistant turn, then inspect `{vault}/.claude-note/queue/` for that session's event.
+4. Inspect its session record and synthesis output, and check worker logs for errors.
 
-Used for:
-- Keeping session state fresh
-- Detecting activity patterns
+Do not claim automatic capture from configuration alone. A later import sweep can recover a session even when no hook fired; distinguish recovery from hook delivery. The sweep also handles supported recent Claude Code and Codex history.
 
-### UserPromptSubmit
+The enqueue interface reads host JSON on stdin; it has no positional `test` or `event_type` arguments. Test with a controlled host event or synthetic stdin in a disposable vault. Synthesis disables hooks for its own Claude subprocess to reduce recursive capture.
 
-Fired when the user sends a message.
-
-Used for:
-- Question detection (adds to open questions tracker)
-- Session activity tracking
-
-### Stop
-
-Fired when the session ends (user exits or session times out).
-
-Used for:
-- Triggering synthesis
-- Finalizing session log
-
-## Environment Variables
-
-Claude Code provides these variables to hooks:
-
-| Variable | Description |
-|----------|-------------|
-| `CLAUDE_SESSION_ID` | Unique session identifier |
-| `CLAUDE_WORKING_DIR` | Current working directory |
-
-## Verifying Setup
-
-1. Start a Claude Code session
-2. Check the queue:
-   ```bash
-   claude-note status
-   ```
-3. You should see pending events
-
-## Troubleshooting
-
-### Hooks not firing
-
-1. Verify settings.json location and syntax:
-   ```bash
-   cat ~/.claude/settings.json | jq .
-   ```
-
-2. Check if claude-note is in PATH:
-   ```bash
-   which claude-note
-   ```
-
-3. Test hook manually:
-   ```bash
-   claude-note enqueue test "test-session-id"
-   ```
-
-### Events queued but not processed
-
-1. Check if worker is running:
-   ```bash
-   # macOS
-   launchctl list | grep claude-note
-
-   # Linux
-   systemctl --user status claude-note
-   ```
-
-2. Check worker logs:
-   ```bash
-   tail -f /path/to/vault/.claude-note/logs/worker-*.log
-   ```
-
-### Synthesis not running
-
-1. Verify Claude CLI is installed:
-   ```bash
-   which claude
-   ```
-
-2. Check if you're authenticated:
-   ```bash
-   claude --version
-   ```
-
-3. Check synthesis mode in config:
-   ```bash
-   cat ~/.config/claude-note/config.toml
-   ```
-
-## Minimal Setup
-
-If you only want session logging (no synthesis), you can use just the Stop hook:
-
-```json
-{
-  "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          { "type": "command", "command": "claude-note enqueue", "timeout": 5000 }
-        ]
-      }
-    ]
-  }
-}
-```
-
-And set mode to "log":
-
-```toml
-[synthesis]
-mode = "log"
-```
-
-## Advanced: Filtering by Directory
-
-To only capture sessions in specific directories, add a `matcher` regex:
-
-```json
-{
-  "hooks": {
-    "Stop": [
-      {
-        "matcher": "/Users/you/work/.*",
-        "hooks": [
-          { "type": "command", "command": "claude-note enqueue", "timeout": 5000 }
-        ]
-      }
-    ]
-  }
-}
-```
-
-The `matcher` is a regex against the working directory.
+Cursor uses a read-only local database importer. Claude desktop/web and ChatGPT web use explicit conversation exports. Those are separate adapters, not hooks into their accounts.

@@ -183,6 +183,8 @@ def cmd_import(args) -> int:
     counts = importers.sweep(since=since, zips=args.zips)
     for source, count in counts.items():
         print(f"  {source}: {count}")
+    if counts.get("problems"):
+        return 1
     print("Queued sessions are written by the worker (or run: claude-note drain).")
     return 0
 
@@ -261,10 +263,11 @@ def cmd_push(args) -> int:
     from . import push
     if args.install_agent:
         return install_push_agent()
-    counts = push.run(dry_run=args.dry_run, limit=args.limit)
+    counts = push.run(dry_run=args.dry_run, limit=args.limit, resend_legacy=args.resend_legacy)
     label = "would push" if args.dry_run else "pushed"
     print(f"{label}: {counts['pushed']}  unchanged: {counts['unchanged']}  redacted: {counts['redacted']}  "
-          f"skipped: {counts['skipped']}  skipped:stub: {counts['skipped_stub']}  errors: {counts['errors']}  (not eligible: {counts['not_eligible']})")
+          f"skipped: {counts['skipped']}  skipped:stub: {counts['skipped_stub']}  errors: {counts['errors']}  "
+          f"legacy deferred: {counts['legacy_deferred']}  (not eligible: {counts['not_eligible']})")
     if counts.get("stopped"):
         print(f"stopped early: {counts['stopped']}")
     return 1 if counts["errors"] else 0
@@ -455,6 +458,20 @@ def cmd_update(args) -> int:
 
     status = version_checker.get_update_status()
 
+    if status.get("managed_source"):
+        import shlex
+        from pathlib import Path
+        source = status["managed_source"]
+        print(f"Installed from {source['source']} at {source.get('commit', 'unknown')}: {source.get('path', 'unknown')}")
+        if source["source"] == "git" and source.get("path"):
+            script = Path(source["path"]) / "scripts/install-from-checkout.sh"
+            print("Update the recorded checkout, then reinstall it with:")
+            print(f"  bash {shlex.quote(str(script))}")
+        else:
+            print("Update through the app or bundle that installed claude-note, preserving its SOURCE_REF.")
+        print("The recorded source has been preserved.")
+        return 1
+
     if status["latest"] is None:
         print("Could not check for updates (network error)")
         return 1
@@ -468,7 +485,7 @@ def cmd_update(args) -> int:
 
     result = subprocess.run(
         ["uv", "tool", "install", "--force", "--upgrade",
-         "https://github.com/artemiin/claude-note.git"],
+         f"git+{version_checker.REPO_URL}.git@v{status['latest']}"],
         capture_output=False
     )
 
@@ -600,6 +617,8 @@ def main() -> int:
     )
     push_parser.add_argument("--dry-run", "-n", action="store_true", help="Count only; no network")
     push_parser.add_argument("--limit", type=int, default=0, help="Push at most N notes this run")
+    push_parser.add_argument("--resend-legacy", action="store_true",
+                             help="Explicitly send unchanged legacy notes whose previous destination is unknown")
     push_parser.add_argument("--install-agent", action="store_true", help="Install the daily 03:00 launchd agent")
     push_parser.set_defaults(func=cmd_push)
 

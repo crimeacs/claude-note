@@ -1,4 +1,5 @@
 ---
+type: gotcha
 tags:
   - log
 created: {{date}}
@@ -34,4 +35,4 @@ created: {{date}}
 
 ## Related
 
-- [[]]
+<!-- Link only to existing relevant notes. -->

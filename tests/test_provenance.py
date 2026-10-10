@@ -119,6 +119,98 @@ class PushCarriesProvenanceTests(unittest.TestCase):
 
 
 class HealthTests(unittest.TestCase):
+    def test_synthesis_mode_env_matches_runtime_precedence(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"CLAUDE_NOTE_VAULT": tmp}), \
+                mock.patch.object(health, "_notes", return_value={}), \
+                mock.patch.object(health, "_synthesis", return_value={}), \
+                mock.patch.object(health, "_launchd_loaded", return_value=False), \
+                mock.patch.object(health, "_which", return_value="/tool"):
+            for configured, override in (("route", "log"), ("log", "inbox")):
+                with self.subTest(configured=configured, override=override), \
+                        mock.patch.dict(os.environ, {"CLAUDE_NOTE_MODE": override}), \
+                        mock.patch.object(health, "_config", return_value=(Path(tmp) / "config.toml",
+                                                                          {"synthesis": {"mode": configured}})):
+                    out = health.report()
+                self.assertEqual(out["synth_mode"], override)
+                self.assertEqual(any("synthesis is off" in p for p in out["problems"]), override == "log")
+                if override == "log":
+                    self.assertTrue(any("CLAUDE_NOTE_MODE" in p for p in out["problems"]))
+
+    def test_optional_push_and_import_only_capture_can_be_healthy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "import-sweep.ok").write_text(json.dumps({"counts": {}}))
+            with mock.patch.dict(os.environ, {"CLAUDE_NOTE_VAULT": tmp}), \
+                    mock.patch.object(health, "LOGS", logs), \
+                    mock.patch.object(health, "LAUNCH_AGENTS", root / "agents"), \
+                    mock.patch.object(health, "_launchd_loaded", side_effect=lambda label: label == health.WORKER_LABEL), \
+                    mock.patch.object(health, "_hooks_installed", return_value=False), \
+                    mock.patch.object(health, "_notes", return_value={}), \
+                    mock.patch.object(health, "_which", return_value="/tool"), \
+                    mock.patch.object(health, "_config", return_value=(root / "config.toml", {"synthesis": {"mode": "route"}})), \
+                    mock.patch.object(provenance, "author_email", return_value="me@example.com"):
+                out = health.report()
+            self.assertFalse(out["push"]["agent_installed"])
+            self.assertFalse(out["hooks"]["claude_code"])
+            self.assertTrue(out["ok"], out["problems"])
+
+    def test_codex_hooks_do_not_require_claude_hooks(self):
+        with mock.patch.object(health, "_hooks_installed", side_effect=lambda path: ".codex" in str(path)):
+            out = health.report()
+        self.assertTrue(out["hooks"]["codex"])
+        self.assertFalse(any("capture not configured" in problem for problem in out["problems"]))
+
+    def test_failed_pending_synthesis_is_visible_even_with_summary_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_dir = root / ".claude-note/state"
+            log_dir = root / ".claude-note/logs"
+            state_dir.mkdir(parents=True)
+            log_dir.mkdir(parents=True)
+            for name, attempts in (("failed", 2), ("fresh", 0), ("vault_index", 9)):
+                (state_dir / f"{name}.json").write_text(json.dumps({"session_id": name,
+                    "synthesis_pending": True, "synthesis_attempts": attempts}))
+            (state_dir / "symlink.json").symlink_to(state_dir / "failed.json")
+            (log_dir / "worker-2026-10-10.log").write_text(
+                "Updated session summary: A useful result\nSynthesis error: Op failed: create invalid-path\n")
+            with mock.patch.dict(os.environ, {"CLAUDE_NOTE_VAULT": tmp}), \
+                    mock.patch.object(health, "_notes", return_value={}), \
+                    mock.patch.object(health, "_launchd_loaded", return_value=False):
+                out = health.report()
+            self.assertEqual(out["synthesis"]["pending"], 2)
+            self.assertEqual(out["synthesis"]["failed_pending"], 1)
+            self.assertEqual(out["synthesis"]["succeeded"], 1)
+            self.assertTrue(any("synthesis pending retry for 1" in problem for problem in out["problems"]))
+
+    def test_vault_alias_matches_runtime_precedence(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"CLAUDE_NOTE_VAULT": tmp, "CLAUDE_NOTE_VAULT_ROOT": "/old-vault"}), \
+                mock.patch.object(health, "_notes", return_value={}), \
+                mock.patch.object(health, "_synthesis", return_value={}), \
+                mock.patch.object(health, "_launchd_loaded", return_value=False):
+            out = health.report()
+        self.assertTrue(out["configured"])
+        self.assertEqual(out["vault_root"], tmp)
+
+    def test_destination_scoped_push_receipts_are_counted_by_source_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "push-state.json"
+            state.write_text(json.dumps({"version": 2, "destinations": {
+                "first": {"notes": {"a.md": "sha1", "b.md": "sha2"}},
+                "second": {"notes": {"a.md": "sha1"}},
+            }, "legacy": {"a.md": "sha1", "old.md": "sha3"}}))
+            with mock.patch.object(health, "PUSH_STATE", state):
+                counts = health._notes(root)
+            self.assertEqual(counts["pushed"], 2)
+            self.assertEqual(counts["legacy_unbound"], 1)
+            state.write_text(json.dumps({"version": 2, "destinations": ["malformed"], "legacy": "malformed"}))
+            with mock.patch.object(health, "PUSH_STATE", state):
+                self.assertEqual(health._notes(root)["pushed"], 0)
+
     def test_unconfigured_machine_reports_instead_of_exiting(self):
         with tempfile.TemporaryDirectory() as home:
             env = {"XDG_CONFIG_HOME": str(Path(home) / "xdg")}
@@ -158,6 +250,8 @@ class HealthTests(unittest.TestCase):
             (home / "LaunchAgents").mkdir()
             (home / "LaunchAgents/com.claude-note.worker.plist").write_text("x")
             (home / "LaunchAgents/com.claude-note.push.plist").write_text("x")
+            (home / "logs").mkdir()
+            (home / "logs/import-sweep.ok").write_text(json.dumps({"counts": {}}))
             (home / ".claude").mkdir()
             (home / ".claude/settings.json").write_text(json.dumps({"hooks": {"Stop": [
                 {"hooks": [{"type": "command", "command": "/x/claude-note enqueue"}]}]}}))
@@ -175,6 +269,26 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(out["notes"]["knowledge"], 0)
         self.assertTrue(out["ok"])
         self.assertTrue(out["hooks"]["claude_code"])
+
+    def test_import_health_reads_latest_failure_and_stale_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            heartbeat = logs / "import-sweep.ok"
+            heartbeat.write_text(json.dumps({"counts": {}}))
+            old = __import__("time").time() - health.IMPORT_STALE_SECONDS - 60
+            os.utime(heartbeat, (old, old))
+            self.assertTrue(health._heartbeat(heartbeat, health.IMPORT_STALE_SECONDS)["stale"])
+            (logs / "import-sweep.json").write_text(json.dumps({"counts": {
+                "problems": ["cursor: database unavailable"]}}))
+            with mock.patch.object(health, "LOGS", logs), \
+                    mock.patch.object(health, "_launchd_loaded", return_value=True), \
+                    mock.patch.object(health, "_notes", return_value={}), \
+                    mock.patch.object(health, "_synthesis", return_value={}), \
+                    mock.patch.object(health, "_which", return_value="/tool"), \
+                    mock.patch.object(provenance, "author_email", return_value="me@example.com"):
+                report = health.report()
+            self.assertIn("import: cursor: database unavailable", report["problems"])
+            self.assertTrue(any("last clean import sweep" in p for p in report["problems"]))
 
 
 if __name__ == "__main__":

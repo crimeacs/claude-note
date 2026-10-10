@@ -1,12 +1,12 @@
 {
   "name": "ingest",
   "version": "1.0.0",
-  "description": "Ingest documents into atomic knowledge notes with semantic deduplication",
+  "description": "Ingest local documents into typed source indexes and source-backed atomic notes",
   "author": "crimeacs",
-  "homepage": "https://github.com/crimeacs/claude-ingest-skill",
+  "homepage": "https://github.com/crimeacs/claude-note/tree/main/skills/ingest",
   "repository": {
     "type": "git",
-    "url": "https://github.com/crimeacs/claude-ingest-skill.git"
+    "url": "https://github.com/crimeacs/claude-note.git"
   },
   "keywords": [
     "knowledge-management",

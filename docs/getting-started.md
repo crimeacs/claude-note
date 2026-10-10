@@ -1,193 +1,48 @@
-# Getting Started with Claude Note
+# Getting started
 
-This guide walks you through installing and configuring Claude Note from scratch.
-
-## What is Claude Note?
-
-Claude Note is a background service that automatically captures knowledge from your Claude Code sessions and writes it to your Obsidian vault (or any markdown-based notes system).
-
-When you work with Claude Code, valuable insights emerge: debugging techniques, architectural decisions, code patterns, and open questions. Without Claude Note, these insights vanish when you close your terminal. With Claude Note, they become permanent, searchable notes.
-
-## Prerequisites
-
-### Required
-
-| Dependency | Version | Why |
-|------------|---------|-----|
-| Python | 3.11+ | Uses built-in `tomllib` for config parsing |
-| git | any | Clones the repository during installation |
-
-### Optional (but recommended)
-
-| Dependency | Purpose |
-|------------|---------|
-| [Claude CLI](https://claude.ai/download) | Required for knowledge synthesis. Without it, only session logging works. |
-| [qmd](https://github.com/tobi/qmd) | Semantic search for better synthesis context. Helps Claude understand your existing notes. |
-| pandoc | Required for document ingestion (PDF/DOCX support) |
-
-## Installation
-
-### One-Command Install
+Use a permanent checkout so you can identify and reproduce the running version.
 
 ```bash
-git clone https://github.com/crimeacs/claude-note.git
-cd claude-note
-./install.sh
+git clone https://github.com/crimeacs/claude-note.git ~/src/claude-note
+cd ~/src/claude-note
+scripts/install-from-checkout.sh --non-interactive \
+  --vault ~/Documents/claude-notes --author you@example.com --claude-hooks
 ```
 
-### What the Installer Does
+Python 3.11+ and uv are required. `--install-uv` explicitly permits fetching uv. Claude CLI must be installed and authenticated for synthesis; the installer chooses `log` if it is absent. Existing authored configuration is preserved. The checkout installer creates a macOS LaunchAgent; Linux setup is in [service setup](service-setup.md). `./install.sh` remains the interactive installation path.
 
-1. **Checks dependencies** - Verifies Python 3.11+, warns about missing optional tools
-2. **Prompts for vault path** - Where your Obsidian vault or notes directory lives
-3. **Installs source code** - Copies to `~/.local/share/claude-note/`
-4. **Creates CLI shim** - Adds `claude-note` command to `~/.local/bin/`
-5. **Writes configuration** - Creates `~/.config/claude-note/config.toml`
-6. **Initializes vault structure** - Creates `.claude-note/` directory in your vault
-7. **Sets up background service** - launchd on macOS, systemd on Linux
-8. **Prints hook instructions** - Shows how to connect Claude Code
+1. Inspect `~/.config/claude-note/config.toml`. Choose `inbox` initially to review extractions. The built-in mode is `route`.
+2. Run `claude-note status --json`. It reports configuration and operational problems even before setup; exit 1 means inspect its `problems` list.
+3. Start a short assistant session that establishes one useful synthetic lesson. End the turn and wait for processing. Check the event queue, session note and curated output separately.
+4. Inspect `{vault}/.claude-note/logs/worker-*.log`. A session note proves capture, not necessarily successful synthesis.
+5. Enable [QMD](qmd-integration.md) with an explicit collection for this vault if you want source context.
 
-### Manual Installation
-
-If you prefer manual control:
+For Codex hosts that support hooks, run `claude-note install-codex-hooks` and trust the hook file in the host. Presence of `~/.codex/hooks.json` does not prove delivery. The recovery sweep can pick up missed rollouts. Cursor import and supported exported conversations use the same worker pipeline; see [commands](commands.md).
 
 ```bash
-# 1. Clone repository
-git clone https://github.com/crimeacs/claude-note.git ~/.local/share/claude-note
-
-# 2. Create CLI shim
-mkdir -p ~/.local/bin
-cat > ~/.local/bin/claude-note << 'EOF'
-#!/usr/bin/env bash
-INSTALL_DIR="${HOME}/.local/share/claude-note"
-export PYTHONPATH="${INSTALL_DIR}/src"
-if [ -t 0 ]; then
-    exec python3 -m claude_note.cli "$@"
-else
-    exec python3 -m claude_note.cli "$@" <<< "$(cat)"
-fi
-EOF
-chmod +x ~/.local/bin/claude-note
-
-# 3. Add to PATH (add to ~/.bashrc or ~/.zshrc)
-export PATH="$PATH:$HOME/.local/bin"
-
-# 4. Create config
-mkdir -p ~/.config/claude-note
-cat > ~/.config/claude-note/config.toml << EOF
-vault_root = "/path/to/your/vault"
-
-[synthesis]
-mode = "route"
-model = "claude-sonnet-4-5-20250929"
-
-[qmd]
-enabled = false
-EOF
-
-# 5. Initialize vault
-mkdir -p /path/to/your/vault/.claude-note/{queue,state,logs}
-
-# 6. Set up service (see docs/service-setup.md)
+claude-note import
+claude-note ingest paper.pdf --dry-run
+claude-note clean --all           # preview only
 ```
 
-## Connecting to Claude Code
+Keep `.claude-note/` out of version control. Keep confidential notes local or explicitly excluded from sharing. Optional shared push is a separate configured action; see the [README](../README.md#optional-shared-vault-push).
 
-Claude Note receives events from Claude Code through hooks. Add this to `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "PostToolUse": [
-      {
-        "hooks": [
-          { "type": "command", "command": "claude-note enqueue", "timeout": 5000 }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          { "type": "command", "command": "claude-note enqueue", "timeout": 5000 }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          { "type": "command", "command": "claude-note enqueue", "timeout": 5000 }
-        ]
-      }
-    ]
-  }
-}
-```
-
-### What Each Hook Does
-
-| Hook | When it fires | What Claude Note does |
-|------|---------------|----------------------|
-| `PostToolUse` | After any tool (file read, edit, bash) | Updates session state, tracks activity |
-| `UserPromptSubmit` | When you send a message | Detects questions for open questions tracker |
-| `Stop` | When session ends | Triggers synthesis and note creation |
-
-## Verifying Installation
-
-### 1. Check CLI works
+Update from the same checkout:
 
 ```bash
-claude-note status
+cd ~/src/claude-note
+git pull --ff-only
+scripts/install-from-checkout.sh --claude-hooks --codex-hooks
 ```
 
-You should see:
-```
-Worker: running (PID 12345)
-Queue: 0 pending events
-Sessions: 0 active, 0 completed today
-```
+Do not use a temporary checkout or an unrelated fork to update an existing install. Source-managed `claude-note update` explains the recorded source instead of replacing it.
 
-### 2. Check worker is running
+## Existing vaults
 
-**macOS:**
-```bash
-launchctl list | grep claude-note
-```
+The installer preserves existing settings, so review these changes explicitly:
 
-**Linux:**
-```bash
-systemctl --user status claude-note
-```
+- Set `qmd.collection` to the registered collection for this vault. Retrieval now defaults to keyword search; choose `search_mode = "vector"` and prepare embeddings if you want vector search. Semantic ingestion candidates require `ingest_dedup_enabled = true`.
+- New session records live in `sessions/`; existing root session records remain usable. A changed imported conversation receives a new source-aware identity, preserving the older capture as historical evidence.
+- Push receipts now bind to the destination and local vault. Unbound legacy receipts are deferred. Inspect `push --dry-run` before deliberately using `push --resend-legacy` for the configured target.
 
-### 3. Test the pipeline
-
-```bash
-# Manually trigger an event
-echo '{"event":"test"}' | claude-note enqueue
-
-# Check it was queued
-claude-note status
-```
-
-## First Session
-
-1. Start a Claude Code session in any project
-2. Do some work - ask questions, edit files
-3. Exit the session (Ctrl+C or type "exit")
-4. Check your vault:
-   - `claude-note-inbox.md` should have new content (if using inbox/route mode)
-   - Or `claude-session-*.md` files (if using log mode)
-
-## Next Steps
-
-- [Configuration Reference](configuration.md) - Customize behavior
-- [Synthesis Modes](synthesis-modes.md) - Understand log/inbox/route
-- [Commands Reference](commands.md) - All CLI commands
-- [Troubleshooting](troubleshooting.md) - Common issues
-
-## Uninstalling
-
-```bash
-cd ~/.local/share/claude-note
-./uninstall.sh
-```
-
-This removes the service, CLI, and source code. Your vault data is preserved.
+No vault move or mass re-upload is required to install the update. See [development notes](developments.md) for the implementation map.

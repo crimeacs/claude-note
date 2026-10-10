@@ -1,0 +1,13 @@
+{
+  "types": {
+    "type": "text",
+    "tags": "tags",
+    "aliases": "aliases",
+    "created": "date",
+    "date": "date",
+    "status": "text",
+    "session_id": "text",
+    "name": "text",
+    "description": "text"
+  }
+}

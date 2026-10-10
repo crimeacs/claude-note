@@ -1,344 +1,165 @@
 # Claude Note
 
-Automatic knowledge extraction from Claude Code sessions into your Obsidian vault.
+A shared knowledge loop for your AI assistants: capture work, extract reusable lessons, keep typed Markdown notes, and retrieve them in the next session.
 
-Claude Note runs as a background service, watching your Claude Code sessions and synthesizing key learnings, decisions, and questions into structured notes.
+Claude Note began as a Claude Code → Obsidian logger. This fork now includes multi-assistant imports, author and assistant provenance, safe note routing, bounded QMD retrieval, health reporting, and optional curated sharing with a Sweat AI vault. The package and command remain `claude-note`; existing `foresyn` API and configuration names remain technical identifiers.
 
-## Features
+It runs locally with Python's standard library. Synthesis invokes your installed Claude CLI; selected transcript content and retrieved source excerpts go to that CLI's configured model service. Obsidian is optional.
 
-- **Session Logging**: Automatically captures Claude Code sessions as markdown notes
-- **Knowledge Synthesis**: Uses Claude to extract key concepts, code patterns, and learnings
-- **Smart Routing**: Routes synthesized knowledge to your inbox, specific notes, or creates new ones
-- **Open Questions Tracking**: Detects and tracks questions that come up during sessions
-- **Vault Integration**: Understands your existing notes for better context
+## What it does
 
-## Requirements
+| Stage | Behavior |
+| --- | --- |
+| Capture | Claude Code hooks, Codex hooks and rollout recovery, read-only Cursor import, Claude and ChatGPT export imports. |
+| Synthesize | Extract conclusions, tool outcomes, concepts, decisions, questions, and procedures; keep proposals and verified results distinct. |
+| Organize | Typed durable notes, separate `sessions/` evidence, source backlinks, managed updates, exact-content deduplication, and vault-confined Markdown paths. |
+| Retrieve | Optional collection-scoped QMD search, current and legacy JSON support, bounded subprocesses, and local source verification. BM25 is the synthesis default. |
+| Share | Optional push of eligible, redacted notes into a configured shared vault inbox. Upload is staging; remote consolidation and approval are separate. |
+| Operate | JSON health report, import and push heartbeats, installed-source provenance, and reproducible checkout updates. |
 
-- Python 3.11+ (for built-in `tomllib`)
-- [Claude CLI](https://github.com/anthropics/claude-cli) (for knowledge synthesis)
-- An Obsidian vault (or any markdown-based notes system)
+[Current system architecture](docs/current-system.md) explains the wider memory system, including integrations that are **external** to this package. [Development notes](docs/developments.md) records the changes in this modernization.
 
-## Quick Start
+## Install
 
-```bash
-# Clone and install
-git clone https://github.com/crimeacs/claude-note.git
-cd claude-note
-./install.sh
-```
-
-The installer will:
-1. Check dependencies
-2. Ask for your vault path
-3. Set up the background service
-4. Print instructions for Claude Code hook configuration
-
-### Updating an existing install from a checkout
-
-`install.sh` is for first-time setup: it asks questions and rewrites
-`config.toml`. To put a checkout's code on a machine that is already set up
-(every laptop after the first install, or after `git pull`):
+Requirements: Python 3.11+, git, and [uv](https://docs.astral.sh/uv/). Install and authenticate the [Claude CLI](https://code.claude.com/docs/en/overview) for synthesis, or use `log` mode. QMD and document converters are optional.
 
 ```bash
-cd ~/src/claude-note && git pull
-scripts/install-from-checkout.sh --push-agent --codex-hooks
+git clone https://github.com/crimeacs/claude-note.git ~/src/claude-note
+cd ~/src/claude-note
+scripts/install-from-checkout.sh --non-interactive \
+  --vault ~/Documents/claude-notes --author you@example.com --claude-hooks
 ```
 
-It installs the checkout with `uv tool install --reinstall`, restarts the
-worker if it is loaded, and records the path and commit in
-`~/.local/share/claude-note/installed-from.json`. It never touches the config,
-the vault or the worker plist. `--push-agent` (re)installs the daily push job,
-`--claude-hooks` the Claude Code hooks and `--codex-hooks` the Codex hooks; all
-are idempotent. It refuses a checkout under a temp directory (it vanishes on
-reboot and nobody can tell what is running) and uncommitted changes in `src/`
-(`--allow-temp`, `--allow-dirty` override).
+`--install-uv` explicitly allows the installer to fetch uv if absent. Existing configuration and vault files are preserved. The checkout installer sets up the macOS worker; Linux users install the package with uv and use the [systemd template](docs/service-setup.md), or use the interactive `./install.sh`.
 
-### Installing from another program (no Terminal, no questions)
-
-The same script sets up a new machine when run with `--non-interactive`, from
-a git checkout or from a plain copy of the source (the Sweat app bundles one;
-a copy records its ref in a `SOURCE_REF` file, or pass `--source-ref`):
+Optional setup:
 
 ```bash
-scripts/install-from-checkout.sh --non-interactive --install-uv \
-    --vault ~/Documents/claude-notes --author you@company.com \
-    --push-agent --claude-hooks
+claude-note install-codex-hooks
+claude-note status --json
 ```
 
-It closes stdin and never prompts. It writes `config.toml` only if there is
-none, creates the vault from `vault-template/` and installs and starts the
-worker LaunchAgent only if missing, and sets `author` in `config.toml` when
-`--author` is given. `--install-uv` fetches uv with astral's standalone
-installer into `~/.local/bin` (shell profiles untouched) when it is missing;
-without it a missing uv exits 3. Exit codes: 0 installed, 1 failed, 2 bad
-option, 3 missing prerequisite.
+A hook file is configuration evidence. Verify that the host trusts it and that an event reaches the queue before claiming automatic capture. Import sweeps can recover missed sessions independently. See [hook setup](docs/hook-setup.md).
 
-Afterwards, `claude-note status --json` prints one health report (config,
-author, worker and push agents, last clean push, import sweep, hooks, which of
-`uv`, `claude`, `qmd` and `foresyn` are installed, `notes` (session logs,
-knowledge notes, how many the push will share and how many it has sent),
-`synthesis` (failures in the newest worker log), and a `problems` list). It
-works before anything is configured, needs no network, and exits 1 when
-`problems` is not empty.
-
-### Where a note came from
-
-Every note claude-note writes carries `assistant:` (`claude-code`, `codex`,
-`cursor`, `claude-app` or `chatgpt`, from where the transcript came from) and
-`author:` (`CLAUDE_NOTE_AUTHOR`, else `author` in `config.toml`, else the email
-in `~/.foresyn/config.json`, else the global git email). The daily push sends
-both in the document metadata.
-
-`claude-note update` installs the latest release of `artemiin/claude-note`,
-which does not have the push or the Codex/Cursor importers; use the script
-above instead.
-
-## How It Works
-
-1. **Hook Integration**: Claude Code hooks notify claude-note when sessions start/stop
-2. **Queue Processing**: Events are queued and processed by the background worker
-3. **Synthesis**: When a session ends, Claude analyzes the transcript
-4. **Note Routing**: Extracted knowledge is written to your vault
-
-```
-Claude Code Session
-        │
-        ▼
-   [Hooks fire]
-        │
-        ▼
-  ┌─────────────┐
-  │ Event Queue │
-  └─────────────┘
-        │
-        ▼
-  ┌─────────────┐      ┌─────────────┐
-  │   Worker    │─────▶│  Synthesize │
-  └─────────────┘      └─────────────┘
-                              │
-                              ▼
-                       ┌─────────────┐
-                       │    Vault    │
-                       │  - inbox.md │
-                       │  - notes/   │
-                       └─────────────┘
-```
-
-## Commands
+### Update an existing installation
 
 ```bash
-claude-note status       # Check worker and queue status
-claude-note update       # Check for and apply updates
-claude-note drain        # Process all pending sessions now
-claude-note clean        # Cleanup duplicate sessions, old locks
-claude-note index        # Rebuild vault index for synthesis context
-claude-note resynth <id> # Re-synthesize a specific session
-claude-note ingest <file> # Ingest PDF/DOCX into literature notes
+cd ~/src/claude-note
+git pull --ff-only
+scripts/install-from-checkout.sh --claude-hooks --codex-hooks
+```
+
+The installer records the checkout path and commit in `~/.local/share/claude-note/installed-from.json`. Source-managed installations keep that source: `claude-note update` directs you to the original checkout or bundled app rather than replacing it with another fork. Unmanaged release installs use this repository's releases.
+
+## Capture sources
+
+| Source | Capture path |
+| --- | --- |
+| Claude Code | `PostToolUse`, `UserPromptSubmit`, and `Stop` hooks; recovery sweep of recent interactive sessions. |
+| Codex CLI / desktop | Installed hooks where the host supports and trusts them; rollout recovery sweep. Automation and subagent threads are excluded. |
+| Cursor | Worker reads supported local `state.vscdb` chat formats without writing the database. |
+| Claude desktop / web, ChatGPT web | Export conversation data and supply the zip explicitly or place it in the import folder. No account scraping. |
+
+The worker sweeps every 30 minutes. The initial sweep looks back seven days; recent Claude Code recovery is capped at ten sessions per sweep. Each synthesized session invokes the configured model. A changed conversation may be imported again; unchanged content is skipped.
+
+```bash
+claude-note import
+claude-note import ~/Downloads/export.zip
+claude-note import --since 2026-01-01
 ```
 
 ## Configuration
 
-Config file: `~/.config/claude-note/config.toml`
+`~/.config/claude-note/config.toml` (or `$XDG_CONFIG_HOME/claude-note/config.toml`):
 
 ```toml
-vault_root = "/path/to/your/vault"
-
-# Optional settings
-open_questions_file = "open-questions.md"  # relative to vault
+vault_root = "/absolute/path/to/notes"
+author = "you@example.com"
 
 [synthesis]
-mode = "route"           # log | inbox | route
-model = "claude-sonnet-4-5-20250929"
+mode = "inbox"             # log | inbox | route
+timeout = 300              # seconds per synthesis process
 
-[qmd]
-enabled = false          # Enable qmd semantic search for context
-synth_max_notes = 5
-```
-
-All settings can be overridden with environment variables:
-- `CLAUDE_NOTE_VAULT` - vault path
-- `CLAUDE_NOTE_MODE` - synthesis mode
-- `CLAUDE_NOTE_MODEL` - Claude model for synthesis
-
-See [docs/configuration.md](docs/configuration.md) for full reference.
-
-## Claude Code Hook Setup
-
-Add to your Claude Code settings (`~/.claude/settings.json`):
-
-```json
-{
-  "hooks": {
-    "PostToolUse": [
-      {
-        "hooks": [
-          { "type": "command", "command": "claude-note enqueue", "timeout": 5000 }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          { "type": "command", "command": "claude-note enqueue", "timeout": 5000 }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          { "type": "command", "command": "claude-note enqueue", "timeout": 5000 }
-        ]
-      }
-    ]
-  }
-}
-```
-
-See [docs/hook-setup.md](docs/hook-setup.md) for detailed instructions.
-
-## Service Management
-
-### macOS (launchd)
-
-```bash
-# Status
-launchctl list | grep claude-note
-
-# Stop
-launchctl unload ~/Library/LaunchAgents/com.claude-note.worker.plist
-
-# Start
-launchctl load ~/Library/LaunchAgents/com.claude-note.worker.plist
-
-# Logs
-tail -f /path/to/vault/.claude-note/logs/worker-*.log
-```
-
-### Linux (systemd)
-
-```bash
-# Status
-systemctl --user status claude-note
-
-# Stop/Start
-systemctl --user stop claude-note
-systemctl --user start claude-note
-
-# Logs
-journalctl --user -u claude-note -f
-```
-
-## Vault Structure
-
-Claude Note creates/uses these files in your vault:
-
-```
-your-vault/
-├── .claude-note/           # Internal data (gitignore this)
-│   ├── queue/              # Event queue
-│   ├── state/              # Session state
-│   ├── logs/               # Worker logs
-│   └── vault_index.json    # Note index for context
-├── claude-note-inbox.md    # Synthesized knowledge lands here
-├── open-questions.md       # Questions tracker
-└── claude-session-*.md     # Session logs (optional)
-```
-
-## Uninstall
-
-```bash
-./uninstall.sh
-```
-
-This removes the service, CLI, and source files. Your vault data is preserved.
-
-## Optional: QMD Integration
-
-If you have [qmd](https://github.com/tobi/qmd) installed for semantic search, enable it in config:
-
-```toml
 [qmd]
 enabled = true
-synth_max_notes = 5  # Include top N relevant notes as context
+collection = "notes"       # register this exact vault in QMD first
+search_mode = "keyword"    # vector is explicit opt-in
+ingest_dedup_enabled = false # opt in for semantic ingestion candidates
+synth_max_notes = 5
+qmd_timeout = 10
 ```
 
-This improves synthesis quality by providing relevant vault context.
-
-## Documentation
-
-| Guide | Description |
-|-------|-------------|
-| [Getting Started](docs/getting-started.md) | Step-by-step installation walkthrough |
-| [Configuration](docs/configuration.md) | Complete config reference |
-| [Commands](docs/commands.md) | All CLI commands explained |
-| [Synthesis Modes](docs/synthesis-modes.md) | log vs inbox vs route |
-| [Hook Setup](docs/hook-setup.md) | Claude Code integration |
-| [Service Setup](docs/service-setup.md) | launchd/systemd configuration |
-| [QMD Integration](docs/qmd-integration.md) | Semantic search setup |
-| [Document Ingestion](docs/document-ingestion.md) | Importing papers and docs |
-| [Architecture](docs/architecture.md) | How it works internally |
-| [Troubleshooting](docs/troubleshooting.md) | Common issues and fixes |
-
-## License
-
-MIT
-
-## Other assistants: Codex / ChatGPT app, Cursor, Claude.ai and ChatGPT exports
-
-| Assistant | How it is captured |
-|---|---|
-| Claude Code (terminal) | hooks in `~/.claude/settings.json` (above) |
-| Codex CLI and the ChatGPT desktop app (it runs Codex) | hooks in `~/.codex/hooks.json`: `claude-note install-codex-hooks` |
-| Cursor | read from Cursor's `state.vscdb` (read-only) by the worker every 30 min |
-| Claude desktop / claude.ai, ChatGPT web | Settings → Export data; leave the zip in `~/Downloads` or drop it in `~/Documents/claude-note-imports/` |
-
-The worker sweeps every 30 minutes for sources without a hook: Cursor chats,
-export zips (Claude `data-*.zip`, ChatGPT `<hash>-<date>.zip`, or any zip in
-`~/Documents/claude-note-imports/` that holds a `conversations.json`), Codex
-rollouts the hook did not deliver, and interactive Claude Code sessions in
-`~/.claude/projects` the hook did not deliver (sessions from before the hooks were
-installed, or from a Claude Code without them; `claude -p` and SDK runs are
-skipped, and at most 10 are queued per sweep since each costs one synthesis). Each conversation is converted into a local
-transcript under `~/.local/share/claude-note/transcripts/` and processed once
-(content hash); a conversation that grows is processed again. Imported zips move
-to `~/Documents/claude-note-imports/done/`. Codex subagent threads and
-`codex exec` automation are skipped. The first sweep only looks back 7 days;
-backfill older history with `claude-note import --since 2025-01-01`. Heartbeat:
-`~/Library/Logs/claude-note/import-sweep.ok` (shown in `claude-note status`).
+Start with `inbox` to inspect extraction quality, then choose `route` for automatic note operations. The code default is `route`. Without a configured QMD collection, synthesis uses the local note index and injects no global QMD results.
 
 ```bash
-claude-note install-codex-hooks   # once; backs up ~/.codex/hooks.json
-claude-note import                # sweep now instead of waiting
-claude-note import ~/Downloads/data-2026-09-25.zip
+qmd collection add ~/Documents/claude-notes --name notes
+qmd update
+qmd search "retry timeout" -c notes -n 5 --json
+# Optional, needed for vector mode:
+qmd embed
 ```
 
-Codex skips a new hooks file until it is trusted once: approve it in the app's
-hooks review, or run `codex` in a terminal and accept the prompt. Until then the
-30-minute sweep still picks the sessions up, just later.
+`claude-note index` rebuilds the package's local note index. `qmd update` refreshes QMD text search; `qmd embed` refreshes vectors. These are separate operations. See [configuration](docs/configuration.md) and [QMD integration](docs/qmd-integration.md).
 
-## Daily push to the shared Foresyn vault
+## Notes and provenance
 
-`claude-note push` sends curated notes to the Foresyn vault inbox
-(`inbox/<user>/<date>/<path with / as __>.md`) using `~/.foresyn/config.json`.
-Only notes whose frontmatter `type` is `pattern`, `gotcha`, `decision`,
-`reference`, `project` or `literature` go. A note claude-note synthesized
-without a `type` (all of them before 1.6.0; new ones always get one) is typed by
-its first tag naming a type, else `reference`; a note a person wrote without a
-`type` is left alone. Session notes never go, nor anything
-with `share: false` or under a `private/` folder. API keys, tokens, passwords,
-private keys and credentialed connection strings are replaced with
-`[REDACTED: <kind>]` first; a note the scanner fails on is skipped. A note whose
-redacted content is unchanged since its last push sends no request.
+```yaml
+---
+title: Retry after a lost response
+type: gotcha
+assistant: codex
+author: you@example.com
+tags: [reliability, retries]
+---
+```
+
+Set `type` explicitly: a failure lesson is a `gotcha`, a reusable method a `pattern`, and an accepted choice a `decision`. Missing or invalid synthesis types receive an observable fallback; tags are topical metadata, not a substitute for meaning. [Vault workflow](vault-template/obsidian-workflow.md) describes types, sources, and graph use.
+
+`assistant` records the producer (`claude-code`, `codex`, `cursor`, `claude-app`, or `chatgpt`). `author` resolves from `CLAUDE_NOTE_AUTHOR`, config, the optional Foresyn config email, then global git email. Neither is an access-control or approval claim.
+
+```text
+notes/
+├── .claude-note/           # local queues, session state, logs, local note index
+├── sessions/              # new session records; old root records stay usable
+├── literature/            # external source and concept notes
+├── internal/              # internal document ingestion
+├── templates/             # typed writing templates
+├── claude-note-inbox.md
+└── open-questions.md
+```
+
+## Optional shared-vault push
+
+Push requires an explicitly configured `~/.foresyn/config.json`. It stages supported curated types (`pattern`, `gotcha`, `decision`, `reference`, `project`, `literature`), excluding sessions, private folders, `share: false`, and empty placeholders. Recognized secrets are redacted before sending. Redaction does not decide whether business information is confidential.
 
 ```bash
-claude-note push --dry-run        # counts only
-claude-note push --install-agent  # launchd, daily at 03:00 (log: ~/Library/Logs/claude-note/push.log)
+claude-note push --dry-run
+claude-note push --limit 10
+claude-note push --install-agent   # optional macOS daily job at 03:00 local time
 ```
 
-A note that fails is named in `push.log` (`error: <path>: HTTP <status>: ...`).
-A request with no response, a 5xx or a 409 is retried once after 5 s; a lost
-response usually means the server wrote the note, and a repeat PUT of the same
-content is a no-op there. 401, 403 and 429 stop the run. Any error leaves the
-heartbeat untouched and the job exits 1; the note is retried on the next run.
+Receipts are scoped to the destination and local vault. Nested source paths have collision-resistant remote names. Old receipts whose destination is unknown are retained without automatic resending; review the configured target and use `claude-note push --resend-legacy` explicitly when appropriate. See [commands](docs/commands.md).
 
-Heartbeat after a clean run: `~/Library/Logs/claude-note/push.ok`.
+## Operate and develop
+
+```bash
+claude-note status --json
+claude-note drain
+claude-note clean --all             # dry run
+claude-note resynth SESSION_PREFIX --mode inbox
+claude-note ingest paper.pdf --dry-run
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+```
+
+The JSON health report works before configuration, makes bounded local probes without network calls, and exits 1 if its `problems` list is nonempty. A running worker alone does not prove synthesis, sharing, or external consolidation succeeded.
+
+| Guide | Scope |
+| --- | --- |
+| [Getting started](docs/getting-started.md) | Install and verify the first capture. |
+| [Commands](docs/commands.md) / [configuration](docs/configuration.md) | Actual supported interfaces. |
+| [Architecture](docs/architecture.md) / [current system](docs/current-system.md) | Implementation and integration boundaries. |
+| [Hooks](docs/hook-setup.md) / [services](docs/service-setup.md) | Capture and worker operation. |
+| [Synthesis modes](docs/synthesis-modes.md) / [ingestion](docs/document-ingestion.md) | Knowledge production and review. |
+| [QMD](docs/qmd-integration.md) / [troubleshooting](docs/troubleshooting.md) | Retrieval and failure diagnosis. |
+
+MIT licensed. Original project by [artemiin](https://github.com/artemiin/claude-note); this fork maintains the developments described here.

@@ -1,4 +1,5 @@
 ---
+type: project
 tags:
   - project/{{title}}
 aliases: []

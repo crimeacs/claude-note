@@ -154,11 +154,8 @@ Source file: {filename}
 {content}
 
 ## Context
-This knowledge base is for the "Fi" project - a dog activity tracking system with:
-- Collar-mounted accelerometers (IMU)
-- Kennelcam video for ground truth labeling
-- ML behavior classification models
-- Data pipelines (S3, Databricks, FiTag annotation platform)
+This knowledge base spans multiple projects. Use the document's own context;
+never invent a project affiliation, customer, owner, or result.
 
 ## Your Task
 Extract knowledge into atomic notes. Each note should be a single concept, finding, or technique that could be useful.
@@ -176,19 +173,19 @@ Return this exact JSON schema:
       "type": "finding|technique|definition|benchmark|open-question",
       "summary": "2-4 sentence explanation of this concept",
       "details": "Optional longer explanation with specifics, numbers, quotes",
-      "relevance": "How this relates to Fi project (or null if general)",
+      "relevance": "Practical implications supported by the document (or null)",
       "tags": ["tag1", "tag2"]
     }}
   ]
 }}
 
 ## Rules
-1. Create 3-15 atomic notes depending on document richness
+1. Extract only meaningful source-backed concepts; an empty notes array is valid when nothing durable is present
 2. Each note should stand alone - someone reading just that note should understand it
-3. Use `relevance` to explicitly connect to Fi where applicable
+3. Use `relevance` for implications supported by the source; separate findings from inference
 4. For findings, include specific numbers/results when available
-5. Slugs become filenames: "harness-vs-collar" -> "lit-harness-vs-collar.md"
-6. Tags should use existing conventions: #ml, #sensors, #data-pipeline, #annotation, etc.
+5. Slugs become filenames: "evaluation-method" -> "lit-evaluation-method.md"; use only lowercase letters, numbers and single hyphens
+6. Tags should describe topics actually present in this document
 7. Skip generic/obvious information - focus on actionable insights
 8. If the document has explicit "key findings" or "recommendations", extract those
 
@@ -205,7 +202,7 @@ Source file: {filename}
 {content}
 
 ## Context
-This knowledge base is for the "Fi" project - a dog activity tracking system. Internal docs may cover:
+This knowledge base spans multiple teams and projects. Internal docs may cover:
 - Development processes and workflows
 - Architecture decisions and patterns
 - Team conventions and standards
@@ -236,14 +233,15 @@ Return this exact JSON schema:
 }}
 
 ## Rules
-1. Create 3-15 atomic notes depending on document richness
+1. Extract only meaningful source-backed concepts; an empty notes array is valid when nothing durable is present
 2. Each note should stand alone - someone reading just that note should understand it
 3. For processes, include the key steps and any gotchas
 4. For decisions, capture the WHY (rationale) not just the WHAT
 5. For conventions, be explicit about dos and don'ts
-6. Slugs become filenames: "deploy-process" -> "int-deploy-process.md"
+6. Slugs become filenames: "deploy-process" -> "int-deploy-process.md"; use only lowercase letters, numbers and single hyphens
 7. Tags should use existing conventions: #process, #architecture, #convention, #how-to, etc.
-8. Skip generic/obvious information - focus on Fi-specific institutional knowledge
+8. Skip generic/obvious information - focus on source-backed institutional knowledge
+9. Preserve the source's project boundaries; never invent an affiliation or owner
 
 Return ONLY valid JSON. No markdown, no explanation.
 '''
@@ -350,7 +348,8 @@ def _find_similar_existing_concept(
     # config imported at module level
 
     # Check if deduplication is enabled
-    if not getattr(config, "QMD_INGEST_DEDUP_ENABLED", True):
+    collection = getattr(config, "QMD_COLLECTION", "")
+    if not config.QMD_SYNTH_ENABLED or not getattr(config, "QMD_INGEST_DEDUP_ENABLED", True) or not collection:
         return None
 
     try:
@@ -375,18 +374,20 @@ def _find_similar_existing_concept(
         threshold = getattr(config, "QMD_INGEST_DEDUP_THRESHOLD", min_score)
 
         # Search for similar content
-        results = qmd_search.search_vector(query, limit=3, min_score=threshold)
+        results = qmd_search.search_vector(query, limit=3, min_score=threshold, collection=collection)
 
         if not results:
             return None
 
         # Check if any result is in the output directory
         for result in results:
-            result_path = Path(result.path)
-            # Check both absolute and relative paths
-            if output_dir.name in result.path:
-                # Found a similar note in the same output directory
-                return output_dir / result_path.name
+            result_path = qmd_search.resolve_result_path(result.path, config.VAULT_ROOT, collection)
+            if (result_path and result_path.is_file()
+                    and result_path.parent.resolve() == output_dir.resolve()
+                    and not result_path.is_symlink()):
+                # Source indexes are not atomic concepts, even if similar.
+                if not re.search(r"^source_file:", result_path.read_text(encoding="utf-8"), re.MULTILINE):
+                    return result_path
 
         return None
 
@@ -430,6 +431,7 @@ def _merge_concept_sources(
     new_concept: dict,
     new_source_citation: str,
     model: str = None,
+    source_note: Path = None,
 ) -> Optional[Path]:
     """
     Merge new concept info into an existing similar note.
@@ -547,7 +549,7 @@ def _merge_concept_sources(
     prefix = "int" if existing_note.name.startswith("int-") else "lit"
     folder = "internal" if prefix == "int" else "literature"
     source_slug = slugify(new_source_citation)
-    new_source_link = f"[[{folder}/{prefix}-{source_slug}]]"
+    new_source_link = _note_link(source_note) if source_note else f"[[{folder}/{prefix}-{source_slug}]]"
 
     # Update YAML frontmatter
     new_yaml = yaml_content
@@ -618,13 +620,6 @@ def _merge_concept_sources(
 # Note Creation
 # =============================================================================
 
-def _author_line() -> str:
-    """`author: <email>` plus newline for frontmatter, or "" when unknown."""
-    from . import provenance
-    author = provenance.author_email()
-    return f"author: {author}\n" if author else ""
-
-
 def slugify(text: str) -> str:
     """Convert text to kebab-case slug."""
     # Lowercase and replace spaces/underscores with hyphens
@@ -636,7 +631,41 @@ def slugify(text: str) -> str:
     slug = re.sub(r'-+', '-', slug)
     # Trim hyphens from ends
     slug = slug.strip('-')
+    if not slug:
+        import hashlib
+        slug = "note-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
     return slug[:50]  # Limit length
+
+
+def _concept_slug(concept: dict) -> str:
+    """Validate the model's filename component before creating any notes."""
+    slug = concept.get("slug", "")
+    if not isinstance(slug, str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug):
+        raise ValueError(f"Invalid concept slug: {slug!r}; expected lowercase kebab-case")
+    return slug
+
+
+def _source_path(extraction: dict, source_file: Path, output_dir: Path, mode: str) -> Path:
+    slug = slugify(extraction.get("key_citation") or source_file.stem)
+    prefix = "int" if mode == "internal" else "lit"
+    return output_dir / f"{prefix}-{slug}.md"
+
+
+def _note_link(note_path: Path) -> str:
+    """Link to the real vault-relative file, including configured subfolders."""
+    try:
+        target = note_path.resolve().relative_to(config.VAULT_ROOT.resolve())
+    except ValueError:
+        target = Path(note_path.parent.name) / note_path.name
+    return f"[[{target.with_suffix('').as_posix()}]]"
+
+
+def _concept_path(concept: dict, output_dir: Path, mode: str, source_note: Path = None) -> Path:
+    prefix = "int" if mode == "internal" else "lit"
+    path = output_dir / f"{prefix}-{_concept_slug(concept)}.md"
+    if source_note and path == source_note:
+        path = path.with_name(f"{path.stem}-concept.md")
+    return path
 
 
 def create_source_note(
@@ -645,6 +674,7 @@ def create_source_note(
     output_dir: Path,
     date: str,
     mode: str = "literature",
+    concept_paths: list[Path] = None,
 ) -> Path:
     """
     Create the main source/index note for the ingested document.
@@ -653,47 +683,23 @@ def create_source_note(
         output_dir: Directory to write the note to
         mode: "literature" or "internal"
     """
-    slug = slugify(extraction.get("key_citation", source_file.stem))
-    prefix = "int" if mode == "internal" else "lit"
-    folder = "internal" if mode == "internal" else "literature"
-    filename = f"{prefix}-{slug}.md"
-    note_path = output_dir / filename
+    from . import managed_blocks, note_router, provenance
+
+    note_path = _source_path(extraction, source_file, output_dir, mode)
+    note_router.resolve_note_path(note_path.name, output_dir)
 
     # Build note content based on mode
     if mode == "internal":
-        tags = ["source/internal", f"int/{extraction.get('source_type', 'reference')}", "project/fi"]
-        concept_prefix = "int"
-        related_links = [
-            "[[fi-ml-meetings]] - Meeting index",
-            "[[fi-ml-moc]] - ML project hub",
-            "[[fi-moc]] - Fi project hub",
-        ]
+        tags = ["source/internal", f"int/{extraction.get('source_type', 'reference')}"]
     else:
-        tags = ["source/literature", extraction.get("source_type", "paper"), "project/fi"]
-        concept_prefix = "lit"
-        related_links = [
-            "[[fi-ml-moc]] - ML project hub",
-            "[[fi-moc]] - Fi project hub",
-        ]
+        tags = ["source/literature", extraction.get("source_type", "paper")]
 
     # Collect all concept note links with folder prefix for proper resolution
-    concept_links = []
-    for note in extraction.get("notes", []):
-        note_slug = note.get("slug", "")
-        if note_slug:
-            display_name = note.get("title", note_slug.replace("-", " ").title())
-            concept_links.append(f"[[{folder}/{concept_prefix}-{note_slug}|{display_name}]]")
+    if concept_paths is None:
+        concept_paths = [_concept_path(note, output_dir, mode, note_path) for note in extraction.get("notes", [])]
+    concept_links = [_note_link(path) for path in dict.fromkeys(concept_paths) if path.is_file()]
 
-    content = f"""---
-tags:
-  - {tags[0]}
-  - {tags[1]}
-  - {tags[2]}
-source_file: "{source_file.name}"
-ingested: {date}
-{_author_line()}---
-
-# {extraction.get("key_citation", source_file.stem)}
+    content = f"""# {extraction.get("key_citation", source_file.stem)}
 
 {extraction.get("source_summary", "")}
 
@@ -707,12 +713,31 @@ ingested: {date}
 - **Ingested:** {date}
 - **Type:** {extraction.get("source_type", "unknown")}
 
-## Related
-
-{chr(10).join(f"- {link}" for link in related_links)}
 """
-
-    note_path.write_text(content)
+    if note_path.exists():
+        if note_path.is_symlink():
+            raise ValueError(f"Source note is a symlink: {note_path}")
+        existing = note_path.read_text(encoding="utf-8")
+        source_match = re.search(r'^source_file:\s*(.+)$', existing.split("\n---", 1)[0], re.MULTILINE)
+        source_value = source_match.group(1).strip() if source_match else ""
+        if source_value.startswith('"'):
+            try:
+                source_value = json.loads(source_value)
+            except json.JSONDecodeError:
+                source_value = source_value.strip('"')
+        else:
+            source_value = source_value.strip("'")
+        if source_value != source_file.name:
+            raise FileExistsError(f"Source note path is already used by another note: {note_path}")
+        managed_blocks.write_managed_block(note_path, "ingested-source", content, create_if_missing=True)
+    else:
+        fm = provenance.stamp({
+            "type": "source" if mode == "internal" else "literature",
+            "tags": tags, "source_file": source_file.name, "ingested": date,
+        })
+        # Keep marker syntax identical to the managed-block writer.
+        block = managed_blocks._make_start_marker("ingested-source") + "\n" + content + "\n" + managed_blocks._make_end_marker("ingested-source")
+        note_router.create_note(note_path.name, fm, block, output_dir)
     return note_path
 
 
@@ -723,6 +748,7 @@ def create_concept_note(
     date: str,
     mode: str = "literature",
     model: str = None,
+    source_note: Path = None,
 ) -> Optional[Path]:
     """
     Create an atomic concept note from extracted knowledge.
@@ -738,39 +764,38 @@ def create_concept_note(
     Returns:
         Path to created/merged note, or None if skipped
     """
-    slug = concept.get("slug", "")
-    if not slug:
+    if not concept.get("slug"):
         return None
 
+    slug = _concept_slug(concept)
     prefix = "int" if mode == "internal" else "lit"
-    filename = f"{prefix}-{slug}.md"
-    note_path = output_dir / filename
+    note_path = _concept_path(concept, output_dir, mode, source_note)
+    from . import note_router, provenance
+    note_router.resolve_note_path(note_path.name, output_dir)
 
     # Don't overwrite existing notes (exact match)
     if note_path.exists():
         # Try to merge sources into existing note
-        merged = _merge_concept_sources(note_path, concept, source_citation, model=model)
+        merged = _merge_concept_sources(note_path, concept, source_citation, model=model, source_note=source_note)
         return merged  # Returns path if merged, None if nothing new
 
     # Check for semantically similar existing notes (fuzzy match)
     similar_note = _find_similar_existing_concept(concept, output_dir)
     if similar_note:
         # Try to merge instead of skipping
-        merged = _merge_concept_sources(similar_note, concept, source_citation, model=model)
+        merged = _merge_concept_sources(similar_note, concept, source_citation, model=model, source_note=source_note)
         return merged  # Returns path if merged, None if nothing new
 
     # Build tags based on mode
     folder = "internal" if mode == "internal" else "literature"
     if mode == "internal":
-        tags = ["source/internal", "project/fi"]
+        tags = ["source/internal"]
         if concept.get("type"):
             tags.append(f"int/{concept['type']}")
-        related_links = ["[[fi-ml-moc]]", "[[fi-moc]]"]
     else:
-        tags = ["source/literature", "project/fi"]
+        tags = ["source/literature"]
         if concept.get("type"):
             tags.append(f"lit/{concept['type']}")
-        related_links = ["[[fi-ml-moc]]", "[[fi-moc]]"]
     tags.extend(concept.get("tags", []))
 
     # Build content
@@ -782,16 +807,9 @@ def create_concept_note(
 
     # Source link with folder prefix for proper resolution
     source_slug = slugify(source_citation)
-    source_link = f"[[{folder}/{prefix}-{source_slug}]]"
+    source_link = _note_link(source_note) if source_note else f"[[{folder}/{prefix}-{source_slug}]]"
 
-    content = f"""---
-tags:
-  - {f"{chr(10)}  - ".join(tags)}
-source: "{source_link}"
-added: {date}
-{_author_line()}---
-
-# {title}
+    content = f"""# {title}
 
 {summary}
 """
@@ -805,7 +823,7 @@ added: {date}
 
     if relevance:
         content += f"""
-## Fi Relevance
+## Relevance
 
 {relevance}
 """
@@ -817,17 +835,12 @@ added: {date}
 {owner}
 """
 
-    content += f"""
-## Related
-
-{chr(10).join(f"- {link}" for link in related_links)}
-
----
-
-*Source: {source_citation}*
-"""
-
-    note_path.write_text(content)
+    content += f"\n## Source\n\n{source_link} — {source_citation}\n"
+    fm = provenance.stamp({
+        "type": "source" if mode == "internal" else "literature",
+        "tags": tags, "source": source_link, "added": date,
+    })
+    note_router.create_note(note_path.name, fm, content, output_dir)
     return note_path
 
 
@@ -865,9 +878,6 @@ def ingest_document(
         output_dir = config.LITERATURE_DIR
         prefix = "lit"
 
-    # Ensure output directory exists
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     file_path = Path(file_path).resolve()
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
@@ -892,6 +902,8 @@ def ingest_document(
             mode=mode,
         )
     print(f"  {len(extraction.get('notes', []))} concepts found")
+    for concept in extraction.get("notes", []):
+        _concept_slug(concept)
 
     if dry_run:
         return {
@@ -903,30 +915,42 @@ def ingest_document(
         }
 
     # Create notes
+    output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Creating notes in {output_dir.name}/...")
 
-    source_citation = extraction.get("key_citation", title)
+    source_citation = extraction.get("key_citation") or title
 
-    # Create source note
-    source_note = create_source_note(extraction, file_path, output_dir, date, mode=mode)
-    print(f"  Created: {source_note.name}")
+    # Reserve the source filename so a same-named concept cannot overwrite it.
+    source_note = _source_path(extraction, file_path, output_dir, mode)
 
     # Create concept notes
     concept_notes = []
     merged_notes = []
+    index_paths = []
     for concept in extraction.get("notes", []):
-        note_path = create_concept_note(concept, source_citation, output_dir, date, mode=mode, model=model)
+        expected_path = _concept_path(concept, output_dir, mode, source_note)
+        already_existed = expected_path.exists()
+        note_path = create_concept_note(concept, source_citation, output_dir, date, mode=mode,
+                                        model=model, source_note=source_note)
         if note_path:
+            index_paths.append(note_path)
             # Check if this was a merge (note already existed) vs new creation
-            if note_path.stem != f"{prefix}-{concept.get('slug', '')}":
+            if already_existed or note_path != expected_path:
                 merged_notes.append(note_path)
                 print(f"  Merged into: {note_path.name}")
             else:
                 concept_notes.append(note_path)
                 print(f"  Created: {note_path.name}")
         else:
+            if expected_path.is_file():
+                index_paths.append(expected_path)
             slug = concept.get("slug", "?")
             print(f"  Skipped: {prefix}-{slug}.md (nothing new to add)")
+
+    # Index only real output files; semantic merges may choose a different name.
+    source_note = create_source_note(extraction, file_path, output_dir, date,
+                                    mode=mode, concept_paths=index_paths)
+    print(f"  Source: {source_note.name}")
 
     return {
         "dry_run": False,

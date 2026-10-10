@@ -34,6 +34,36 @@
 #
 set -euo pipefail
 
+copy_missing_tree() {
+    local source="$1" target="$2" entry destination
+    mkdir -p "$target"
+    for entry in "$source"/* "$source"/.[!.]* "$source"/..?*; do
+        [[ -e "$entry" || -L "$entry" ]] || continue
+        destination="$target/${entry##*/}"
+        if [[ -d "$entry" && ! -L "$entry" ]]; then
+            copy_missing_tree "$entry" "$destination"
+        elif [[ ! -e "$destination" && ! -L "$destination" ]]; then
+            cp "$entry" "$destination"
+        fi
+    done
+    return 0
+}
+
+json_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\t'/\\t}"
+    printf '%s' "$value"
+}
+
+xml_escape() {
+    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' \
+        -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
+}
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 NON_INTERACTIVE=0 PUSH_AGENT=0 CLAUDE_HOOKS=0 CODEX_HOOKS=0 INSTALL_UV=0 ALLOW_DIRTY=0 ALLOW_TEMP=0
 VAULT="" AUTHOR="" SOURCE_REF="" WORKER_STARTED=0
@@ -96,6 +126,7 @@ if [[ -e "$ROOT/.git" ]] && command -v git >/dev/null && [[ "$(git -C "$ROOT" re
     SOURCE_KIND=git
     COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
     BRANCH="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+    REPOSITORY="$(git -C "$ROOT" remote get-url origin 2>/dev/null || true)"
     DIRTY="$(git -C "$ROOT" status --porcelain --untracked-files=no -- src pyproject.toml 2>/dev/null || true)"
     if [[ -n "$DIRTY" ]]; then
         echo "uncommitted changes in the package source:" >&2
@@ -108,6 +139,8 @@ if [[ -e "$ROOT/.git" ]] && command -v git >/dev/null && [[ "$(git -C "$ROOT" re
 else
     SOURCE_KIND=bundle
     BRANCH=bundle
+    REPOSITORY="https://github.com/crimeacs/claude-note.git"
+    [[ -f "$ROOT/SOURCE_REPOSITORY" ]] && REPOSITORY="$(head -1 "$ROOT/SOURCE_REPOSITORY")"
     [[ -z "$SOURCE_REF" && -f "$ROOT/SOURCE_REF" ]] && SOURCE_REF="$(head -1 "$ROOT/SOURCE_REF" | tr -d '[:space:]')"
     COMMIT="${SOURCE_REF:-unknown}"
 fi
@@ -123,9 +156,12 @@ export PATH="$(dirname "$BIN"):$PATH"
 
 STATE_DIR="$HOME/.local/share/claude-note"
 mkdir -p "$STATE_DIR"
-printf '{"path": "%s", "source": "%s", "branch": "%s", "commit": "%s", "dirty": %s, "installed_at": "%s"}\n' \
-    "$ROOT" "$SOURCE_KIND" "$BRANCH" "$COMMIT" "$([[ -n "$DIRTY" ]] && echo true || echo false)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    > "$STATE_DIR/installed-from.json"
+printf '{"path": "%s", "source": "%s", "repository": "%s", "branch": "%s", "commit": "%s", "dirty": %s, "installed_at": "%s"}\n' \
+    "$(json_escape "$ROOT")" "$SOURCE_KIND" "$(json_escape "$REPOSITORY")" \
+    "$(json_escape "$BRANCH")" "$(json_escape "$COMMIT")" \
+    "$([[ -n "$DIRTY" ]] && echo true || echo false)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    > "$STATE_DIR/installed-from.json.tmp"
+mv "$STATE_DIR/installed-from.json.tmp" "$STATE_DIR/installed-from.json"
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/claude-note"
 CONFIG="$CONFIG_DIR/config.toml"
@@ -184,7 +220,16 @@ if [[ $NON_INTERACTIVE -eq 1 ]]; then
         for f in CLAUDE.md claude-note-inbox.md open-questions.md; do
             [[ -e "$VAULT_ROOT/$f" || ! -f "$TEMPLATE/$f" ]] || cp "$TEMPLATE/$f" "$VAULT_ROOT/$f"
         done
-        [[ -e "$VAULT_ROOT/templates" || ! -d "$TEMPLATE/templates" ]] || cp -R "$TEMPLATE/templates" "$VAULT_ROOT/templates"
+        if [[ -d "$TEMPLATE/templates" ]]; then
+            mkdir -p "$VAULT_ROOT/templates"
+            copy_missing_tree "$TEMPLATE/templates" "$VAULT_ROOT/templates"
+        fi
+        if [[ -d "$TEMPLATE/.obsidian" ]]; then
+            mkdir -p "$VAULT_ROOT/.obsidian"
+            copy_missing_tree "$TEMPLATE/.obsidian" "$VAULT_ROOT/.obsidian"
+        fi
+        [[ -e "$VAULT_ROOT/obsidian-workflow.md" || ! -f "$TEMPLATE/obsidian-workflow.md" ]] \
+            || cp "$TEMPLATE/obsidian-workflow.md" "$VAULT_ROOT/obsidian-workflow.md"
     fi
 
     if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -198,13 +243,13 @@ if [[ $NON_INTERACTIVE -eq 1 ]]; then
 <dict>
     <key>Label</key><string>com.claude-note.worker</string>
     <key>ProgramArguments</key>
-    <array><string>$BIN</string><string>worker</string></array>
+    <array><string>$(xml_escape "$BIN")</string><string>worker</string></array>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
-    <key>StandardOutPath</key><string>$VAULT_ROOT/.claude-note/logs/worker-stdout.log</string>
-    <key>StandardErrorPath</key><string>$VAULT_ROOT/.claude-note/logs/worker-stderr.log</string>
+    <key>StandardOutPath</key><string>$(xml_escape "$VAULT_ROOT/.claude-note/logs/worker-stdout.log")</string>
+    <key>StandardErrorPath</key><string>$(xml_escape "$VAULT_ROOT/.claude-note/logs/worker-stderr.log")</string>
     <key>EnvironmentVariables</key>
-    <dict><key>PATH</key><string>$(dirname "$BIN"):$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
+    <dict><key>PATH</key><string>$(xml_escape "$(dirname "$BIN"):$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")</string></dict>
 </dict>
 </plist>
 EOF

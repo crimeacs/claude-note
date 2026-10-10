@@ -1,0 +1,11 @@
+{
+  "userIgnoreFilters": [
+    ".claude-note/"
+  ],
+  "alwaysUpdateLinks": true,
+  "newLinkFormat": "shortest",
+  "useMarkdownLinks": false,
+  "attachmentFolderPath": "attachments",
+  "showUnsupportedFiles": false,
+  "strictLineBreaks": false
+}

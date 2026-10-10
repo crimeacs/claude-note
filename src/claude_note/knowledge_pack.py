@@ -9,6 +9,12 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 
+NOTE_TYPES = (
+    "pattern", "gotcha", "decision", "reference", "project", "log",
+    "literature", "source", "feedback", "meta", "session",
+)
+
+
 @dataclass
 class Concept:
     """A concept or topic learned during the session."""
@@ -139,6 +145,7 @@ class KnowledgePack:
             open_questions=[OpenQuestion.from_dict(q) for q in data.get("open_questions", [])],
             howtos=[HowTo.from_dict(h) for h in data.get("howtos", [])],
             note_ops=[NoteOp.from_dict(op) for op in data.get("note_ops", [])],
+            assistant=data.get("assistant", ""),
         )
 
     @classmethod
@@ -154,6 +161,7 @@ class KnowledgePack:
             and not self.decisions
             and not self.open_questions
             and not self.howtos
+            and not self.note_ops
         )
 
 
@@ -203,7 +211,7 @@ def get_schema_description() -> str:
         {
             "op": "create | upsert_block | append",
             "path": "string - note filename (e.g., 'my-note.md')",
-            "frontmatter": {"type": "pattern | gotcha | decision | reference | project", "tags": [...], ...},  // for create only; type is required
+            "frontmatter": {"type": "pattern | gotcha | decision | reference | project | log | literature | source | feedback | meta | session", "tags": [...], ...},  // for create only; choose exactly one type explicitly
             "body_markdown": "string - content to write",
             "managed_block_id": "string",  // for upsert_block only
             "section": "string"  // for append only (e.g., '## Synthesized')
@@ -246,6 +254,10 @@ def validate_knowledge_pack(pack: KnowledgePack) -> list[str]:
             warnings.append(f"NoteOp {i}: missing path")
         if op.op == "create" and not op.frontmatter:
             warnings.append(f"NoteOp {i}: create op missing frontmatter")
+        if op.op == "create":
+            note_type = (op.frontmatter or {}).get("type")
+            if note_type not in NOTE_TYPES:
+                warnings.append(f"NoteOp {i}: missing or invalid type {note_type!r}; choose an explicit note type")
         if op.op == "upsert_block" and not op.managed_block_id:
             warnings.append(f"NoteOp {i}: upsert_block op missing managed_block_id")
 

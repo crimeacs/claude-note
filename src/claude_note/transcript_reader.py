@@ -102,9 +102,13 @@ def _summarize_tool_output(tool_name: str, output: str, max_len: int = 200) -> s
     return output
 
 
-# Codex (CLI, and the ChatGPT desktop app, which runs Codex) prepends context it
-# injects itself as "user" messages; they are not what the person asked.
-_CODEX_INJECTED_PREFIXES = ("<", "# AGENTS.md instructions", "# Files mentioned by the user")
+# Codex injects context as user messages. Only discard known context wrappers:
+# a real request may itself begin with XML or HTML.
+_CODEX_INJECTED_PREFIXES = (
+    "<environment_context>", "<external_codex_apps_open_page>",
+    "<codex_internal_context", "<heartbeat>",
+    "# AGENTS.md instructions", "# Files mentioned by the user",
+)
 
 
 _CODEX_PATCH_FILE = re.compile(r"\*\*\* (?:Update|Add|Delete) File: ([^\n\\\"'`]+)")
@@ -112,7 +116,7 @@ _CODEX_PATCH_FILE = re.compile(r"\*\*\* (?:Update|Add|Delete) File: ([^\n\\\"'`]
 
 def _is_codex_transcript(transcript_path: Path) -> bool:
     """Codex rollouts are JSONL whose records carry a `payload` object."""
-    with open(transcript_path, "r") as f:
+    with open(transcript_path, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -120,7 +124,9 @@ def _is_codex_transcript(transcript_path: Path) -> bool:
             try:
                 entry = json.loads(line)
             except json.JSONDecodeError:
-                return False
+                continue
+            if not isinstance(entry, dict):
+                continue
             return isinstance(entry, dict) and isinstance(entry.get("payload"), dict)
     return False
 
@@ -130,7 +136,7 @@ def codex_session_meta(transcript_path) -> dict:
     background run (a subagent thread, or `codex exec` automation) that should
     not become a note of its own. Empty dict if not a Codex rollout."""
     try:
-        with open(transcript_path, "r") as f:
+        with open(transcript_path, encoding="utf-8", errors="replace") as f:
             entry = json.loads(f.readline())
     except (OSError, ValueError):
         return {}
@@ -156,9 +162,36 @@ def _codex_texts(content, kinds: tuple) -> list[str]:
     return texts
 
 
+def _tool_output_text(output) -> str:
+    """Text from either a legacy string or current tool-result content blocks."""
+    if isinstance(output, str):
+        return output
+    if isinstance(output, list):
+        return "\n".join(block["text"] for block in output
+                         if isinstance(block, dict) and isinstance(block.get("text"), str))
+    if isinstance(output, dict):
+        return _tool_output_text(output.get("content", output.get("output", "")))
+    return ""
+
+
+def _apply_tool_result(content: TranscriptContent, calls: dict, tool_id, output,
+                       is_error: bool = False) -> None:
+    tool = calls.get(tool_id)
+    if tool is None:
+        return
+    text = _tool_output_text(output)
+    if is_error:
+        tool.success = False
+        if text:
+            content.errors.append(f"{tool.name}: {text[:200]}")
+    if text:
+        tool.output_summary = _summarize_tool_output(tool.name, text)
+
+
 def _read_codex_transcript(transcript_path: Path) -> TranscriptContent:
     """Parse a Codex rollout (`~/.codex/sessions/**/rollout-*.jsonl`)."""
-    content = TranscriptContent(session_id=transcript_path.stem)
+    meta = codex_session_meta(transcript_path)
+    content = TranscriptContent(session_id=meta.get("id") or transcript_path.stem)
     files_seen = set()
     calls = {}
 
@@ -173,7 +206,7 @@ def _read_codex_transcript(transcript_path: Path) -> TranscriptContent:
                 content.files_touched.append(path)
                 files_seen.add(path)
 
-    with open(transcript_path, "r") as f:
+    with open(transcript_path, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -182,6 +215,8 @@ def _read_codex_transcript(transcript_path: Path) -> TranscriptContent:
                 entry = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(entry, dict):
+                continue
             payload = entry.get("payload")
             if not isinstance(payload, dict):
                 continue
@@ -189,7 +224,9 @@ def _read_codex_transcript(transcript_path: Path) -> TranscriptContent:
             ptype = payload.get("type")
 
             if kind == "session_meta":
-                content.session_id = payload.get("id") or payload.get("session_id") or content.session_id
+                # Forked rollouts can include their parent's metadata in the
+                # inherited history. The first record identifies this session.
+                continue
             elif kind != "response_item":
                 continue
             elif ptype == "message" and payload.get("role") == "user":
@@ -217,10 +254,8 @@ def _read_codex_transcript(transcript_path: Path) -> TranscriptContent:
             elif ptype in ("function_call_output", "custom_tool_call_output"):
                 tool_use = calls.get(payload.get("call_id"))
                 output = payload.get("output", "")
-                if isinstance(output, dict):
-                    output = output.get("content") or output.get("output") or json.dumps(output)
-                if tool_use and isinstance(output, str) and output:
-                    tool_use.output_summary = _summarize_tool_output(tool_use.name, output)
+                _apply_tool_result(content, calls, payload.get("call_id"), output,
+                                   isinstance(output, dict) and bool(output.get("is_error")))
             elif ptype == "reasoning":
                 for item in payload.get("summary") or []:
                     text = item.get("text", "") if isinstance(item, dict) else ""
@@ -256,7 +291,7 @@ def read_transcript(transcript_path: Union[str, Path]) -> TranscriptContent:
     files_seen = set()
     current_tool_uses = {}  # Track tool uses by id for matching with results
 
-    with open(transcript_path, "r") as f:
+    with open(transcript_path, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -265,6 +300,8 @@ def read_transcript(transcript_path: Union[str, Path]) -> TranscriptContent:
             try:
                 entry = json.loads(line)
             except json.JSONDecodeError:
+                continue
+            if not isinstance(entry, dict):
                 continue
 
             entry_type = entry.get("type")
@@ -283,6 +320,10 @@ def read_transcript(transcript_path: Union[str, Path]) -> TranscriptContent:
                                 text = block.get("text", "")
                                 if text.strip():
                                     content.user_prompts.append(text.strip())
+                            elif block.get("type") == "tool_result":
+                                _apply_tool_result(content, current_tool_uses,
+                                                   block.get("tool_use_id"), block.get("content"),
+                                                   bool(block.get("is_error")))
 
             # Handle assistant messages
             elif entry_type == "assistant":
@@ -338,22 +379,9 @@ def read_transcript(transcript_path: Union[str, Path]) -> TranscriptContent:
                 tool_use_id = entry.get("tool_use_id")
                 result = entry.get("result", {})
 
-                if tool_use_id and tool_use_id in current_tool_uses:
-                    tool_use = current_tool_uses[tool_use_id]
-
-                    # Check for errors
-                    if result.get("is_error"):
-                        error_msg = result.get("content", "")
-                        if error_msg:
-                            content.errors.append(f"{tool_use.name}: {error_msg[:200]}")
-                            tool_use.success = False
-
-                    # Summarize output
-                    output = result.get("content", "")
-                    if output:
-                        tool_use.output_summary = _summarize_tool_output(
-                            tool_use.name, output
-                        )
+                if isinstance(result, dict):
+                    _apply_tool_result(content, current_tool_uses, tool_use_id,
+                                       result.get("content"), bool(result.get("is_error")))
 
             # Handle tool result messages
             elif entry_type == "tool_result":
@@ -361,18 +389,7 @@ def read_transcript(transcript_path: Union[str, Path]) -> TranscriptContent:
                 content_data = entry.get("content", "")
                 is_error = entry.get("is_error", False)
 
-                if tool_use_id and tool_use_id in current_tool_uses:
-                    tool_use = current_tool_uses[tool_use_id]
-
-                    if is_error:
-                        error_msg = content_data if isinstance(content_data, str) else str(content_data)
-                        content.errors.append(f"{tool_use.name}: {error_msg[:200]}")
-                        tool_use.success = False
-
-                    if isinstance(content_data, str):
-                        tool_use.output_summary = _summarize_tool_output(
-                            tool_use.name, content_data
-                        )
+                _apply_tool_result(content, current_tool_uses, tool_use_id, content_data, is_error)
 
     return content
 

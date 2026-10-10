@@ -63,6 +63,9 @@ class SessionState:
     cwd: str = ""
     transcript_path: str = ""
     events: list = field(default_factory=list)  # List of event summaries
+    synthesis_pending: bool = False
+    synthesis_attempts: int = 0
+    last_synthesis_attempt_ts: Optional[str] = None
 
     def to_json(self) -> str:
         """Serialize to JSON string."""

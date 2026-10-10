@@ -7,12 +7,15 @@ synthesized without a `type` (every one before 1.6.0) gets one inferred from its
 tags, else `reference`; see `infer_type`. Session notes (raw transcripts)
 never do. Every note is redacted before upload; a note the scanner cannot
 check is skipped for the run. Unchanged notes (same sha as the last push of
-that source path) cause no request at all.
+that source path to the same destination) cause no request at all. Legacy
+receipts without a destination are preserved, never silently rebound or
+resent; --resend-legacy explicitly sends them to the configured destination.
 
 Contract with the server-side merge (keep exact):
   PUT {baseUrl}/api/v1/vault/document?organization_id=<org>
   body {path, content, parent_revision, metadata}
-  path = inbox/<person>/<YYYY-MM-DD>/<relative path, "/" -> "__">.md
+  root path = inbox/<person>/<YYYY-MM-DD>/<name>.md
+  nested path = inbox/<person>/<YYYY-MM-DD>/_nested/<flattened stem>--<source hash>.md
   metadata = {source, author, assistant, laptop, source_path, content_sha256, note_type, redactions}
   (author: the owner's email, else the note's `author:` frontmatter; assistant:
   the note's `assistant:` frontmatter, "" for notes that predate it)
@@ -83,9 +86,14 @@ def redact(text: str) -> tuple[str, int]:
     return text, total
 
 
+_FRONTMATTER_OPEN = re.compile(r"\A\ufeff?---[ \t]*(?:\r?\n|\Z)")
+_FRONTMATTER_BLOCK = re.compile(
+    r"\A\ufeff?---[ \t]*\r?\n(.*?)^---[ \t]*(?:\r?\n|\Z)", re.S | re.M)
+
+
 def frontmatter(text: str) -> dict:
     """Top-level scalar keys of a YAML frontmatter block (no YAML dependency)."""
-    m = re.match(r"---\r?\n(.*?)\r?\n---", text, re.S)
+    m = _FRONTMATTER_BLOCK.match(text)
     out = {}
     for line in (m.group(1).splitlines() if m else []):
         kv = re.match(r"([A-Za-z_][\w-]*):\s*(.*)$", line)
@@ -100,7 +108,7 @@ NOT_KNOWLEDGE_TAGS = {"log", "inbox", "session"}
 
 def tags(text: str) -> list[str]:
     """The frontmatter `tags`, as a flow list (`[a, b]`) or a block list (`- a`)."""
-    m = re.match(r"---\r?\n(.*?)\r?\n---", text, re.S)
+    m = _FRONTMATTER_BLOCK.match(text)
     if not m:
         return []
     lines = m.group(1).splitlines()
@@ -146,6 +154,30 @@ def infer_type(text: str) -> Optional[str]:
     return "reference"
 
 
+def _share_allowed(text: str) -> bool:
+    """Honor YAML comments without guessing at an invalid privacy control.
+
+    Sharing is unchanged when the key is absent. If present, only an explicit
+    true scalar enables it; false, duplicate keys, and unsupported/malformed
+    values all keep the note local. Read the raw scalar before frontmatter's
+    compatibility parser strips quotes. An opening block without a valid closing
+    delimiter also stays local. All frontmatter readers accept a UTF-8 BOM.
+    """
+    block = _FRONTMATTER_BLOCK.match(text)
+    if not block:
+        return _FRONTMATTER_OPEN.match(text) is None
+    controls = []
+    for line in block.group(1).splitlines():
+        match = re.match(r"\s*(?:share|\"share\"|'share')\s*:(.*)$", line, re.I)
+        if match:
+            controls.append(match.group(1).strip())
+    if not controls:
+        return True
+    if len(controls) != 1:
+        return False
+    return re.fullmatch(r"(?:true|\"true\"|'true')(?:[ \t]+#.*)?[ \t]*", controls[0], re.I) is not None
+
+
 def eligible(rel: Path, text: str) -> Optional[str]:
     """The note type if this note may leave the laptop, else None."""
     if any(p.startswith(".") or p == "private" for p in rel.parts[:-1]):
@@ -153,7 +185,7 @@ def eligible(rel: Path, text: str) -> Optional[str]:
     if rel.name.startswith("claude-session-"):
         return None  # a raw session log, whatever its frontmatter says
     fm = frontmatter(text)
-    if fm.get("share", "").lower() == "false":
+    if not _share_allowed(text):
         return None
     note_type = fm.get("type", "").lower()
     if not note_type:
@@ -167,13 +199,19 @@ _PLACEHOLDER = re.compile(r"(?i)never written up|\bTODO:? write\b|\bTBD\b|to be 
 
 def is_stub(text: str) -> bool:
     """A note with no real body: short, a known placeholder, or only headings."""
-    body = re.sub(r"\A---\r?\n.*?\r?\n---\r?\n?", "", text, count=1, flags=re.S)
+    body = _FRONTMATTER_BLOCK.sub("", text, count=1)
     prose = "\n".join(l for l in body.splitlines() if l.strip() and not l.lstrip().startswith("#"))
     return len(body.strip()) < STUB_MIN_CHARS or not prose.strip() or bool(_PLACEHOLDER.search(body) and len(prose) < 600)
 
 
 def remote_path(person: str, day: str, rel: Path) -> str:
-    stem = str(rel.with_suffix("")).replace("/", "__")
+    source = rel.as_posix()
+    stem = rel.with_suffix("").as_posix().replace("/", "__")
+    if len(rel.parts) > 1:
+        # The namespace separates nested notes from all ordinary root names;
+        # the hash separates a/b__c.md from a__b/c.md after flattening.
+        suffix = hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+        stem = f"_nested/{stem}--{suffix}"
     return f"inbox/{person}/{day}/{stem}.md"
 
 
@@ -234,9 +272,63 @@ class Client:
 
 def _load_state() -> dict:
     try:
-        return json.loads(STATE_FILE.read_text())
+        raw = json.loads(STATE_FILE.read_text())
     except (OSError, ValueError):
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    if raw.get("version") == 2:
+        return {"version": 2,
+                "destinations": raw.get("destinations") if isinstance(raw.get("destinations"), dict) else {},
+                "legacy": raw.get("legacy") if isinstance(raw.get("legacy"), dict) else {}}
+    # Old receipts identify neither the remote tenant nor the local vault.
+    # Keep them unbound until an explicit resend or a changed note establishes
+    # a real receipt; assigning them to today's config would be a false claim.
+    return {"version": 2, "destinations": {},
+            "legacy": {k: v for k, v in raw.items() if isinstance(v, str)}}
+
+
+def _destination(client, vault: Path, person: str, email: str) -> Optional[dict]:
+    """Non-secret identity of a receipt's source and remote destination.
+
+    An injected client without an endpoint can still send notes, but it cannot
+    claim a persistent receipt for an unknown destination.
+    """
+    base, org = getattr(client, "base", ""), getattr(client, "org", "")
+    if not isinstance(base, str) or not base or not isinstance(org, str) or not org:
+        return None
+    parts = urllib.parse.urlsplit(base)
+    normalized = urllib.parse.urlunsplit((parts.scheme.lower(), parts.netloc.lower(),
+                                         parts.path.rstrip("/"), parts.query, ""))
+    return {"baseUrl": normalized, "organizationId": org,
+            "person": person, "author": email.strip().lower(), "vault": str(vault.resolve())}
+
+
+def _destination_key(destination: dict) -> str:
+    return hashlib.sha256(json.dumps(destination, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _receipts(state: dict, destination: Optional[dict]) -> dict:
+    if destination is None:
         return {}
+    key = _destination_key(destination)
+    record = state["destinations"].setdefault(key, {"identity": destination, "notes": {}})
+    if not isinstance(record, dict) or record.get("identity") != destination:
+        # Malformed state is not proof that a write occurred.
+        record = state["destinations"][key] = {"identity": destination, "notes": {}}
+    if not isinstance(record.get("notes"), dict):
+        record["notes"] = {}
+    return record["notes"]
+
+
+def _has_known_receipt(state: dict, source: str, destination: Optional[dict]) -> bool:
+    if destination is None:
+        return False
+    origin = {k: destination[k] for k in ("vault", "person", "author")}
+    return any(isinstance(record, dict) and isinstance(record.get("notes"), dict)
+               and source in record["notes"] and isinstance(record.get("identity"), dict)
+               and all(record["identity"].get(k) == v for k, v in origin.items())
+               for record in state["destinations"].values())
 
 
 def _save_state(state: dict) -> None:
@@ -274,15 +366,23 @@ def _put_once_more_if_transient(client, path: str, content: str, metadata: dict)
     return status, body
 
 
-def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit: int = 0) -> dict:
+def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit: int = 0,
+        resend_legacy: bool = False) -> dict:
     vault = Path(vault or config.VAULT_ROOT)
     person, email = identity()
     day = date.today().isoformat()
     laptop = socket.gethostname().split(".")[0]
     state = _load_state()
-    counts = {"pushed": 0, "unchanged": 0, "redacted": 0, "skipped": 0, "skipped_stub": 0, "errors": 0, "not_eligible": 0}
-    if client is None and not dry_run:
-        client = Client(json.loads(FORESYN_CONFIG.read_text()))
+    counts = {"pushed": 0, "unchanged": 0, "redacted": 0, "skipped": 0, "skipped_stub": 0,
+              "errors": 0, "not_eligible": 0, "legacy_deferred": 0}
+    if client is None:
+        try:
+            client = Client(json.loads(FORESYN_CONFIG.read_text()))
+        except (OSError, ValueError, KeyError):
+            if not dry_run:
+                raise
+    destination = _destination(client, vault, person, email)
+    receipts = _receipts(state, destination)
     started = time.monotonic()
     stop_reason = None
 
@@ -308,8 +408,13 @@ def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit:
             counts["skipped"] += 1  # never upload a note the scanner did not finish
             continue
         sha = hashlib.sha256(content.encode()).hexdigest()
-        if state.get(str(rel)) == sha:
+        source = rel.as_posix()
+        if receipts.get(source) == sha:
             counts["unchanged"] += 1
+            continue
+        if (not resend_legacy and state["legacy"].get(source) == sha
+                and not _has_known_receipt(state, source, destination)):
+            counts["legacy_deferred"] += 1
             continue
         if n:
             counts["redacted"] += 1
@@ -331,8 +436,9 @@ def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit:
         status, body = _put_once_more_if_transient(client, remote_path(person, day, rel), content, metadata)
         if status == 200:
             counts["pushed"] += 1
-            state[str(rel)] = sha
-            _save_state(state)
+            if destination is not None:
+                receipts[source] = sha
+                _save_state(state)
         else:
             counts["errors"] += 1
             print(f"error: {rel}: {_describe(status, body)}", file=sys.stderr)
@@ -342,9 +448,15 @@ def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit:
 
     if stop_reason:
         counts["stopped"] = stop_reason
+    if counts["legacy_deferred"]:
+        print(f"{counts['legacy_deferred']} legacy push receipts have no recorded destination; "
+              "unchanged notes were not resent. Check the configured destination, then run "
+              "`claude-note push --resend-legacy` to send them there explicitly.", file=sys.stderr)
+        if not dry_run:
+            _save_state(state)
     # Touched on every clean run, including one with nothing to push: the
     # owner's app alerts when this file is older than 26 h.
-    if not dry_run and counts["errors"] == 0 and not stop_reason:
+    if not dry_run and counts["errors"] == 0 and not stop_reason and not counts["legacy_deferred"]:
         HEARTBEAT.parent.mkdir(parents=True, exist_ok=True)
         HEARTBEAT.write_text(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "counts": counts}))
     return counts

@@ -1,11 +1,13 @@
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 import time
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 _TMP = Path(tempfile.mkdtemp())
 os.environ.setdefault("CLAUDE_NOTE_VAULT_ROOT", str(_TMP / "vault"))
@@ -35,6 +37,7 @@ CHATGPT_EXPORT = [{
 class ImporterTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         importers.TRANSCRIPTS_DIR = self.tmp / "transcripts"
         importers.SEEN_FILE = importers.TRANSCRIPTS_DIR / "seen.json"
         importers.HEARTBEAT = self.tmp / "logs/import-sweep.ok"
@@ -84,6 +87,43 @@ class ImporterTests(unittest.TestCase):
         self._zip(importers.IMPORTS_DIR, "again.zip", CHATGPT_EXPORT)
         self.assertEqual(importers.sweep()["zips"], 0)
         self.assertEqual(len(self._events()), 4)
+
+    def test_import_identity_includes_source_and_complete_conversation_id(self):
+        seen = {}
+        messages = [{"role": "user", "text": "A question"}, {"role": "assistant", "text": "An answer"}]
+        for source, conv_id in (("cursor", "same-id"), ("chatgpt", "same-id"),
+                                ("cursor", "a/b"), ("cursor", "ab"),
+                                ("cursor", "x" * 80 + "a"), ("cursor", "x" * 80 + "b")):
+            self.assertTrue(importers.write_session(seen, source, conv_id, messages))
+            self.assertFalse(importers.write_session(seen, source, conv_id, messages))
+        events = self._events()
+        self.assertEqual(len({e.session_id for e in events}), 6)
+        self.assertEqual(len({e.transcript_path for e in events}), 6)
+
+    def test_legacy_seen_store_migrates_without_reimporting_unchanged_exports(self):
+        import hashlib
+        messages = [{"role": "user", "text": "A question"}, {"role": "assistant", "text": "An answer"}]
+        digest = hashlib.sha256(json.dumps(messages, sort_keys=True, default=str).encode()).hexdigest()
+        seen = {"chatgpt:legacy-id": digest}
+        self.assertFalse(importers.write_session(seen, "chatgpt", "legacy-id", messages))
+        self.assertEqual(len(self._events()), 0)
+        self.assertEqual(len(seen), 2)
+
+    def test_failed_source_is_reported_without_refreshing_success_heartbeat(self):
+        with mock.patch.object(importers, "sweep_cursor", side_effect=RuntimeError("database unavailable")):
+            counts = importers.sweep()
+        self.assertIn("cursor: database unavailable", counts["problems"])
+        self.assertFalse(importers.HEARTBEAT.exists())
+        status = json.loads(importers.HEARTBEAT.with_suffix(".json").read_text())
+        self.assertEqual(status["counts"]["problems"], counts["problems"])
+        self.assertEqual(importers.sweep()["cursor"], 0)
+        self.assertTrue(importers.HEARTBEAT.exists())
+
+    def test_corrupt_seen_shape_and_export_entries_do_not_stop_valid_imports(self):
+        importers.SEEN_FILE.parent.mkdir(parents=True)
+        importers.SEEN_FILE.write_text("[]")
+        self._zip(importers.IMPORTS_DIR, "mixed.zip", [None, "bad", *CLAUDE_EXPORT])
+        self.assertEqual(importers.sweep()["zips"], 1)
 
     def test_cursor_composer_bubbles(self):
         db = sqlite3.connect(importers.CURSOR_DB)

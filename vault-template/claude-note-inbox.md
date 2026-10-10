@@ -1,4 +1,5 @@
 ---
+type: meta
 tags:
   - log
   - claude-note

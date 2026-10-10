@@ -16,6 +16,7 @@ UserPromptSubmit + Stop pair, so the normal worker writes the note and runs
 synthesis. A content hash per conversation makes every source idempotent.
 """
 
+import fcntl
 import hashlib
 import json
 import os
@@ -53,7 +54,8 @@ CLAUDE_CODE_MAX_PER_SWEEP = 10  # each queued session costs one synthesis call; 
 
 def _load_seen() -> dict:
     try:
-        return json.loads(SEEN_FILE.read_text())
+        value = json.loads(SEEN_FILE.read_text())
+        return value if isinstance(value, dict) else {}
     except (OSError, ValueError):
         return {}
 
@@ -97,9 +99,16 @@ def write_session(seen: dict, source: str, conv_id: str, messages: list, cwd: st
     if not prompts or not any(m["role"] == "assistant" for m in messages):
         return False
 
-    session_id = re.sub(r"[^A-Za-z0-9_-]", "", conv_id)[:80] or hashlib.sha256(conv_id.encode()).hexdigest()[:32]
+    # Session state is shared by all assistants. Hash the complete source and
+    # conversation ID, so equal IDs from different apps and IDs differing only
+    # in punctuation cannot overwrite each other's transcripts or notes.
+    conv_id = str(conv_id)
+    session_id = hashlib.sha256(f"{source}:{conv_id}".encode()).hexdigest()[:32]
     digest = hashlib.sha256(json.dumps(messages, sort_keys=True, default=str).encode()).hexdigest()
-    if seen.get(f"{source}:{session_id}") == digest:
+    key = f"{source}:{session_id}"
+    legacy_id = re.sub(r"[^A-Za-z0-9_-]", "", conv_id)[:80] or hashlib.sha256(conv_id.encode()).hexdigest()[:32]
+    if seen.get(key) == digest or seen.get(f"{source}:{legacy_id}") == digest:
+        seen[key] = digest  # migrate the watermark without reimporting history
         return False
 
     path = TRANSCRIPTS_DIR / source / f"{session_id}.jsonl"
@@ -126,7 +135,7 @@ def write_session(seen: dict, source: str, conv_id: str, messages: list, cwd: st
     tmp.replace(path)
 
     _enqueue(session_id, path, cwd, prompts[0], source)
-    seen[f"{source}:{session_id}"] = digest
+    seen[key] = digest
     return True
 
 
@@ -181,6 +190,8 @@ def import_zip(zip_path: Path, seen: dict) -> Optional[int]:
             for name in members:
                 convs = json.loads(zf.read(name))
                 for conv in convs if isinstance(convs, list) else []:
+                    if not isinstance(conv, dict):
+                        continue
                     if "chat_messages" in conv:
                         source, conv_id, msgs = "claude-ai", conv.get("uuid", ""), _claude_export_messages(conv)
                         cwd = "claude.ai"
@@ -324,7 +335,10 @@ def sweep_codex(seen: dict, since_ts: float, sessions_dir: Path = None) -> int:
     queued = 0
     now = time.time()
     for path in sessions_dir.glob("*/*/*/rollout-*.jsonl"):
-        mtime = path.stat().st_mtime
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue  # a session may move or disappear during the scan
         if mtime < since_ts or now - mtime < CODEX_IDLE_SECONDS:
             continue
         key = f"codex:{path.name}"
@@ -418,6 +432,17 @@ def sweep_claude_code(seen: dict, since_ts: float, projects_dir: Path = None,
 # --------------------------------------------------------------------------
 
 def sweep(since: Optional[datetime] = None, zips: Iterable[Path] = ()) -> dict:
+    """Serialize worker and manual imports to preserve the seen-store and queue."""
+    SEEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(SEEN_FILE.with_suffix(".lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            return _sweep(since=since, zips=zips)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _sweep(since: Optional[datetime] = None, zips: Iterable[Path] = ()) -> dict:
     """Run every source once; touch the heartbeat on success."""
     seen = _load_seen()
     since_ts = _since(seen, since)
@@ -430,16 +455,26 @@ def sweep(since: Optional[datetime] = None, zips: Iterable[Path] = ()) -> dict:
             counts[name] = fn()
         except Exception as e:  # one broken source must not stop the others
             counts[name] = f"error: {e}"
+            problems.append(f"{name}: {e}")
+        _save_seen(seen)
+    for zip_path in zips:
+        count = import_zip(Path(zip_path), seen)
+        counts[str(zip_path)] = count
+        if count is None:
+            problems.append(f"{zip_path}: not a readable conversation export")
         _save_seen(seen)
     if problems:
         counts["problems"] = problems
-    for zip_path in zips:
-        counts[str(zip_path)] = import_zip(Path(zip_path), seen)
-        _save_seen(seen)
+    HEARTBEAT.parent.mkdir(parents=True, exist_ok=True)
+    # Keep the latest attempt separate from the last successful sweep. Health
+    # checks can show a source error immediately without calling it a success.
+    status = HEARTBEAT.with_suffix(".json")
+    tmp = status.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"ts": datetime.now().isoformat(), "counts": counts}))
+    tmp.replace(status)
     # Touched on every clean sweep, including one that found nothing; a source
     # that raised leaves it stale so the owner's app notices within the hour.
-    if any(isinstance(v, str) and v.startswith("error") for v in counts.values()):
+    if problems:
         return counts
-    HEARTBEAT.parent.mkdir(parents=True, exist_ok=True)
     HEARTBEAT.write_text(json.dumps({"ts": datetime.now().isoformat(), "counts": counts}))
     return counts
