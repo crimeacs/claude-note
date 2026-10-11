@@ -59,4 +59,42 @@ Some legacy keys remain accepted by config but are not active controls: `synthes
 
 QMD's collection must point to the same vault. Inspect `qmd collection list`; merely assigning a name does not register it. Synthesis also requires the retrieved note to be in the package's local vault index and to exist on disk. Retrieved text remains evidence, not instructions or approval.
 
+## Recall and sentinel
+
+Source of truth: [recall.py](../src/claude_note/recall.py) and [sentinel.py](../src/claude_note/sentinel.py).
+These sections are read without loading the rest of the config, so hooks work everywhere.
+
+```toml
+[recall]
+enabled = true
+collections = []               # QMD collections to search; empty = all
+memory_collections = []        # searched separately, placed first (e.g. ["agentmem"])
+inject = 4                     # notes per prompt
+memory_slots = 2               # how many of those may be memories
+search_n = 10                  # results requested per query
+timeout = 6                    # seconds per qmd call (wall clock)
+budget = 8                     # seconds for the whole recall
+min_prompt = 15                # shorter prompts are not searched
+max_terms = 10
+snippet_chars = 260
+index = ""                     # qmd --index name; "" = default
+skip_paths = ["/sessions/", "/claude-session-", "/claude-note-inbox\\.md$"]
+rerank_command = ""            # optional judge: JSON on stdin -> {"keep": [...]}
+rerank_timeout = 2.5
+log = true                     # ~/.local/share/claude-note/recall.jsonl
+qmd = ""                       # explicit qmd path
+
+[sentinel]
+enabled = true
+default_rules = true           # auth, scope, 401, quota/rate limit, disk full, macOS privacy
+inject = 2
+
+[[sentinel.rules]]
+match = "ECONNREFUSED 127.0.0.1:5432"   # regex, case-insensitive, over the failure output
+advice = "Local Postgres is not running."
+```
+
+Environment: `CLAUDE_NOTE_RECALL=off` disables recall; `CLAUDE_NOTE_RECALL_INDEX` selects a QMD
+index; `CLAUDE_NOTE_RECALL_LOG=0` stops logging (the doctor's probes use it).
+
 The optional push adapter reads its destination and credentials from `~/.foresyn/config.json`; do not put credentials in this repository or notes. See [shared-system boundaries](current-system.md).

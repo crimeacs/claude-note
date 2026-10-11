@@ -53,7 +53,7 @@ Capture and synthesis-time retrieval do not make prior knowledge appear in the n
 
 ```mermaid
 flowchart LR
-    T[Current task] --> H[Explicit agent search or external host recall]
+    T[Current task] --> H[claude-note hook recall, or the agent running claude-note recall]
     Q[Scoped QMD index] --> H
     H --> L[Source-linked leads]
     L --> V[Read full source and verify applicability]
@@ -64,7 +64,13 @@ flowchart LR
     U --> Q
 ```
 
-The bundled Claude Code and Codex hooks enqueue capture events. A custom Claude Code prompt hook can inject recall context, but that integration is external to this repository. The reviewed Codex setup uses explicit recall instructions and capture hooks; it does not establish automatic Codex recall. A hook's context is advisory, not proof that an agent read the evidence or obeyed an operating rule. QMD refresh scheduling is also operator or external-scheduler responsibility.
+Since 2.0 the package ships this path: `claude-note hook recall` (Claude Code and Codex
+`UserPromptSubmit`) and `claude-note hook sentinel` (Claude Code, failed Bash commands), installed by
+`claude-note setup` and verified end to end by `claude-note doctor`. Both were checked against real
+hosts: the injected context reached Claude Code 2.1.296 and Codex 0.162.1, and each model's answer
+cited the recalled note. A hook's context is still advice, not proof that an agent read the
+evidence; the recall rule added to `CLAUDE.md` / `AGENTS.md` asks it to open the note and check it.
+See [recall](recall.md).
 
 ## Four different kinds of movement
 

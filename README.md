@@ -1,182 +1,177 @@
 # Claude Note
 
-A shared knowledge loop for your AI assistants: capture work, extract reusable lessons, keep typed Markdown notes, and retrieve them in the next session.
+**Your agents already solved this. Claude Note makes sure they remember.**
 
-Claude Note began as a Claude Code → Obsidian logger. This fork now includes multi-assistant imports, author and assistant provenance, safe note routing, bounded QMD retrieval, health reporting, and optional curated sharing with a Sweat AI vault. The package and command remain `claude-note`; existing `foresyn` API and configuration names remain technical identifiers.
+Claude Note captures what Claude Code, Codex, Cursor and ChatGPT sessions learn, keeps it as typed
+Markdown notes, and puts the right notes in front of the agent *before* it acts: on every prompt,
+and again the moment a command fails.
 
-It runs locally with Python's standard library. Synthesis invokes your installed Claude CLI; selected transcript content and retrieved source excerpts go to that CLI's configured model service. Obsidian is optional.
+[![Claude Note 2.0: recall before action](docs/assets/claude-note-2-poster.jpg)](docs/assets/claude-note-2.mp4)
 
-## Watch the knowledge loop
+[Watch the 2½-minute walkthrough](docs/assets/claude-note-2.mp4) · [Captions](docs/assets/claude-note-2.vtt) ·
+[How it was filmed](docs/demo.md)
 
-[![Remember. Then act. — knowledge-loop demo](docs/assets/knowledge-loop-poster.jpg)](docs/assets/knowledge-loop.mp4)
+```text
+ capture ──▶ notes ──▶ recall ──▶ act ──▶ remember
+    ▲                                        │
+    └────────────────────────────────────────┘
+```
 
-[Watch or download the 112-second demo](docs/assets/knowledge-loop.mp4) · [Captions](docs/assets/knowledge-loop.vtt) · [Walkthrough, evidence, and agent operating rule](docs/knowledge-loop-demo.md)
+| | What happens | Command |
+|---|---|---|
+| **Capture** | Hooks queue every session; a background worker extracts decisions, gotchas and patterns into typed notes. | automatic |
+| **Recall** | Before the model sees a prompt, a hook searches your notes and injects a short, source-linked shortlist. A miss is announced, never silent. | automatic, or `claude-note recall "…"` |
+| **Sentinel** | When a shell command fails, the known fix for that error is surfaced before the agent retries. Auth, quota and disk-full errors are flagged as "do not retry". | automatic |
+| **Remember** | Write a lesson the moment you learn it; it is indexed in under a second and the next prompt can recall it. | `claude-note remember` |
+| **Prove it** | Separate *configured* from *working*: a canary note is planted in a throwaway index and the real hooks are run against it. | `claude-note doctor` |
 
-The demo follows a synthetic retry bug through recall, source verification, a tested fix, capture, and correction. It distinguishes this package from custom prompt-recall and shared-memory integrations. It was produced while PR #8 was under review; its on-screen proposal labels describe that source snapshot.
+## What it looks like
 
-## What it does
+A real Claude Code session with recall installed. The agent was never told about the team's build
+rule; the hook found the note, the agent opened it, and answered from it:
 
-| Stage | Behavior |
-| --- | --- |
-| Capture | Claude Code hooks, Codex hooks and rollout recovery, read-only Cursor import, Claude and ChatGPT export imports. |
-| Synthesize | Extract conclusions, tool outcomes, concepts, decisions, questions, and procedures; keep proposals and verified results distinct. |
-| Organize | Typed durable notes, separate `sessions/` evidence, source backlinks, managed updates, exact-content deduplication, and vault-confined Markdown paths. |
-| Retrieve | Optional collection-scoped QMD search, current and legacy JSON support, bounded subprocesses, and local source verification. BM25 is the synthesis default. |
-| Share | Optional push of eligible, redacted notes into a configured shared vault inbox. Upload is staging; remote consolidation and approval are separate. |
-| Operate | JSON health report, import and push heartbeats, installed-source provenance, and reproducible checkout updates. |
+```text
+> We deploy our Next.js app to the 4 GB production server. Can I just run npm run build on the box?
 
-[Current system architecture](docs/current-system.md) explains the wider memory system, including integrations that are **external** to this package. [Development notes](docs/developments.md) records the changes in this modernization.
+  ⎿ claude-note recall (hook context, abbreviated):
+    - Never run the production build on the 4 GB box (decision)  [notes/never-build-on-a-small-box.md]
 
-### Recall before action
+● No. Your team's notes say `npm run build` runs out of memory on the 4 GB box and takes the live
+  app down with it. Build on your laptop or in CI, ship the standalone output, and have the server
+  just switch the symlink and restart.
+```
 
-Before repeating work, search the intended knowledge collection, open relevant sources, verify their scope and current status against the task, then act and test. Write durable corrections back as typed notes and refresh the relevant index. A search snippet is a lead, not a verified answer.
-
-Bundled Claude Code and Codex hooks **capture events**. They do not inject prior knowledge before an answer. Claude Note's QMD adapter supplies synthesis and linking; prompt-time recall needs an explicit agent search or a separate host integration. See the [copyable operating rule and hook boundaries](docs/knowledge-loop-demo.md#recall-before-action).
+Without recall, the same model answered "You can, but…". Codex, with the same hook, answered "No"
+and linked the note. Both runs are in [docs/demo.md](docs/demo.md).
 
 ## Install
 
-Requirements: Python 3.11+, git, and [uv](https://docs.astral.sh/uv/). Install and authenticate the [Claude CLI](https://code.claude.com/docs/en/overview) for synthesis, or use `log` mode. QMD and document converters are optional.
+Requirements: Python 3.11+, [uv](https://docs.astral.sh/uv/), [QMD](https://github.com/tobi/qmd)
+for search, and the [Claude CLI](https://code.claude.com/docs/en/overview) for synthesis.
 
 ```bash
 git clone https://github.com/crimeacs/claude-note.git ~/src/claude-note
 cd ~/src/claude-note
 scripts/install-from-checkout.sh --non-interactive \
-  --vault ~/Documents/claude-notes --author you@example.com --claude-hooks
+  --vault ~/Documents/notes --author you@example.com --claude-hooks
+
+claude-note setup --codex      # index, recall + sentinel hooks, agent rules, hourly refresh
+claude-note doctor             # prove it works
 ```
 
-`--install-uv` explicitly allows the installer to fetch uv if absent. Existing configuration and vault files are preserved. The checkout installer sets up the macOS worker; Linux users install the package with uv and use the [systemd template](docs/service-setup.md), or use the interactive `./install.sh`.
+`setup` is idempotent and backs up every file it changes; `--dry-run` shows what it would do. It:
 
-Optional setup:
+1. registers your vault, and Claude Code's per-project memory files, as QMD collections, so one
+   search spans both;
+2. adds `claude-note hook recall` (UserPromptSubmit) and `claude-note hook sentinel`
+   (PostToolUse / PostToolUseFailure on Bash) next to the capture hooks, for Claude Code and,
+   with `--codex`, Codex;
+3. adds a short *recall before action* rule to `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`, so
+   agents also search on purpose when the automatic lookup misses;
+4. schedules `claude-note refresh` hourly: text index, then vectors, with a lock, hard timeouts and
+   a heartbeat.
+
+Codex runs new hooks only after you trust them: run `codex` once and accept the prompt.
+
+## Everyday use
 
 ```bash
-claude-note install-codex-hooks
-claude-note status --json
+claude-note recall "gmail 403 after adding calendar scope"     # what do we already know?
+claude-note remember --type gotcha --tags oauth \
+  "Adding a Google scope does not upgrade existing tokens: delete the token, re-consent with all scopes"
+claude-note remember --type decision --why "the box OOMs" "Build on the laptop, never on the 4 GB server"
+claude-note doctor                                              # configured, exercised, in use
+claude-note recall --stats                                      # hit rate and latency of the hook
 ```
 
-A hook file is configuration evidence. Verify that the host trusts it and that an event reaches the queue before claiming automatic capture. Import sweeps can recover missed sessions independently. See [hook setup](docs/hook-setup.md).
+Types matter: a failure lesson is a `gotcha`, a reusable method a `pattern`, an accepted choice a
+`decision`. The sentinel prefers gotchas when a command fails. If a note with the same title exists,
+`remember` appends a dated block instead of overwriting; recall shows the newest block first.
 
-### Update an existing installation
+## Why recall finds things
 
-```bash
-cd ~/src/claude-note
-git pull --ff-only
-scripts/install-from-checkout.sh --claude-hooks --codex-hooks
-```
+Keyword search over notes is fast (≈0.3 s) but conjunctive: *"how should I organise obsidian note
+types and the graph view"* returns nothing, while *"obsidian note types graph view"* returns seven
+notes. Recall was built against that failure on a real 15,000-note index:
 
-The installer records the checkout path and commit in `~/.local/share/claude-note/installed-from.json`. Source-managed installations keep that source: `claude-note update` directs you to the original checkout or bundled app rather than replacing it with another fork. Unmanaged release installs use this repository's releases.
+- the prompt is reduced to content words: stopwords, imperative verbs, paths, URLs and dates go;
+  `task-backed`, `source_unchanged` and `config.toml` are split, because each matched nothing as
+  one token;
+- it searches the full query and progressively narrower ones (the most specific 5, 3 and 2 words)
+  and pools *every* rung; a note several rungs agree on ranks first;
+- session transcripts and the inbox are skipped; append-log notes show their newest update;
+- hand-written agent memories get reserved slots, because short notes rank low in BM25;
+- a failed command is searched by its error identifiers (`insufficientPermissions`, `ENOSPC`,
+  `invalid_grant`) one by one, since they are specific on their own;
+- every miss is announced with the query that was tried. Silence looks exactly like a hook that
+  never ran, and agents read it as "nothing is known".
 
-Merging a PR updates repository source. Update the intended checkout and reinstall to change the running installation, then verify event delivery and worker output. Compare the recorded source commit, since a version label alone does not establish which checkout is installed.
+All of it fails open under a wall-clock budget: recall can never block a prompt. An optional
+`rerank_command` can pass the shortlist to your own relevance judge. Details:
+[docs/recall.md](docs/recall.md).
 
 ## Capture sources
 
 | Source | Capture path |
-| --- | --- |
-| Claude Code | `PostToolUse`, `UserPromptSubmit`, and `Stop` hooks; recovery sweep of recent interactive sessions. |
-| Codex CLI / desktop | Installed hooks where the host supports and trusts them; rollout recovery sweep. Automation and subagent threads are excluded. |
-| Cursor | Worker reads supported local `state.vscdb` chat formats without writing the database. |
-| Claude desktop / web, ChatGPT web | Export conversation data and supply the zip explicitly or place it in the import folder. No account scraping. |
+|---|---|
+| Claude Code | `PostToolUse`, `UserPromptSubmit`, `Stop` hooks, plus a recovery sweep of recent sessions. |
+| Codex CLI / desktop | Hooks where trusted, plus a rollout recovery sweep. Automation and subagent threads are skipped. |
+| Cursor | Reads supported local chat databases, read-only. |
+| Claude desktop / web, ChatGPT | Export zips, dropped in the import folder or passed to `claude-note import`. |
 
-The worker sweeps every 30 minutes. The initial sweep looks back seven days; recent Claude Code recovery is capped at ten sessions per sweep. Each synthesized session invokes the configured model. A changed conversation may be imported again; unchanged content is skipped.
-
-```bash
-claude-note import
-claude-note import ~/Downloads/export.zip
-claude-note import --since 2026-01-01
-```
+The worker synthesizes each finished session with the Claude CLI into typed notes (`route` mode) or
+an inbox for review (`inbox` mode). See [synthesis modes](docs/synthesis-modes.md).
 
 ## Configuration
 
-`~/.config/claude-note/config.toml` (or `$XDG_CONFIG_HOME/claude-note/config.toml`):
+`~/.config/claude-note/config.toml`:
 
 ```toml
-vault_root = "/absolute/path/to/notes"
+vault_root = "/Users/you/Documents/notes"
 author = "you@example.com"
 
 [synthesis]
-mode = "inbox"             # log | inbox | route
-timeout = 300              # seconds per synthesis process
+mode = "route"                    # log | inbox | route
 
-[qmd]
+[recall]
+collections = []                  # empty = every QMD collection
+memory_collections = ["agentmem"] # reserved slots for agent memories
+inject = 4                        # notes per prompt
+timeout = 6                       # seconds per search, wall clock
+# rerank_command = "my-judge"     # optional: JSON on stdin -> {"keep": ["c0", ...]}
+
+[sentinel]
 enabled = true
-collection = "notes"       # register this exact vault in QMD first
-search_mode = "keyword"    # vector is explicit opt-in
-ingest_dedup_enabled = false # opt in for semantic ingestion candidates
-synth_max_notes = 5
-qmd_timeout = 10
+# [[sentinel.rules]]
+# match = "ECONNREFUSED 127.0.0.1:5432"
+# advice = "Local Postgres is not running: `brew services start postgresql`."
 ```
 
-Start with `inbox` to inspect extraction quality, then choose `route` for automatic note operations. The code default is `route`. Without a configured QMD collection, synthesis uses the local note index and injects no global QMD results.
+Turn recall off for one shell with `CLAUDE_NOTE_RECALL=off`. Full reference:
+[configuration](docs/configuration.md).
 
-```bash
-qmd collection add ~/Documents/claude-notes --name notes
-qmd update
-qmd search "retry timeout" -c notes -n 5 --json
-# Optional, needed for vector mode:
-qmd embed
-```
+## Sharing with a team
 
-`claude-note index` rebuilds the package's local note index. `qmd update` refreshes QMD text search; `qmd embed` refreshes vectors. These are separate operations. See [configuration](docs/configuration.md) and [QMD integration](docs/qmd-integration.md).
-
-## Notes and provenance
-
-```yaml
----
-title: Retry after a lost response
-type: gotcha
-assistant: codex
-author: you@example.com
-tags: [reliability, retries]
----
-```
-
-Set `type` explicitly: a failure lesson is a `gotcha`, a reusable method a `pattern`, and an accepted choice a `decision`. Missing or invalid synthesis types receive an observable fallback; tags are topical metadata, not a substitute for meaning. [Vault workflow](vault-template/obsidian-workflow.md) describes types, sources, and graph use.
-
-`assistant` records the producer (`claude-code`, `codex`, `cursor`, `claude-app`, or `chatgpt`). `author` resolves from `CLAUDE_NOTE_AUTHOR`, config, the optional Foresyn config email, then global git email. Neither is an access-control or approval claim.
-
-```text
-notes/
-├── .claude-note/           # local queues, session state, logs, local note index
-├── sessions/              # new session records; old root records stay usable
-├── literature/            # external source and concept notes
-├── internal/              # internal document ingestion
-├── templates/             # typed writing templates
-├── claude-note-inbox.md
-└── open-questions.md
-```
-
-## Optional shared-vault push
-
-Push requires an explicitly configured `~/.foresyn/config.json`. It stages supported curated types (`pattern`, `gotcha`, `decision`, `reference`, `project`, `literature`), excluding sessions, private folders, `share: false`, and empty placeholders. Recognized secrets are redacted before sending. Redaction does not decide whether business information is confidential.
-
-```bash
-claude-note push --dry-run
-claude-note push --limit 10
-claude-note push --install-agent   # optional macOS daily job at 03:00 local time
-```
-
-Receipts are scoped to the destination and local vault. Nested source paths have collision-resistant remote names. Old receipts whose destination is unknown are retained without automatic resending; review the configured target and use `claude-note push --resend-legacy` explicitly when appropriate. See [commands](docs/commands.md).
+`claude-note push` stages curated, redacted notes (`pattern`, `gotcha`, `decision`, `reference`,
+`project`, `literature`) to a shared Sweat AI vault inbox, skipping sessions, private folders and
+`share: false` notes. `--install-agent` schedules it daily. See [commands](docs/commands.md).
 
 ## Operate and develop
 
 ```bash
-claude-note status --json
-claude-note drain
-claude-note clean --all             # dry run
-claude-note resynth SESSION_PREFIX --mode inbox
-claude-note ingest paper.pdf --dry-run
-PYTHONPATH=src python3 -m unittest discover -s tests -v
+claude-note status --json         # health, works before configuration, exit 1 on problems
+claude-note doctor --json         # configured / exercised / in use
+claude-note drain                 # process queued sessions now
+PYTHONPATH=src python3 -m unittest discover -s tests
 ```
 
-The JSON health report works before configuration, makes bounded local probes without network calls, and exits 1 if its `problems` list is nonempty. A running worker alone does not prove synthesis, sharing, or external consolidation succeeded.
+| Guide | |
+|---|---|
+| [Recall, sentinel and remember](docs/recall.md) | How the loop's second half works, and what each rule fixed |
+| [Getting started](docs/getting-started.md) | Install and verify the first capture |
+| [Commands](docs/commands.md) / [configuration](docs/configuration.md) | Every interface |
+| [Hooks](docs/hook-setup.md) / [services](docs/service-setup.md) | What runs where |
+| [Architecture](docs/architecture.md) / [current system](docs/current-system.md) | Design and boundaries |
+| [Developments](docs/developments.md) | What changed, release by release |
 
-| Guide | Scope |
-| --- | --- |
-| [Getting started](docs/getting-started.md) | Install and verify the first capture. |
-| [Commands](docs/commands.md) / [configuration](docs/configuration.md) | Actual supported interfaces. |
-| [Architecture](docs/architecture.md) / [current system](docs/current-system.md) | Implementation and integration boundaries. |
-| [Knowledge-loop demo](docs/knowledge-loop-demo.md) | Video, controlled evidence, and recall before action. |
-| [Hooks](docs/hook-setup.md) / [services](docs/service-setup.md) | Capture and worker operation. |
-| [Synthesis modes](docs/synthesis-modes.md) / [ingestion](docs/document-ingestion.md) | Knowledge production and review. |
-| [QMD](docs/qmd-integration.md) / [troubleshooting](docs/troubleshooting.md) | Retrieval and failure diagnosis. |
-
-MIT licensed. Original project by [artemiin](https://github.com/artemiin/claude-note); this fork maintains the developments described here.
+MIT licensed. Original project by [artemiin](https://github.com/artemiin/claude-note).
