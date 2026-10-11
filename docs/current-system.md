@@ -49,7 +49,7 @@ Synthesis proposes structured knowledge and note operations. The router and writ
 
 ## Recall before action
 
-Capture and synthesis-time retrieval do not make prior knowledge appear in the next assistant prompt. A separate recall path starts with the current task, searches an allowed collection, and gives the assistant source-linked leads. The assistant must then read full sources, check scope and supersession against current evidence, act, test, and record durable corrections. See the [demo and copyable operating rule](knowledge-loop-demo.md#recall-before-action).
+Capture and synthesis-time retrieval do not by themselves put prior knowledge in the next prompt. The recall path starts with the current task, searches an allowed collection, and gives the assistant source-linked leads. The assistant must then read full sources, check scope and supersession against current evidence, act, test, and record durable corrections. See [recall](recall.md) and the [2.0 demo](demo.md).
 
 ```mermaid
 flowchart LR

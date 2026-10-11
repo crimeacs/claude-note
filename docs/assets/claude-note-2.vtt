@@ -1,0 +1,141 @@
+WEBVTT
+
+1
+00:00:00.730 --> 00:00:04.890
+Last month, your agent spent an hour on a broken deploy.
+
+2
+00:00:04.940 --> 00:00:07.980
+Today it hits the same wall, and starts from zero.
+
+3
+00:00:08.860 --> 00:00:11.390
+Agents don't forget because they're careless.
+
+4
+00:00:11.440 --> 00:00:15.390
+They forget because nothing puts yesterday's lesson in front of them.
+
+5
+00:00:15.440 --> 00:00:17.980
+Notes get written. Nobody reads them.
+
+6
+00:00:18.860 --> 00:00:21.490
+Claude Note closes that loop.
+
+7
+00:00:21.540 --> 00:00:29.820
+It captures what your agents learn, keeps it as plain Markdown notes, and now, before the agent acts, it brings the right ones back.
+
+8
+00:00:30.710 --> 00:00:33.210
+This is a real Claude Code session.
+
+9
+00:00:33.260 --> 00:00:37.770
+We ask if it's fine to run the production build on our four-gig server.
+
+10
+00:00:37.820 --> 00:00:46.780
+Before the model even sees the prompt, a hook searches the notes, in about a second, and finds one: we decided never to build on that box.
+
+11
+00:00:47.440 --> 00:00:49.750
+The agent opens the note, then answers.
+
+12
+00:00:49.800 --> 00:00:54.100
+No. Build on the laptop, ship the artifact.
+
+13
+00:00:55.140 --> 00:00:57.720
+Same model, without recall?
+
+14
+00:00:57.770 --> 00:01:00.440
+You can, but. The rule was ours.
+
+15
+00:01:00.490 --> 00:01:02.890
+Only recall could bring it.
+
+16
+00:01:03.730 --> 00:01:06.000
+Codex gets the same hook.
+
+17
+00:01:06.050 --> 00:01:09.050
+Same question, same answer, with a link to the note.
+
+18
+00:01:09.950 --> 00:01:13.010
+Finding the right note is the hard part.
+
+19
+00:01:13.060 --> 00:01:17.780
+Keyword search is fast, but one unusual word returns nothing.
+
+20
+00:01:17.830 --> 00:01:25.700
+So recall keeps only the words that matter, tries narrower and narrower queries, and pools everything they find.
+
+21
+00:01:25.750 --> 00:01:28.520
+And when it finds nothing, it says so.
+
+22
+00:01:28.570 --> 00:01:30.650
+Silence reads like nothing is known.
+
+23
+00:01:31.540 --> 00:01:34.840
+When a command fails, the sentinel steps in.
+
+24
+00:01:34.890 --> 00:01:46.200
+It reads the error, finds the note that fixed it last time, and flags the failures that never fix themselves: expired logins, quotas, a full disk.
+
+25
+00:01:46.250 --> 00:01:51.290
+It reads the output, not the command, so a grep for an error word stays quiet.
+
+26
+00:01:52.130 --> 00:01:55.660
+Learn something? Write it down while it's fresh.
+
+27
+00:01:55.710 --> 00:02:00.300
+Remember saves a typed note and indexes it in half a second.
+
+28
+00:02:00.350 --> 00:02:03.130
+The very next prompt can recall it.
+
+29
+00:02:04.030 --> 00:02:06.120
+Then prove it works.
+
+30
+00:02:06.170 --> 00:02:13.040
+Doctor plants a canary note, runs the real hooks against it, and checks the index is fresh.
+
+31
+00:02:13.090 --> 00:02:19.240
+The first time we ran it on our own machine, it caught our index refresh failing for eight hours.
+
+32
+00:02:19.290 --> 00:02:21.850
+Everything we wrote that afternoon was invisible.
+
+33
+00:02:22.710 --> 00:02:25.080
+One command sets it all up.
+
+34
+00:02:25.130 --> 00:02:27.640
+Your agents already solved this.
+
+35
+00:02:27.690 --> 00:02:29.610
+With Claude Note, they remember.

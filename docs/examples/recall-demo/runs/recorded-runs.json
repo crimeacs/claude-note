@@ -1,0 +1,70 @@
+{
+  "build-question": {
+    "prompt": "We deploy our Next.js app to the 4 GB production server. Can I just run npm run build on the box to save time? Two short lines.",
+    "claude_code_with_recall": {
+      "host": "Claude Code 2.1.296",
+      "settings": "--setting-sources project (recall + sentinel hooks only)",
+      "result": "No. Your team's notes say `npm run build` runs out of memory on the 4 GB box and takes the live app down with it.\nBuild on your laptop or in CI, ship the standalone output, and have the server just switch the symlink and restart."
+    },
+    "claude_code_without_recall": {
+      "host": "Claude Code 2.1.296",
+      "settings": "--setting-sources local (no hooks)",
+      "result": "You can, but `next build` often needs 1\u20133+ GB of RAM. On a 4 GB box that's also serving the live app, it can run out of memory, get killed, or slow down production while it runs.\n\nIt's safer to build in CI or on your machine with `output: 'standalone'` and copy the build to the server; if you must build on the box, add swap and cap Node's memory with `NODE_OPTIONS=--max-old-space-size=2048`."
+    },
+    "codex_with_recall": {
+      "host": "Codex CLI 0.162.1",
+      "result": "No\u2014your [deployment note](~/notes/never-build-on-a-small-box.md) says `npm run build` exhausts memory on that 4 GB box and takes the app down.  \nBuild on your laptop, ship the standalone artifact, then swap the server\u2019s symlink and restart."
+    }
+  },
+  "oauth-question": {
+    "prompt": "Our Gmail sync started failing with 403 insufficientPermissions right after we added the Calendar scope. Re-running the login didn't help. What's going on and what should I do? Answer in at most 4 short lines.",
+    "claude_code_with_recall": {
+      "tool_calls": [
+        {
+          "tool": "Read",
+          "input": {
+            "file_path": "~/notes/google-oauth-new-scope-needs-reconsent.md"
+          }
+        }
+      ],
+      "result": "Your existing token was issued before the Calendar scope existed, and re-running login just hands back that cached token, so Google rejects calls that need the new scope.\nFix: delete every stored copy of the token (token.json, DB row, localStorage), then run consent once with `prompt=consent` and request **all** scopes, the Gmail ones and Calendar together.\nBefore retrying the sync, check that `getTokenInfo(accessToken)` lists the Calendar scope.\nThis comes from your team's note `vault/google-oauth-new-scope-needs-reconsent.md`; I haven't looked at your auth code.",
+      "duration_ms": 7033,
+      "num_turns": 2
+    },
+    "claude_code_without_recall": {
+      "result": "Your app is most likely still using the old refresh token, which only carries the original Gmail scopes. Google often skips the consent screen when you log in again, so no new grant gets issued. It's also possible that adding Calendar replaced the Gmail scope in your scope list instead of adding to it.\nTo fix it, delete the stored token and revoke the app's access at myaccount.google.com/permissions. Then request the Gmail and Calendar scopes together, with `access_type=offline&prompt=consent` (and `include_granted_scopes=true` if you add scopes step by step).\nMake sure both scopes are listed on the OAuth consent screen in Cloud Console. To confirm, check the token's `scope` field at the tokeninfo endpoint."
+    }
+  },
+  "sentinel": {
+    "prompt": "Run python3 calendar_sync.py. If it fails, tell me in at most 4 short lines what is wrong and what to do.",
+    "claude_code": {
+      "tool_calls": [
+        {
+          "tool": "Bash",
+          "input": {
+            "command": "python3 calendar_sync.py",
+            "description": "Run calendar sync script"
+          }
+        },
+        {
+          "tool": "Bash",
+          "input": {
+            "command": "grep -n -i \"scope\" calendar_sync.py; python3 -c \"import json;print(json.load(open('token.json')).get('scopes'))\"",
+            "description": "Compare script scopes with token scopes"
+          }
+        },
+        {
+          "tool": "Bash",
+          "input": {
+            "command": "grep -n -i \"scope\" ~/demo/sentinel/calendar_sync.py ~/demo/sentinel/token.json",
+            "description": "Find OAuth scopes in script and token"
+          }
+        }
+      ],
+      "result": "It failed with `403 insufficient authentication scopes`, so Google rejected the calendar request.\nYour saved `token.json` was only granted `gmail.readonly` and has no Calendar scope. Adding a scope to the code doesn't change an existing token.\nFix: delete `token.json` and run the script again. In the consent screen, approve Gmail and Calendar together in one flow.\nI haven't deleted anything. Tell me if you want me to remove the token.",
+      "duration_ms": 12638,
+      "num_turns": 4
+    },
+    "hook_context": "claude-note sentinel: the last command failed with: 'googleapiclient.errors.HttpError: <HttpError 403 when requesting https://www.googleapis.com/calendar/v3/calendars/primary/events returned \"Request had insufficient authentication scopes.\". Details: \"[{\\'reason\\': \\'insufficientPermissions\\'}]\">'\n\n- Missing OAuth scope. Existing tokens keep their old scopes: delete the stored token and re-consent with every scope requested in one flow.\n\nNotes about this failure (open one before applying it; it may be stale):\n- Google OAuth: a new scope needs a fresh consent (gotcha)  [~/notes/google-oauth-new-scope-needs-reconsent.md]\n    Adding a scope in the Cloud Console does not upgrade tokens you already hold. Gmail and Calendar calls keep failing with `403 insufficientPermissions` and re-running the login silently returns the old cached token.\n\nDo not retry the identical command until something has changed. When you find the fix, record it: `claude-note remember --type gotcha \"<error>: <cause> -> <fix>\"`."
+  }
+}

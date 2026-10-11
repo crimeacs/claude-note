@@ -1,0 +1,411 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<title>Claude Note 2.0</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=block" rel="stylesheet">
+<style>
+:root{
+  --bg:#0f1219; --bg2:#161b26; --panel:#0b0e14; --line:#242b3a;
+  --ink:#eceff4; --dim:#8c95a8; --faint:#4b5468;
+  --recall:#9eacff; --recall-bg:rgba(158,172,255,.10);
+  --fail:#ffb35c; --fail-bg:rgba(255,179,92,.10);
+  --ok:#73dca0; --bad:#ff7070;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:1920px;height:1080px;overflow:hidden;background:var(--bg)}
+body{font-family:Geist,system-ui,sans-serif;color:var(--ink);-webkit-font-smoothing:antialiased}
+#stage{position:absolute;inset:0;overflow:hidden;
+  background:radial-gradient(1200px 700px at 72% 18%, #1b2233 0%, rgba(27,34,51,0) 70%),
+             radial-gradient(900px 600px at 10% 100%, #141a28 0%, rgba(20,26,40,0) 70%), var(--bg)}
+.scene{position:absolute;inset:0;opacity:0}
+.kicker{position:absolute;left:120px;top:92px;font-weight:600;font-size:60px;letter-spacing:-1.6px;line-height:1.05;max-width:1500px}
+.sub{position:absolute;left:122px;top:168px;font-size:28px;color:var(--dim);letter-spacing:-.2px}
+.badge{position:absolute;right:120px;bottom:56px;font:500 20px Geist;color:var(--dim);letter-spacing:.1px}
+.badge b{color:var(--ink);font-weight:600}
+/* terminal */
+.win{position:absolute;background:var(--panel);border:1px solid var(--line);border-radius:18px;
+  box-shadow:0 40px 120px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.02) inset;overflow:hidden}
+.bar{height:52px;display:flex;align-items:center;gap:10px;padding:0 20px;background:#121722;border-bottom:1px solid var(--line)}
+.dot{width:13px;height:13px;border-radius:50%;background:#2b3242}
+.ttl{margin-left:14px;font:500 18px "Geist Mono";color:var(--dim)}
+.body{position:absolute;left:0;right:0;top:52px;bottom:0;overflow:hidden}
+.inner{position:absolute;left:0;right:0;top:0;padding:26px 34px;font:400 25px/1.5 "Geist Mono";white-space:pre-wrap;word-break:break-word}
+.l{opacity:0}
+.cmd{color:var(--ink)} .cmd .p{color:var(--ok)}
+.prompt{color:var(--ink)} .prompt .p{color:var(--dim)}
+.out{color:var(--dim)} .err{color:var(--fail)} .ok{color:var(--ok)} .bad{color:var(--bad)}
+.hook{color:var(--recall)} .hit{color:var(--recall);font-weight:500}
+.ans{color:var(--ink)} .ans .p{color:var(--ink)}
+.box{border-left:3px solid var(--recall);background:var(--recall-bg);padding:6px 16px;margin:4px 0;border-radius:0 8px 8px 0}
+.fbox{border-left:3px solid var(--fail);background:var(--fail-bg);padding:6px 16px;margin:4px 0;border-radius:0 8px 8px 0}
+.hl{background:rgba(158,172,255,.22);border-radius:4px;padding:0 3px}
+.caret{display:inline-block;width:13px;height:27px;background:var(--ink);vertical-align:-5px;margin-left:2px}
+/* cards */
+.card{position:absolute;background:#141a26;border:1px solid var(--line);border-radius:14px;padding:20px 24px;width:470px}
+.card .t{font:600 23px/1.25 Geist;letter-spacing:-.2px}
+.tag{display:inline-block;font:500 16px "Geist Mono";padding:3px 10px;border-radius:999px;margin-bottom:10px}
+.tg{color:var(--fail);background:var(--fail-bg)} .td{color:var(--recall);background:var(--recall-bg)} .tp{color:var(--ok);background:rgba(115,220,160,.10)}
+/* loop */
+.node{position:absolute;width:250px;height:96px;margin:-48px 0 0 -125px;border-radius:18px;border:1px solid var(--line);background:#141a26;
+  display:flex;align-items:center;justify-content:center;font:600 34px Geist;letter-spacing:-.6px;color:var(--faint)}
+.chip{position:absolute;font:500 24px "Geist Mono";padding:12px 20px;border-radius:12px;background:var(--fail-bg);border:1px solid rgba(255,179,92,.35);color:var(--fail)}
+.chip small{display:block;font:500 18px Geist;color:var(--dim);margin-top:4px}
+.tok{display:inline-block;margin:0 10px 12px 0;padding:6px 14px;border-radius:10px;background:#141a26;border:1px solid var(--line);font:500 30px "Geist Mono"}
+.rung{position:absolute;left:120px;width:1080px;height:62px;border-radius:12px;background:#121722;border:1px solid var(--line);
+  display:flex;align-items:center;padding:0 24px;font:500 25px "Geist Mono";color:var(--ink)}
+.rung .n{margin-left:auto;font:600 24px Geist}
+</style></head>
+<body><div id="stage"></div>
+<script>
+const TL = __TIMELINE__;
+const $ = (tag, cls, parent, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html !== undefined) e.innerHTML = html; (parent||document.getElementById('stage')).appendChild(e); return e; };
+const clamp = (x,a=0,b=1) => Math.max(a, Math.min(b, x));
+const easeOut = x => 1 - Math.pow(1 - clamp(x), 3);
+const easeInOut = x => { x = clamp(x); return x < .5 ? 4*x*x*x : 1 - Math.pow(-2*x + 2, 3)/2; };
+const prog = (T, a, d=.4) => clamp((T - a) / d);
+// global time of the n-th occurrence of a spoken word in a narration line
+function W(line, word, nth=0) {
+  const ws = TL.lines[line].words; let k = 0; const w = word.toLowerCase();
+  for (const [t, s] of ws) { if (s === w || s.startsWith(w)) { if (k === nth) return t; k++; } }
+  throw new Error(`word ${word} not in ${line}`);
+}
+const V = l => TL.lines[l].vo, END = l => TL.lines[l].vo + TL.lines[l].dur;
+function show(el, T, at, d=.45, dy=16) { const p = easeOut(prog(T, at, d)); el.style.opacity = p; el.style.transform = `translateY(${(1-p)*dy}px)`; return p; }
+function hide(el, T, at, d=.35) { const p = prog(T, at, d); el.style.opacity = Math.min(parseFloat(el.style.opacity||1), 1 - p); }
+const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+// ---------- terminal component ----------
+function Terminal(parent, {x, y, w, h, title}) {
+  const win = $('div', 'win', parent); Object.assign(win.style, {left:x+'px', top:y+'px', width:w+'px', height:h+'px'});
+  const bar = $('div', 'bar', win); for (let i=0;i<3;i++) $('div','dot',bar); const ttl = $('div','ttl',bar, esc(title));
+  const body = $('div','body',win), inner = $('div','inner',body);
+  const lines = [];
+  return {
+    win, ttl,
+    add(at, cls, html, opts={}) { const el = $('div', 'l ' + cls, inner, html); lines.push({at, el, ...opts}); return el; },
+    // typed line: prefix html stays, text typed at cps
+    type(at, cls, prefix, text, cps=40) { const el = $('div', 'l ' + cls, inner, prefix + '<span class="ty"></span>'); lines.push({at, el, text, cps}); return el; },
+    measure() { // positions with every line laid out
+      const bh = body.clientHeight; lines.forEach(L => { L.el.style.visibility='hidden'; L.el.style.opacity=1; });
+      lines.forEach(L => { if (L.text) L.el.querySelector('.ty').textContent = L.text; });
+      lines.forEach(L => { L.bottom = L.el.offsetTop + L.el.offsetHeight + 30; L.target = Math.max(0, L.bottom - bh); });
+      lines.forEach(L => { L.el.style.visibility=''; L.el.style.opacity=0; });
+    },
+    update(T) {
+      let prev = 0, scroll = 0;
+      for (const L of lines) {
+        const p = easeOut(prog(T, L.at, .28));
+        L.el.style.opacity = p; L.el.style.transform = `translateY(${(1-p)*10}px)`;
+        if (L.text) { const n = Math.floor(clamp((T - L.at) * L.cps, 0, L.text.length)); const ty = L.el.querySelector('.ty');
+          ty.innerHTML = esc(L.text.slice(0, n)) + ((n < L.text.length && T >= L.at) || (T - L.at < (L.text.length/L.cps) + .6 && T >= L.at) ? '<span class="caret"></span>' : ''); }
+        if (T >= L.at) { scroll = prev + (L.target - prev) * easeInOut(prog(T, L.at, .45)); prev = L.target; }
+      }
+      inner.style.transform = `translateY(${-scroll}px)`;
+    }
+  };
+}
+
+// ---------- scenes ----------
+const scenes = [];
+function scene(from, to, build) { const el = $('div','scene'); const s = {from, to, el}; s.update = build(el, s); scenes.push(s); return s; }
+const kick = (el, text) => $('div','kicker',el,text);
+
+// V1 cold open
+scene(0, V('s02') - .35, el => {
+  const t = Terminal(el, {x:200, y:250, w:1520, h:560, title:'~/app — deploy'});
+  const date = $('div','kicker',el,''); date.style.top='112px';
+  const a1 = $('span','',date,'Sep 12'); const a2 = $('span','',date,'Oct 10'); a2.style.position='absolute'; a2.style.left='0';
+  const k = $('div','sub',el,'A new session. The same error. No memory of the first one.'); k.style.top='184px';
+  const today = W('s01','today');
+  t.type(0.05,'cmd','<span class="p">$ </span>','npm run build',22);
+  t.add(1.0,'out','▲ Next.js 14.2 · Creating an optimized production build ...');
+  t.add(2.0,'err','FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory');
+  t.add(2.6,'err','web: 502 Bad Gateway');
+  t.add(3.3,'out','agent: retrying the build with more memory ...');
+  t.type(today+.2,'cmd','<span class="p">$ </span>','npm run build',22);
+  t.add(today+1.1,'out','▲ Next.js 14.2 · Creating an optimized production build ...');
+  t.add(today+1.8,'err','FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory');
+  t.add(today+2.3,'err','web: 502 Bad Gateway');
+  t.measure();
+  return T => {
+    t.update(T);
+    const f = easeInOut(prog(T, today - .1, .5));
+    a1.style.opacity = 1 - f; a1.style.transform = `translateY(${-f*30}px)`;
+    a2.style.opacity = f; a2.style.transform = `translateY(${(1-f)*30}px)`;
+    date.style.opacity = easeOut(prog(T, .1, .5));
+    show(k, T, today + .3);
+  };
+});
+
+// V2 notes nobody reads
+scene(V('s02') - .35, V('s03') - .35, el => {
+  const k0 = kick(el, 'Agents forget between sessions'); const k = kick(el, 'Notes get written.'); const k2 = $('div','sub',el,'Nothing puts them in front of the next session.');
+  const notes = [
+    ['gotcha','tg','Google OAuth: a new scope needs a fresh consent'],
+    ['decision','td','Never run the production build on the 4 GB box'],
+    ['gotcha','tg','A socket timeout is not a deadline'],
+    ['pattern','tp','Mint the idempotency key once per operation'],
+    ['gotcha','tg','NEXT_PUBLIC_ variables are baked in at build time'],
+    ['gotcha','tg','macOS screen recording permission attaches to the built binary'],
+  ];
+  const cards = notes.map(([tag, cls, title], i) => {
+    const c = $('div','card',el, `<span class="tag ${cls}">${tag}</span><div class="t">${esc(title)}</div>`);
+    c.style.left = (120 + (i%2)*500) + 'px'; c.style.top = (300 + Math.floor(i/2)*200) + 'px'; return c;
+  });
+  const pr = Terminal(el, {x:1180, y:340, w:620, h:420, title:'claude — new session'});
+  pr.type(V('s02')+2.6,'prompt','<span class="p">&gt; </span>','Can I run npm run build on the 4 GB box?',30);
+  pr.add(V('s02')+5.0,'out','context from earlier sessions:');
+  pr.add(V('s02')+5.4,'bad','  (none)');
+  pr.measure();
+  const nb = W('s02','nobody');
+  return T => {
+    k0.style.opacity = easeOut(prog(T, V('s02') - .1, .4)) * (1 - prog(T, W('s02','notes') - .35, .3));
+    show(k, T, W('s02','notes')); show(k2, T, nb);
+    cards.forEach((c, i) => { const p = show(c, T, V('s02') + .1 + i*.18, .5, 24); c.style.opacity = p * (1 - .62*easeOut(prog(T, nb, .6))); });
+    pr.update(T); show(pr.win, T, V('s02')+2.2);
+  };
+});
+
+// V3 the loop
+scene(V('s03') - .35, V('s04') - .35, el => {
+  const name = $('div','kicker',el,'Claude Note'); name.style.fontSize='92px'; name.style.letterSpacing='-3px';
+  const sub = $('div','sub',el,'capture → notes → recall → act → remember'); sub.style.top='212px';
+  const cx = 1180, cy = 610, R = 290;
+  const labels = ['capture','notes','recall','act','remember'];
+  const at = [W('s03','captures'), W('s03','markdown'), W('s03','brings'), W('s03','acts'), W('s03','back') + .3];
+  const svg = document.createElementNS('http://www.w3.org/2000/svg','svg'); svg.setAttribute('width',1920); svg.setAttribute('height',1080);
+  svg.style.position='absolute'; svg.style.left=0; svg.style.top=0; el.appendChild(svg);
+  const ring = document.createElementNS(svg.namespaceURI,'circle'); Object.entries({cx, cy, r:R, fill:'none', stroke:'#2a3346', 'stroke-width':3}).forEach(([a,b])=>ring.setAttribute(a,b)); svg.appendChild(ring);
+  const arc = document.createElementNS(svg.namespaceURI,'circle'); Object.entries({cx, cy, r:R, fill:'none', stroke:'#9eacff', 'stroke-width':4, 'stroke-linecap':'round', transform:`rotate(-90 ${cx} ${cy})`}).forEach(([a,b])=>arc.setAttribute(a,b)); svg.appendChild(arc);
+  const C = 2*Math.PI*R; arc.setAttribute('stroke-dasharray', C);
+  const nodes = labels.map((lab, i) => { const a = -Math.PI/2 + i*2*Math.PI/5; const n = $('div','node',el,lab);
+    n.style.left = (cx + R*Math.cos(a)) + 'px'; n.style.top = (cy + R*Math.sin(a)) + 'px'; return n; });
+  const nw = $('div','',el,'new in 2.0'); Object.assign(nw.style,{position:'absolute',font:'600 20px Geist',color:'var(--recall)'});
+  const ra = -Math.PI/2 + 2*2*Math.PI/5; nw.style.left = (cx + R*Math.cos(ra) - 60) + 'px'; nw.style.top = (cy + R*Math.sin(ra) + 58) + 'px';
+  const left = $('div','',el,'Captures sessions from Claude Code, Codex, Cursor and ChatGPT.<br><br>Keeps typed Markdown notes:<br>gotchas, patterns, decisions.<br><br>Recalls the right ones before the agent acts.');
+  Object.assign(left.style,{position:'absolute',left:'122px',top:'340px',width:'560px',font:'400 30px/1.4 Geist',color:'var(--dim)'});
+  return T => {
+    show(name, T, V('s03')); show(sub, T, V('s03') + .5);
+    const p = easeInOut(prog(T, at[0] - .2, at[4] - at[0] + .4)); arc.setAttribute('stroke-dashoffset', C*(1-p));
+    nodes.forEach((n, i) => { const on = easeOut(prog(T, at[i], .4)); const isR = i === 2;
+      n.style.color = on > .5 ? (isR ? 'var(--recall)' : 'var(--ink)') : 'var(--faint)';
+      n.style.borderColor = isR && on > .5 ? 'rgba(158,172,255,.6)' : 'var(--line)';
+      n.style.boxShadow = isR ? `0 0 ${60*on}px rgba(158,172,255,${.35*on})` : 'none';
+      n.style.transform = `scale(${1 + (isR ? .08 : .03)*on})`; });
+    show(nw, T, at[2] + .2); show(left, T, at[0] - .3);
+  };
+});
+
+// V4 Claude Code recall (s04 + s05)
+scene(V('s04') - .35, V('s06') - .35, el => {
+  const k = kick(el, 'A real Claude Code session'); const k2 = kick(el, 'Before the model sees the prompt'); const k3 = kick(el, 'It opens the note, then answers');
+  const t = Terminal(el, {x:120, y:220, w:1680, h:760, title:'claude — ~/app'});
+  t.type(W('s04','we'),'prompt','<span class="p">&gt; </span>','We deploy our Next.js app to the 4 GB production server. Can I just run npm run build on the box to save time?',42);
+  t.add(W('s04','before'),'hook','<div class="box">↳  UserPromptSubmit hook · claude-note hook recall · 1.3 s</div>');
+  t.add(W('s04','searches'),'out','   claude-note recall: possibly relevant prior knowledge (keyword matches, NOT verified answers).\n   Open a note before relying on it (read the file shown), check that it still applies, then act.');
+  t.add(W('s04','finds'),'hit','   - Never run the production build on the 4 GB box (decision)  [~/notes/never-build-on-a-small-box.md]');
+  t.add(W('s04','decided'),'ans','     <span class="hl">`npm run build` on the t3.medium runs out of memory and takes the web app down with it.</span> Build on a laptop and ship the standalone artifact; the box only swaps a symlink and restarts.');
+  t.add(W('s05','opens'),'ans','\n● Read(~/notes/never-build-on-a-small-box.md)');
+  t.add(W('s05','opens')+.5,'out','  ↳  Read 11 lines');
+  t.add(W('s05','no'),'ans','\n● No. Your team\'s notes say `npm run build` runs out of memory on the 4 GB box and takes the live app down with it.');
+  t.add(W('s05','build'),'ans','  Build on your laptop or in CI, ship the standalone output, and have the server just switch the symlink and restart.');
+  t.measure();
+  const b = $('div','badge',el,'<b>Recorded run</b> · Claude Code 2.1.296 · answer verbatim');
+  const kb = W('s04','before'), ko = V('s05');
+  return T => {
+    k.style.opacity = easeOut(prog(T, V('s04'), .4)) * (1 - prog(T, kb - .3, .3));
+    k2.style.opacity = easeOut(prog(T, kb, .4)) * (1 - prog(T, ko - .3, .3));
+    k3.style.opacity = easeOut(prog(T, ko, .4));
+    t.update(T); show(t.win, T, V('s04') - .3, .5, 30); show(b, T, V('s04') + 1);
+  };
+});
+
+// V5 with vs without
+scene(V('s06') - .35, V('s07') - .35, el => {
+  const k = kick(el, 'Same model. Same question.');
+  const mk = (x, label, color, body) => { const c = $('div','card',el, `<div style="font:600 22px Geist;color:${color};margin-bottom:16px">${label}</div><div style="font:400 30px/1.45 Geist;color:var(--ink)">${body}</div>`);
+    Object.assign(c.style,{left:x+'px', top:'300px', width:'790px', padding:'34px 40px', minHeight:'470px'}); return c; };
+  const L = mk(120, 'Without recall', 'var(--dim)', '<span class="yc">You can, but</span> <code>next build</code> often needs 1–3+ GB of RAM. On a 4 GB box that’s also serving the live app, it can run out of memory, get killed, or slow down production while it runs.');
+  const R = mk(1010, 'With claude-note recall', 'var(--recall)', '<span class="no">No.</span> Your team’s notes say <code>npm run build</code> runs out of memory on the 4 GB box and takes the live app down with it.<br><br>Build on your laptop or in CI, ship the standalone output, and have the server just switch the symlink and restart.');
+  R.style.borderColor = 'rgba(158,172,255,.45)';
+  const yc = L.querySelector('.yc'), no = R.querySelector('.no');
+  const b = $('div','badge',el,'<b>Both recorded</b> · Claude Code · answers verbatim');
+  return T => {
+    show(k, T, V('s06')); show(L, T, W('s06','same') + .1, .5, 24); show(R, T, W('s06','rule') - .2, .5, 24); show(b, T, V('s06') + .8);
+    const y = easeOut(prog(T, W('s06','you'), .3)); yc.style.background = `rgba(255,179,92,${.28*y})`; yc.style.borderRadius='4px';
+    const n = easeOut(prog(T, W('s06','ours'), .3)); no.style.background = `rgba(158,172,255,${.3*n})`; no.style.borderRadius='4px';
+    L.style.opacity = parseFloat(L.style.opacity) * (1 - .45*prog(T, W('s06','only'), .5));
+  };
+});
+
+// V6 Codex
+scene(V('s07') - .35, V('s08') - .35, el => {
+  const k = kick(el, 'Codex, same hook');
+  const t = Terminal(el, {x:120, y:220, w:1680, h:700, title:'codex exec — ~/app'});
+  t.add(V('s07')-.1,'out','user');
+  t.add(V('s07'),'ans','We deploy our Next.js app to the 4 GB production server. Can I just run npm run build on the box to save time?');
+  t.add(W('s07','hook'),'hook','<div class="box">hook: UserPromptSubmit Completed</div>');
+  t.add(W('s07','hook')+.6,'out','exec  cat ~/notes/never-build-on-a-small-box.md …   succeeded in 79ms');
+  t.add(W('s07','answer'),'out','\ncodex');
+  t.add(W('s07','answer')+.1,'ans','No—your <span class="lk">deployment note</span> says `npm run build` exhausts memory on that 4 GB box and takes the app down.\nBuild on your laptop, ship the standalone artifact, then swap the server’s symlink and restart.');
+  t.measure();
+  const lk = t.win.querySelector('.lk'); lk.style.color='var(--recall)'; lk.style.textDecoration='underline';
+  const b = $('div','badge',el,'<b>Recorded run</b> · Codex CLI 0.162.1 · answer verbatim');
+  return T => { show(k, T, V('s07') - .2); t.update(T); show(t.win, T, V('s07') - .3, .5, 30); show(b, T, V('s07') + .5);
+    const p = easeOut(prog(T, W('s07','link'), .3)); lk.style.background = `rgba(158,172,255,${.25*p})`; };
+});
+
+// V7 how recall finds the note
+scene(V('s08') - .35, V('s09') - .35, el => {
+  const k = kick(el, 'Finding the right note is the hard part');
+  const promptWords = [['Why',0],['is',0],['our',0],['MEMORY',1],['.md',0],['losing',1],['the',0],['newest',1],['entries',1],['since',1],['the',0],['2026-09-20',0],['cleanup',1],['in',0],['~/.claude/projects?',0]];
+  const row = $('div','',el); Object.assign(row.style,{position:'absolute',left:'120px',top:'230px',width:'1700px'});
+  const toks = promptWords.map(([w, keep]) => { const s = $('span','tok',row,esc(w)); s.dataset.keep = keep; return s; });
+  const zero = $('div','',el,'0 notes'); Object.assign(zero.style,{position:'absolute',left:'120px',top:'372px',font:'600 26px Geist',color:'var(--bad)'});
+  const zt = $('div','',el,'the whole sentence, searched as written'); Object.assign(zt.style,{position:'absolute',left:'240px',top:'375px',font:'400 24px Geist',color:'var(--dim)'});
+  const rungs = [['MEMORY losing newest entries since cleanup',0],['MEMORY losing newest entries cleanup',0],['MEMORY entries cleanup',0],['MEMORY entries',1]];
+  const R = rungs.map(([q, n], i) => { const r = $('div','rung',el, `${esc(q)}<span class="n" style="color:${n?'var(--ok)':'var(--bad)'}">${n} note${n===1?'':'s'}</span>`); r.style.top = (450 + i*80) + 'px'; r.style.width = (1080 - i*120) + 'px'; return r; });
+  const res = $('div','card',el, `<span class="tag tg">gotcha</span><div class="t">Claude Code loads only the first 200 lines of MEMORY.md</div><div style="margin-top:12px;font:400 21px/1.4 Geist;color:var(--dim)">Past 200 lines or 25 KB the rest is dropped silently, newest entries first.</div>`);
+  Object.assign(res.style,{left:'1290px', top:'470px', width:'510px', borderColor:'rgba(158,172,255,.5)'});
+  const miss = Terminal(el, {x:120, y:500, w:1680, h:470, title:'a prompt the notes do not cover · "Configure the zeppelin hangar lighting schedule"'});
+  miss.add(W('s08','when'),'out','claude-note recall ran and found nothing (no keyword match on any rung of the query).\nQuery tried: \'Configure zeppelin hangar lighting schedule\', narrowed to \'Configure zeppelin\'');
+  miss.add(W('s08','says'),'ans','\nThis is NOT evidence that nothing is known: keyword search is conjunctive, so one\nrare or mis-guessed word zeroes a query. If this task touches prior work, an incident,\na recurring error or a past decision, search yourself before acting:\n`claude-note recall "&lt;two or three content words&gt;"`, or `qmd vsearch "&lt;question&gt;"`.');
+  miss.measure();
+  const tk = W('s08','keeps'), tr = W('s08','tries'), tp = W('s08','pulls'), tw = W('s08','when');
+  return T => {
+    show(k, T, V('s08') - .2);
+    toks.forEach((s, i) => { show(s, T, V('s08') + .4 + i*.06, .35, 10);
+      if (s.dataset.keep === '0') { const d = easeOut(prog(T, tk + i*.04, .4)); s.style.opacity = parseFloat(s.style.opacity) * (1 - .78*d); s.style.textDecoration = d > .5 ? 'line-through' : 'none'; }
+      else { const d = easeOut(prog(T, tk + .3, .4)); s.style.borderColor = d > .5 ? 'rgba(158,172,255,.6)' : 'var(--line)'; s.style.color = d > .5 ? 'var(--recall)' : 'var(--ink)'; } });
+    show(zero, T, W('s08','returns')); show(zt, T, W('s08','returns') + .2);
+    R.forEach((r, i) => show(r, T, tr + i*.45, .4, 12));
+    show(res, T, tp, .5, 20);
+    const fade = 1 - easeOut(prog(T, tw - .4, .45));
+    [...R, res, ...toks].forEach(e => e.style.opacity = parseFloat(e.style.opacity) * fade);
+    zero.style.opacity *= fade; zt.style.opacity *= fade;
+    miss.win.style.top = (500 - 250*easeOut(prog(T, tw - .3, .5))) + 'px';
+    miss.update(T); show(miss.win, T, tw - .1, .5, 30);
+  };
+});
+
+// V8 sentinel
+scene(V('s09') - .35, V('s10') - .35, el => {
+  const k = kick(el, 'When a command fails'); const k2 = kick(el, 'It reads output, not commands');
+  const t = Terminal(el, {x:120, y:220, w:1180, h:780, title:'claude — ~/calendar-sync'});
+  t.win.querySelector('.inner').style.fontSize = '21px';
+  t.add(W('s09','command'),'ans','● Bash(python3 calendar_sync.py)');
+  t.add(W('s09','fails'),'err','<div class="fbox">↳  Error: Exit code 1\n   googleapiclient.errors.HttpError: &lt;HttpError 403 … returned "Request had insufficient authentication scopes.". Details: [{\'reason\': \'insufficientPermissions\'}]&gt;</div>');
+  t.add(W('s09','sentinel'),'hook','<div class="box">↳  PostToolUseFailure hook · claude-note hook sentinel</div>');
+  t.add(W('s09','reads'),'out','   claude-note sentinel: the last command failed with:\n   \'googleapiclient.errors.HttpError: &lt;HttpError 403 … insufficientPermissions\'}]"&gt;\'');
+  t.add(W('s09','flags'),'ans','\n   - Missing OAuth scope. Existing tokens keep their old scopes: delete the stored token and re-consent with every scope requested in one flow.');
+  t.add(W('s09','finds'),'out','\n   Notes about this failure (open one before applying it; it may be stale):');
+  t.add(W('s09','finds')+.35,'hit','   - Google OAuth: a new scope needs a fresh consent (gotcha)');
+  t.add(W('s09','finds')+.6,'out','       Adding a scope in the Cloud Console does not upgrade tokens you already hold. Gmail and Calendar calls keep failing with `403 insufficientPermissions` …');
+  t.add(W('s09','flags')+1.2,'out','\n   Do not retry the identical command until something has changed.');
+  t.measure();
+  const chips = [['invalid_grant','expired login','expired'],['429 · quota exceeded','quota','quotas'],['ENOSPC','disk full','disk']].map(([a, b, w], i) => {
+    const c = $('div','chip',el, `${a}<small>${b} · do not retry</small>`); c.style.left = '1360px'; c.style.top = (240 + i*120) + 'px'; c.dataset.at = W('s09', w); return c; });
+  const g = Terminal(el, {x:1360, y:640, w:440, h:300, title:'a successful grep'});
+  g.win.querySelector('.inner').style.fontSize = '20px';
+  g.type(W('s09','output'),'cmd','<span class="p">$ </span>','grep -n invalid_grant hook.sh',30);
+  g.add(W('s09','command',1),'out','41: invalid_grant|401');
+  g.add(W('s09','quiet'),'ok','sentinel: quiet ✓');
+  g.measure();
+  const b = $('div','badge',el,'<b>Recorded run</b> · Claude Code 2.1.296');
+  return T => {
+    k.style.opacity = easeOut(prog(T, V('s09'), .4)) * (1 - prog(T, W('s09','output') - .4, .3));
+    k2.style.opacity = easeOut(prog(T, W('s09','output') - .1, .4));
+    t.update(T); show(t.win, T, V('s09') - .3, .5, 30);
+    chips.forEach(c => show(c, T, parseFloat(c.dataset.at), .4, 14));
+    g.update(T); show(g.win, T, W('s09','output') - .4, .5, 20);
+    show(b, T, V('s09') + 1);
+  };
+});
+
+// V9 remember
+scene(V('s10') - .35, V('s11') - .35, el => {
+  const k = kick(el, 'Write it down while it’s fresh');
+  const t = Terminal(el, {x:120, y:220, w:1680, h:760, title:'~/app'});
+  t.type(W('s10','write'),'cmd','<span class="p">$ </span>','claude-note remember --type gotcha --title "A full disk silently stops the index refresh" --tags qmd,disk,recall --why "Recall only finds what the index has seen; hours of new notes were invisible." "When the disk fills, the hourly qmd update fails every run. New notes stop being findable while old ones still work. Free space, then run claude-note refresh and check the heartbeat."',95);
+  t.add(W('s10','saves'),'ok','Created a-full-disk-silently-stops-the-index-refresh.md  (type: gotcha)');
+  t.add(W('s10','half'),'ok','Indexed in <span class="hl" style="color:var(--ink)">0.5s</span>: the next prompt can recall it.');
+  t.type(W('s10','next'),'cmd','\n<span class="p">$ </span>','claude-note recall "new notes are not found by recall"',45);
+  t.add(W('s10','recall')+.2,'out','2 note(s) in 1108 ms  (query: new notes found recall)');
+  t.add(W('s10','recall')+.45,'hit','\n1. A full disk silently stops the index refresh [gotcha]');
+  t.add(W('s10','recall')+.6,'out','   ~/notes/a-full-disk-silently-stops-the-index-refresh.md\n   **Why:** Recall only finds what the index has seen; hours of new notes were invisible.');
+  t.add(W('s10','recall')+.9,'out','\n2. Keyword search is conjunctive: one rare word zeroes the query [gotcha]');
+  t.measure();
+  const b = $('div','badge',el,'<b>Recorded run</b> · output verbatim');
+  return T => { show(k, T, V('s10') - .2); t.update(T); show(t.win, T, V('s10') - .3, .5, 30); show(b, T, V('s10') + 1); };
+});
+
+// V10 doctor
+scene(V('s11') - .35, V('s12') - .35, el => {
+  const k = kick(el, 'Then prove it works'); const k2 = kick(el, 'It caught our own outage');
+  const t = Terminal(el, {x:120, y:220, w:1680, h:760, title:'~/app'});
+  t.type(W('s11','prove'),'cmd','<span class="p">$ </span>','claude-note doctor',30);
+  const d = W('s11','doctor');
+  t.add(d,'out','\nconfigured');
+  t.add(d+.15,'ok','  ✓ qmd installed');
+  t.add(d+.3,'ok','  ✓ collections indexed                                  notes, agentmem');
+  t.add(d+.45,'ok','  ✓ Claude Code hooks                                    recall, sentinel, capture');
+  t.add(W('s11','plants'),'out','\nexercised');
+  t.add(W('s11','plants')+.2,'ok','  ✓ recall hook injects a matching note                  1366 ms end to end');
+  t.add(W('s11','runs'),'ok','  ✓ recall announces a miss instead of staying silent    miss notice present');
+  t.add(W('s11','real'),'ok','  ✓ sentinel surfaces the known fix for a failed command fix recalled');
+  t.add(W('s11','against'),'ok','  ✓ sentinel ignores error words in successful output    quiet');
+  t.add(W('s11','checks'),'ok','  ✓ index refreshed recently                             0.0 h ago');
+  t.measure();
+  const o = Terminal(el, {x:120, y:220, w:1680, h:760, title:'our own machine · 10 Oct 2026'});
+  o.add(W('s11','first'),'bad','  ✗ index refreshed recently                             7.9 h ago');
+  o.add(W('s11','caught'),'out','\n~/.cache/qmd/refresh.log');
+  ['17:28:26','18:28:29','19:28:31','20:28:33','21:28:35'].forEach((h, i) => o.add(W('s11','caught') + .3 + i*.32, 'err', `  2026-10-10T${h} FAIL qmd update rc=1`));
+  o.add(W('s11','invisible') + .5,'ok','  2026-10-10T22:24:56 OK 15818 docs, 0 unembedded, 202s     (after freeing disk)');
+  o.measure();
+  const inv = $('div','',el,'Eight hours of notes, unfindable.'); Object.assign(inv.style,{position:'absolute',left:'160px',bottom:'130px',font:'600 44px Geist',color:'var(--fail)',letterSpacing:'-1px'});
+  const sw = W('s11','first') - .25;
+  return T => {
+    k.style.opacity = easeOut(prog(T, V('s11') - .2, .4)) * (1 - prog(T, sw, .3));
+    k2.style.opacity = easeOut(prog(T, sw + .2, .4));
+    t.update(T); show(t.win, T, V('s11') - .3, .5, 30); t.win.style.opacity *= 1 - prog(T, sw, .35);
+    o.update(T); show(o.win, T, sw + .1, .45, 24);
+    show(inv, T, W('s11','everything'));
+  };
+});
+
+// V11 setup + end card
+scene(V('s12') - .35, TL.total + 1, el => {
+  const t = Terminal(el, {x:120, y:220, w:1680, h:620, title:'~/'});
+  const k = kick(el, 'One command');
+  t.type(V('s12'),'cmd','<span class="p">$ </span>','claude-note setup --codex',34);
+  const s = V('s12') + .8;
+  ['1. One index across your knowledge     vault: added · Claude Code memories: added',
+   '2. Recall and sentinel hooks           Claude Code · Codex',
+   '3. Recall rule in agent instructions   ~/.claude/CLAUDE.md · ~/.codex/AGENTS.md',
+   '4. Config                              [recall] and [sentinel]',
+   '5. Hourly index refresh                installed'].forEach((l, i) => t.add(s + i*.2, 'ok', l));
+  t.measure();
+  const e1 = $('div','',el,'Your agents already solved this.'); Object.assign(e1.style,{position:'absolute',left:0,right:0,top:'360px',textAlign:'center',font:'600 76px Geist',letterSpacing:'-2.5px'});
+  const e2 = $('div','',el,'With <span style="color:var(--recall)">Claude Note</span>, they remember.'); Object.assign(e2.style,{position:'absolute',left:0,right:0,top:'470px',textAlign:'center',font:'500 50px Geist',letterSpacing:'-1.2px',color:'var(--dim)'});
+  const e3 = $('div','',el,'github.com/crimeacs/claude-note'); Object.assign(e3.style,{position:'absolute',left:0,right:0,top:'640px',textAlign:'center',font:'500 34px "Geist Mono"',color:'var(--ink)'});
+  const e4 = $('div','',el,'claude-note setup &amp;&amp; claude-note doctor'); Object.assign(e4.style,{position:'absolute',left:0,right:0,top:'700px',textAlign:'center',font:'400 26px "Geist Mono"',color:'var(--dim)'});
+  const ya = W('s12','your');
+  return T => {
+    k.style.opacity = easeOut(prog(T, V('s12') - .2, .4)) * (1 - prog(T, ya - .3, .3));
+    t.update(T); show(t.win, T, V('s12') - .3, .45, 24); t.win.style.opacity *= 1 - prog(T, ya - .3, .35);
+    show(e1, T, ya, .6, 20); show(e2, T, W('s12','with'), .6, 16); show(e3, T, W('s12','remember') + .6, .6, 12); show(e4, T, W('s12','remember') + 1.0, .6, 12);
+  };
+});
+
+// ---------- seek ----------
+window.seek = T => {
+  for (const s of scenes) {
+    const fin = easeOut(prog(T, s.from - .05, .35)), fout = 1 - prog(T, s.to - .05, .35);
+    const o = s.from <= .01 ? fout : Math.min(fin, fout);
+    if (o <= 0) { s.el.style.opacity = 0; s.el.style.display = 'none'; continue; }
+    s.el.style.display = ''; s.el.style.opacity = o; s.update(T);
+  }
+};
+window.TOTAL = TL.total;
+window.ready = document.fonts.ready.then(() => { for (const s of scenes) { s.el.style.display=''; } window.seek(0); return true; });
+</script></body></html>

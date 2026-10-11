@@ -1,0 +1,2 @@
+Created a-full-disk-silently-stops-the-index-refresh.md  (type: gotcha)
+Indexed in 0.5s: the next prompt can recall it.

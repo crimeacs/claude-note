@@ -1,0 +1,14 @@
+[
+ {"id":"s01","text":"Last month, your agent spent an hour on a broken deploy. Today it hits the same wall, and starts from zero."},
+ {"id":"s02","text":"Agents don't forget because they're careless. They forget because nothing puts yesterday's lesson in front of them. Notes get written. Nobody reads them."},
+ {"id":"s03","text":"Claude Note closes that loop. It captures what your agents learn, keeps it as plain Markdown notes, and now, before the agent acts, it brings the right ones back."},
+ {"id":"s04","text":"This is a real Claude Code session. We ask if it's fine to run the production build on our four-gig server. Before the model even sees the prompt, a hook searches the notes, in about a second, and finds one: we decided never to build on that box."},
+ {"id":"s05","text":"The agent opens the note, then answers. No. Build on the laptop, ship the artifact."},
+ {"id":"s06","text":"Same model, without recall? You can, but. The rule was ours. Only recall could bring it."},
+ {"id":"s07","text":"Codex gets the same hook. Same question, same answer, with a link to the note."},
+ {"id":"s08","text":"Finding the right note is the hard part. Keyword search is fast, but one unusual word returns nothing. So recall keeps only the words that matter, tries narrower and narrower queries, and pools everything they find. And when it finds nothing, it says so. Silence reads like nothing is known."},
+ {"id":"s09","text":"When a command fails, the sentinel steps in. It reads the error, finds the note that fixed it last time, and flags the failures that never fix themselves: expired logins, quotas, a full disk. It reads the output, not the command, so a grep for an error word stays quiet."},
+ {"id":"s10","text":"Learn something? Write it down while it's fresh. Remember saves a typed note and indexes it in half a second. The very next prompt can recall it."},
+ {"id":"s11","text":"Then prove it works. Doctor plants a canary note, runs the real hooks against it, and checks the index is fresh. The first time we ran it on our own machine, it caught our index refresh failing for eight hours. Everything we wrote that afternoon was invisible."},
+ {"id":"s12","text":"One command sets it all up. Your agents already solved this. With Claude Note, they remember."}
+]
