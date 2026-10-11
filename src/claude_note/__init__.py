@@ -1,3 +1,3 @@
-"""Claude-note: Session logging and knowledge synthesis for Claude Code."""
+"""Claude-note: Capture what AI agents learn; recall it before they act."""
 
-__version__ = "1.6.0"
+__version__ = "2.0.0"

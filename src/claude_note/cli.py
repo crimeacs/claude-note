@@ -258,6 +258,16 @@ def cmd_install_codex_hooks(args) -> int:
     return 0
 
 
+def _cmd_remember(args) -> int:
+    from .remember import cmd_remember
+    return cmd_remember(args)
+
+
+def _cmd_setup(args) -> int:
+    from .setup_recall import cmd_setup
+    return cmd_setup(args)
+
+
 def cmd_push(args) -> int:
     """Push curated notes (redacted) to the shared Foresyn vault inbox."""
     from . import push
@@ -506,7 +516,7 @@ def cmd_update(args) -> int:
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Claude Note - session logging for Claude Code",
+        description="Claude Note - capture what your agents learn, recall it before they act",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
@@ -635,6 +645,47 @@ def main() -> int:
     )
     claude_hooks_parser.add_argument("--settings-file", default="~/.claude/settings.json")
     claude_hooks_parser.set_defaults(func=cmd_install_claude_hooks)
+
+    # remember command
+    remember_parser = subparsers.add_parser(
+        "remember", help="Write a typed lesson now and reindex, so the next prompt can recall it"
+    )
+    remember_parser.add_argument("text", nargs="+", help="The lesson ('-' reads stdin)")
+    remember_parser.add_argument("--type", "-t", default="gotcha",
+                                 choices=["gotcha", "pattern", "decision", "reference", "feedback", "project"])
+    remember_parser.add_argument("--title", help="Note title (default: first clause of the text)")
+    remember_parser.add_argument("--tags", help="Comma-separated tags")
+    remember_parser.add_argument("--why", help="Why it matters")
+    remember_parser.add_argument("--how", help="How to apply it")
+    remember_parser.add_argument("--folder", help="Vault subfolder (default: vault root)")
+    remember_parser.add_argument("--no-index", action="store_true", help="Skip `qmd update`")
+    remember_parser.set_defaults(func=_cmd_remember)
+
+    # setup command
+    setup_parser = subparsers.add_parser(
+        "setup", help="Turn capture into a loop: index, recall + sentinel hooks, rules, hourly refresh"
+    )
+    setup_parser.add_argument("--dry-run", "-n", action="store_true", help="Show what would change")
+    setup_parser.add_argument("--codex", action="store_true", help="Also wire Codex (hooks.json, AGENTS.md)")
+    setup_parser.add_argument("--no-claude-memory", action="store_true",
+                              help="Do not index Claude Code's per-project memory files")
+    setup_parser.add_argument("--no-rules", action="store_true",
+                              help="Do not add the recall rule to CLAUDE.md / AGENTS.md")
+    setup_parser.add_argument("--no-schedule", action="store_true",
+                              help="Do not install the hourly refresh job")
+    setup_parser.add_argument("--add", action="append", metavar="DIR",
+                              help="Also index this folder of Markdown (repeatable)")
+    setup_parser.add_argument("--vault-name", default="notes", help="QMD collection name for the vault")
+    setup_parser.add_argument("--claude-settings", default="~/.claude/settings.json")
+    setup_parser.add_argument("--codex-hooks", default="~/.codex/hooks.json")
+    setup_parser.set_defaults(func=_cmd_setup)
+
+    # Answered in entry.py before this parser (no config import); listed for --help.
+    for name, text in (("recall", "Search prior knowledge the way the recall hook does"),
+                       ("doctor", "Prove the knowledge loop works end to end"),
+                       ("refresh", "Refresh the QMD index (text, then vectors) with a heartbeat"),
+                       ("hook", "Hook handlers: `hook recall`, `hook sentinel`")):
+        subparsers.add_parser(name, help=text, add_help=False)
 
     # ingest command
     ingest_parser = subparsers.add_parser(
