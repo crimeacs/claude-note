@@ -241,12 +241,31 @@ def refresh(embed: bool = True, update_timeout: int = 900, embed_timeout: int = 
                 return 1
         HEARTBEAT.write_text(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n")
         _log(f"OK {'update+embed' if embed else 'update'} in {time.monotonic() - started:.0f}s")
+        _daily_eval()
         return 0
     finally:
         try:
             LOCKDIR.rmdir()
         except OSError:
             pass
+
+
+def _daily_eval() -> None:
+    """Once a day, re-score the frozen probe set: free (local searches only) and it never
+    changes a setting, so the dashboard's trend line fills itself. Failures are logged, not raised."""
+    try:
+        from . import evals
+        if not evals.PROBES.exists():
+            return
+        runs = [r for r in evals.load_runs() if r.get("kind") == "retrieval"]
+        if runs and time.time() - datetime.fromisoformat(runs[-1]["t"].replace("Z", "+00:00")).timestamp() < 20 * 3600:
+            return
+        run = evals.run_retrieval(evals.load_cases(evals.PROBES), label="daily")
+        evals.save_run(run)
+        m = run["metrics"].get("test") or run["metrics"]["all"]
+        _log(f"EVAL right note injected {m.get('hit_at_k', 0):.0%} (test, {m.get('positives', 0)} questions)")
+    except Exception as exc:  # noqa: BLE001 - the refresh already succeeded
+        _log(f"EVAL skipped: {type(exc).__name__}")
 
 
 def existing_refresh_job() -> Optional[Path]:
@@ -478,6 +497,20 @@ def cmd_doctor(args) -> int:
                          f"{sum(fail.values())} surfaced"))
     else:
         rows.append(("in use", "recall on real prompts, 7 days", False, "no recall activity logged yet"))
+
+    # Measured, not just used: the latest labelled eval run (see docs/evals.md).
+    from . import evals
+    runs = [r for r in evals.load_runs() if r.get("kind") == "retrieval"]
+    if runs:
+        last = runs[-1]
+        m = last["metrics"].get("test") or last["metrics"].get("all") or {}
+        days = (time.time() - datetime.fromisoformat(last["t"].replace("Z", "+00:00")).timestamp()) / 86400
+        rows.append(("in use", "eval: right note injected (test split)", days < 8,
+                     f"{m.get('hit_at_k', 0):.0%} of {m.get('positives', 0)} questions, {days:.0f} d ago"
+                     + ("" if days < 8 else "; run `claude-note eval run`")))
+    else:
+        rows.append(("in use", "eval: right note injected", False,
+                     "never measured; `claude-note eval probes` then `eval run`"))
 
     if args.json:
         print(json.dumps([{"stage": s, "check": n, "ok": ok, "detail": d} for s, n, ok, d in rows], indent=2))

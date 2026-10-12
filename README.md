@@ -88,6 +88,26 @@ Types matter: a failure lesson is a `gotcha`, a reusable method a `pattern`, an 
 `decision`. The sentinel prefers gotchas when a command fails. If a note with the same title exists,
 `remember` appends a dated block instead of overwriting; recall shows the newest block first.
 
+## Measure it
+
+Recall is only useful if it puts the right note in front of the agent. `claude-note eval` measures
+that, keeps a history, and draws a dashboard you or your agent can read:
+
+```bash
+claude-note eval probes -n 80     # questions written from your own notes (Claude CLI, once)
+claude-note eval run              # did recall inject the note each question came from?
+claude-note eval live             # real prompts: misses, latency, did the agent open the note?
+claude-note eval answers -n 10    # same question with and without recall, judged blind
+claude-note eval dashboard        # trends, failing questions, what to fix next
+claude-note eval report --json    # the same, for an agent
+```
+
+Labels never come from recall itself: a probe's answer is the note it was written from, the bundled
+fixture is hand-labelled, and every run is compared with a plain keyword search. Probes are split
+into dev and test by note, so a setting tuned on dev is reported on test. After setup, the hourly
+refresh re-scores the frozen probes once a day, and `doctor` shows the latest score. Details and
+what each number means: [docs/evals.md](docs/evals.md).
+
 ## Why recall finds things
 
 Keyword search over notes is fast (≈0.3 s) but conjunctive: *"how should I organise obsidian note
@@ -168,6 +188,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests
 | Guide | |
 |---|---|
 | [Recall, sentinel and remember](docs/recall.md) | How the loop's second half works, and what each rule fixed |
+| [Evals](docs/evals.md) | Is recall finding the right notes, and how to make it better |
 | [Getting started](docs/getting-started.md) | Install and verify the first capture |
 | [Commands](docs/commands.md) / [configuration](docs/configuration.md) | Every interface |
 | [Hooks](docs/hook-setup.md) / [services](docs/service-setup.md) | What runs where |

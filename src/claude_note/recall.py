@@ -102,6 +102,7 @@ class Settings:
     index: str = ""               # qmd --index name; "" = default index
     skip_paths: list[str] = field(default_factory=lambda: [
         r"/sessions/", r"/claude-session-", r"/claude-note-inbox\.md$"])
+    single_term_fallback: bool = False  # on a miss, also search the two most specific words alone
     rerank_command: str = ""      # optional external relevance judge
     rerank_timeout: float = 2.5
     log: bool = True
@@ -126,6 +127,7 @@ class Settings:
         s.index = str(raw.get("index", "") or os.environ.get("CLAUDE_NOTE_RECALL_INDEX", ""))
         if "skip_paths" in raw:
             s.skip_paths = _as_list(raw["skip_paths"])
+        s.single_term_fallback = _as_bool(raw.get("single_term_fallback"), False)
         s.rerank_command = str(raw.get("rerank_command", "") or "")
         s.log = _as_bool(raw.get("log"), True) and os.environ.get("CLAUDE_NOTE_RECALL_LOG") != "0"
         s.qmd = str(raw.get("qmd", "") or "")
@@ -389,6 +391,7 @@ class Result:
     hits: list[Hit] = field(default_factory=list)
     ms: int = 0
     pool: int = 0
+    candidates: list[str] = field(default_factory=list)   # usable matches before the inject cut (evals)
 
     def to_dict(self) -> dict:
         return {"status": self.status, "reason": self.reason, "query": " ".join(self.query),
@@ -498,6 +501,23 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
                 c["votes"] += 1
                 c["best"] = min(c["best"], pos + 3 * rung_i)
                 c["memory"] = c["memory"] or is_memory
+    if not pool and ran and settings.single_term_fallback:
+        # Every rung asked for all its words. One mis-guessed word ("generated" for a note that
+        # says "minted") still zeroes the narrowest rung, so try its two words one at a time.
+        for rung_i, word in enumerate(ladder[-1][:2], start=len(ladder)):
+            if time.monotonic() - started > settings.budget:
+                break
+            for scope, is_memory in scopes:
+                cmd = base + ["search", word, "-n", str(settings.search_n), "--json"]
+                if scope:
+                    cmd += ["-c", scope]
+                for pos, item in enumerate(runner(cmd, settings.timeout) or []):
+                    uri = isinstance(item, dict) and (item.get("file") or item.get("path"))
+                    if isinstance(uri, str) and uri:
+                        c = pool.setdefault(uri, {"item": item, "votes": 0, "best": 1e9, "memory": False})
+                        c["votes"] += 1
+                        c["best"] = min(c["best"], pos + 3 * rung_i)
+                        c["memory"] = c["memory"] or is_memory
     if not ran:
         result.status, result.reason = "unavailable", "qmd failed, hung, or its index was locked"
         return
@@ -540,6 +560,7 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
             break
     if prefer_types:
         candidates.sort(key=lambda h: h.type not in prefer_types)  # stable: keeps vote order
+    result.candidates = [h.path or h.uri for h in candidates]
 
     judged = _rerank(prompt, candidates, settings)
     if judged is not None:
@@ -623,7 +644,10 @@ def log_event(kind: str, result: Result, extra: Optional[dict] = None) -> None:
     try:
         path = log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        row = {"t": time.strftime("%Y-%m-%dT%H:%M:%S"), "kind": kind, "status": result.status,
+        # `ts` (UTC) joins a row to transcript timestamps; `q` is the query's content words only,
+        # kept locally so `claude-note eval live` can list what keeps missing.
+        row = {"t": time.strftime("%Y-%m-%dT%H:%M:%S"), "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+               "kind": kind, "status": result.status, "q": " ".join(result.query),
                "reason": result.reason, "ms": result.ms, "pool": result.pool,
                "query_sha": hashlib.sha1(" ".join(result.query).encode()).hexdigest()[:10],
                "hits": [h.uri for h in result.hits]}
@@ -715,7 +739,10 @@ def hook_main(stdin=None) -> int:
     settings = Settings.load()
     result = recall(payload.get("prompt") or "", settings)
     if settings.log and result.status != "skipped":
-        log_event("prompt", result)
+        # Session and file paths let `eval live` check whether the agent opened what it was shown.
+        log_event("prompt", result, {"session": payload.get("session_id") or "",
+                                     "transcript": payload.get("transcript_path") or "",
+                                     "paths": [h.path for h in result.hits if h.path]})
     warning = memory_md_warning(payload.get("cwd") or "")
     emit(event, warning + format_context(result))
     return 0
