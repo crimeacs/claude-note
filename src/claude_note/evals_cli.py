@@ -26,11 +26,11 @@ def add_parser(sub) -> None:
     r.add_argument("--label", default="", help="Name this run, e.g. the setting you changed")
     r.add_argument("--single-term-fallback", action="store_true", help="Try the [recall] single_term_fallback setting")
     r.add_argument("--negatives", action="store_true", help="Add the bundled off-topic questions (junk-injection check)")
-    r.add_argument("--engine", choices=["auto", "daemon", "cli"], help="Recall engine to measure")
-    r.add_argument("--no-vector", action="store_true", help="Daemon engine without the search by meaning")
-    r.add_argument("--vector-last", action="store_true", help="Weight the keyword ladder above the vector search")
-    r.add_argument("--rerank", action="store_true", help="Use QMD's reranker on the fused candidates")
-    r.add_argument("--min-score", type=float, help="Drop fused results below this score")
+    r.add_argument("--engine", choices=["auto", "server", "cli"], help="Recall engine to measure")
+    r.add_argument("--no-vector", action="store_true", help="Server engine without the search by meaning")
+    r.add_argument("--no-rerank", action="store_true", help="Server engine without the reranker")
+    r.add_argument("--vector-weight", type=float, help="Weight of the meaning list in the fusion")
+    r.add_argument("--gate", type=float, help="Minimum meaning score before anything is injected")
     r.add_argument("--no-save", action="store_true", help="Do not add this run to the history")
     r.add_argument("--json", action="store_true")
     r.add_argument("--quiet", action="store_true")
@@ -75,12 +75,12 @@ def _settings(args) -> recall_mod.Settings:
         s.engine = args.engine
     if getattr(args, "no_vector", False):
         s.vector = False
-    if getattr(args, "vector_last", False):
-        s.vector_first = False
-    if getattr(args, "rerank", False):
-        s.daemon_rerank = True
-    if getattr(args, "min_score", None) is not None:
-        s.min_score = args.min_score
+    if getattr(args, "no_rerank", False):
+        s.rerank = False
+    if getattr(args, "vector_weight", None) is not None:
+        s.vector_weight = args.vector_weight
+    if getattr(args, "gate", None) is not None:
+        s.vector_gate = args.gate
     return s
 
 

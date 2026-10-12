@@ -103,15 +103,17 @@ class Settings:
     skip_paths: list[str] = field(default_factory=lambda: [
         r"/sessions/", r"/claude-session-", r"/claude-note-inbox\.md$"])
     single_term_fallback: bool = False  # on a miss, also search the two most specific words alone
-    # QMD 2.x daemon (`qmd mcp --http`): one warm request does the keyword ladder AND a search by
-    # meaning (no query expansion), optionally reranked. Falls back to the per-rung CLI path.
-    engine: str = "auto"          # auto (daemon if it answers) | daemon | cli
-    daemon_url: str = "http://localhost:8181"
-    vector: bool = True           # add the whole question as a `vec` search (daemon only)
-    vector_first: bool = True     # QMD weights the FIRST search 2x in its fusion
-    daemon_rerank: bool = False   # QMD's own reranker on the fused candidates
-    min_score: float = 0.0        # drop fused results below this (fit on labelled data)
-    candidate_limit: int = 40
+    # The warm recall server (recall_server.mjs, QMD 2.x SDK): the keyword ladder AND a search by
+    # meaning in one local request, fused here, then QMD's reranker. Falls back to the CLI ladder.
+    # Defaults were chosen on the dev half of the eval set; see docs/evals.md.
+    engine: str = "auto"          # auto (server if it answers) | server | cli
+    server_url: str = "http://127.0.0.1:8182"
+    vector: bool = True           # search the whole question by meaning
+    vector_weight: float = 3.0    # weight of the meaning list against each keyword rung (RRF)
+    vector_gate: float = 0.40     # inject nothing unless the closest note by meaning scores this high
+    rerank: bool = True           # rerank the fused top `rerank_top` with QMD's reranker
+    rerank_top: int = 12
+    rerank_chars: int = 2000
     rerank_command: str = ""      # optional external relevance judge
     rerank_timeout: float = 2.5
     log: bool = True
@@ -138,14 +140,15 @@ class Settings:
             s.skip_paths = _as_list(raw["skip_paths"])
         s.single_term_fallback = _as_bool(raw.get("single_term_fallback"), False)
         s.engine = str(raw.get("engine", "auto") or "auto")
-        s.daemon_url = str(raw.get("daemon_url", s.daemon_url) or s.daemon_url).rstrip("/")
+        s.server_url = str(raw.get("server_url", s.server_url) or s.server_url).rstrip("/")
         s.vector = _as_bool(raw.get("vector"), True)
-        s.vector_first = _as_bool(raw.get("vector_first"), True)
-        s.daemon_rerank = _as_bool(raw.get("daemon_rerank"), False)
-        if "min_score" in raw:
-            s.min_score = float(raw["min_score"])
-        if "candidate_limit" in raw:
-            s.candidate_limit = int(raw["candidate_limit"])
+        s.rerank = _as_bool(raw.get("rerank"), True)
+        for name in ("vector_weight", "vector_gate"):
+            if name in raw:
+                setattr(s, name, float(raw[name]))
+        for name in ("rerank_top", "rerank_chars"):
+            if name in raw:
+                setattr(s, name, int(raw[name]))
         s.rerank_command = str(raw.get("rerank_command", "") or "")
         s.log = _as_bool(raw.get("log"), True) and os.environ.get("CLAUDE_NOTE_RECALL_LOG") != "0"
         s.qmd = str(raw.get("qmd", "") or "")
@@ -273,8 +276,8 @@ def _run_qmd(cmd: list[str], timeout: float) -> Optional[list]:
     return data if isinstance(data, list) else []
 
 
-def daemon_query(settings: "Settings", body: dict, deadline: float) -> Optional[list]:
-    """POST /query to a warm `qmd mcp --http` daemon. None = no daemon / failed / too slow.
+def server_post(settings: "Settings", path: str, body: dict, deadline: float) -> Optional[dict]:
+    """POST to the warm recall server. None = not running / failed / too slow.
 
     The bound is wall clock: the request runs on a daemon thread and is abandoned at the
     deadline (a socket timeout bounds inactivity, not elapsed time)."""
@@ -284,7 +287,7 @@ def daemon_query(settings: "Settings", body: dict, deadline: float) -> Optional[
 
     def call():
         try:
-            req = urllib.request.Request(settings.daemon_url + "/query", data=json.dumps(body).encode(),
+            req = urllib.request.Request(settings.server_url + path, data=json.dumps(body).encode(),
                                          headers={"content-type": "application/json"})
             with urllib.request.urlopen(req, timeout=max(0.5, deadline)) as r:
                 box["data"] = json.loads(r.read().decode("utf-8", "ignore"))
@@ -294,19 +297,80 @@ def daemon_query(settings: "Settings", body: dict, deadline: float) -> Optional[
     t.start()
     t.join(max(0.1, deadline))
     data = box.get("data")
-    if t.is_alive() or not isinstance(data, dict):
-        return None
-    res = data.get("results")
-    return res if isinstance(res, list) else None
+    return data if (not t.is_alive() and isinstance(data, dict) and "error" not in data) else None
 
 
-def daemon_alive(settings: "Settings", timeout: float = 0.4) -> bool:
+def server_alive(settings: "Settings", timeout: float = 0.4) -> bool:
     import urllib.request
     try:
-        with urllib.request.urlopen(settings.daemon_url + "/health", timeout=timeout) as r:
+        with urllib.request.urlopen(settings.server_url + "/health", timeout=timeout) as r:
             return r.status == 200
     except Exception:
         return False
+
+
+def _title_key(t: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (t or "").lower())
+
+
+def fuse(lex: list[list[dict]], vec: list[dict], settings: "Settings") -> tuple[list[dict], float]:
+    """Reciprocal-rank fusion of the keyword rungs and the meaning list (weight `vector_weight`),
+    within the configured collections, skipping session logs; pushed copies of one note (same
+    title) count once. Returns the fused list and the best meaning score among kept results."""
+    cols = set((settings.collections or []) + settings.memory_collections)
+    skip = [re.compile(p) for p in settings.skip_paths]
+
+    def keep(h: dict) -> bool:
+        f = h.get("file") or ""
+        c = (re.match(r"qmd://([^/]+)/", f) or [None, ""])[1]
+        return bool(f) and (not cols or c in cols) and not any(p.search(f) for p in skip)
+    score: dict[str, float] = {}
+    meta: dict[str, dict] = {}
+    for ri, rung in enumerate(lex):
+        for pos, h in enumerate(x for x in rung if keep(x)):
+            score[h["file"]] = score.get(h["file"], 0.0) + 1 / (60 + pos + 3 * ri)
+            meta[h["file"]] = h
+    kept_vec = [h for h in vec if keep(h)]
+    for pos, h in enumerate(kept_vec):
+        score[h["file"]] = score.get(h["file"], 0.0) + settings.vector_weight / (60 + pos)
+        meta.setdefault(h["file"], h)
+    out, seen = [], set()
+    for f, _ in sorted(score.items(), key=lambda kv: -kv[1]):
+        t = _title_key(meta[f].get("title", ""))
+        if t and t in seen:
+            continue
+        seen.add(t)
+        out.append(meta[f])
+    return out, (kept_vec[0].get("score", 0.0) if kept_vec else 0.0)
+
+
+def _server_pool(prompt: str, ladder: list[list[str]], settings: "Settings", started: float,
+                 result: "Result") -> Optional[dict]:
+    left = lambda: settings.budget - (time.monotonic() - started)
+    got = server_post(settings, "/search", {"rungs": [" ".join(r) for r in ladder],
+                                             "question": prompt[:2000] if settings.vector else ""},
+                      min(left(), settings.timeout))
+    if got is None:
+        return None
+    fused, best_vec = fuse(got.get("lex") or [], got.get("vec") or [], settings)
+    if settings.vector and best_vec < settings.vector_gate:
+        result.reason = f"nothing close enough in meaning (best {best_vec:.2f} < {settings.vector_gate})"
+        return {}
+    top = fused[: max(settings.rerank_top, settings.inject)]
+    if settings.rerank and len(top) > 1 and left() > 1.0:
+        rr = server_post(settings, "/rerank", {"question": prompt[:2000], "files": [h["file"] for h in top],
+                                               "chars": settings.rerank_chars}, left() - 0.5)
+        scores = (rr or {}).get("scores") or {}
+        if scores:
+            top = sorted(top, key=lambda h: -scores.get(h["file"], 0.0))
+            result.reranked = True
+    pool: dict[str, dict] = {}
+    for pos, h in enumerate(top):
+        coll = (re.match(r"qmd://([^/]+)/", h["file"]) or [None, ""])[1]
+        pool[h["file"]] = {"item": {"file": h["file"], "title": h.get("title", ""), "snippet": h.get("snippet", ""),
+                                    "score": h.get("score", 0.0)},
+                           "votes": 1, "best": pos, "memory": coll in settings.memory_collections}
+    return pool
 
 
 def _collection_dirs(index: str = "") -> dict[str, Path]:
@@ -448,6 +512,7 @@ class Result:
     pool: int = 0
     candidates: list[str] = field(default_factory=list)   # usable matches before the inject cut (evals)
     engine: str = "cli"
+    reranked: bool = False
 
     def to_dict(self) -> dict:
         return {"status": self.status, "reason": self.reason, "query": " ".join(self.query),
@@ -501,32 +566,6 @@ def recall(prompt: str, settings: Optional[Settings] = None, runner: Runner = _r
     return result
 
 
-def _daemon_pool(prompt: str, ladder: list[list[str]], settings: "Settings", started: float) -> Optional[dict]:
-    """One request: every ladder rung as a keyword search plus the question as a vector search."""
-    lex = [{"type": "lex", "query": " ".join(r)} for r in ladder]
-    vec = [{"type": "vec", "query": prompt[:600]}] if settings.vector else []
-    searches = (vec + lex) if settings.vector_first else (lex + vec)
-    cols = (settings.collections or []) + [c for c in settings.memory_collections if c not in settings.collections]
-    body = {"searches": searches, "limit": max(settings.search_n, 16), "rerank": settings.daemon_rerank,
-            "minScore": settings.min_score, "candidateLimit": settings.candidate_limit}
-    if settings.collections:
-        body["collections"] = cols
-    left = settings.budget - (time.monotonic() - started)
-    got = daemon_query(settings, body, min(left, settings.timeout))
-    if got is None:
-        return None
-    pool: dict[str, dict] = {}
-    for pos, item in enumerate(got):
-        uri = isinstance(item, dict) and item.get("file")
-        if not isinstance(uri, str) or not uri:
-            continue
-        coll = (re.match(r"qmd://([^/]+)/", uri) or [None, ""])[1]
-        # Fused order is the ranking; `votes` keeps the downstream sort stable.
-        pool[uri] = {"item": {**item, "snippet": item.get("snippet", "")}, "votes": 1, "best": pos,
-                     "memory": coll in settings.memory_collections}
-    return pool
-
-
 def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs):
     if not settings.enabled:
         result.reason = "recall disabled"
@@ -562,13 +601,13 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
 
     pool: dict[str, dict] = {}
     ran = False
-    if settings.engine in ("auto", "daemon") and not extra_rungs:
-        got = _daemon_pool(prompt, ladder, settings, started)
+    if settings.engine in ("auto", "server") and not extra_rungs:
+        got = _server_pool(prompt, ladder, settings, started, result)
         if got is not None:
             pool, ran = got, True
-            result.engine = "daemon"
-        elif settings.engine == "daemon":
-            result.status, result.reason = "unavailable", "the qmd daemon did not answer"
+            result.engine = "server"
+        elif settings.engine == "server":
+            result.status, result.reason = "unavailable", "the recall server did not answer"
             return
     for scope, is_memory in ([] if ran else scopes):
         for rung_i, rung in enumerate(ladder):
@@ -613,7 +652,7 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
         return
     result.pool = len(pool)
     if not pool:
-        result.status, result.reason = "miss", "no keyword match on any rung of the query"
+        result.status, result.reason = "miss", result.reason or "no keyword match on any rung of the query"
         return
 
     skip = [re.compile(p) for p in settings.skip_paths]

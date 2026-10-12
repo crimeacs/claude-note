@@ -139,7 +139,7 @@ def score_case(case: Case, settings: recall_mod.Settings, runner: recall_mod.Run
     res = recall_mod.recall(case.question, settings, runner)
     refs = [h.path or h.uri for h in res.hits]
     titles = [h.title for h in res.hits]
-    row = {"id": case.id, "question": case.question, "expect": case.expect, "split": case.split, "engine": res.engine,
+    row = {"id": case.id, "question": case.question, "expect": case.expect, "split": case.split, "engine": res.engine, "reranked": res.reranked,
            "source": case.source, "note_type": case.note_type, "overlap": round(case.overlap, 2),
            "status": res.status, "reason": res.reason, "ms": res.ms,
            "query": " ".join(res.query), "narrowed": " ".join(res.narrowed),
@@ -196,8 +196,8 @@ def run_retrieval(cases: list[Case], settings: Optional[recall_mod.Settings] = N
             "settings": {"inject": settings.inject, "search_n": settings.search_n,
                          "memory_slots": settings.memory_slots, "index": settings.index,
                          "single_term_fallback": settings.single_term_fallback,
-                         "engine": settings.engine, "vector": settings.vector, "vector_first": settings.vector_first,
-                         "daemon_rerank": settings.daemon_rerank, "min_score": settings.min_score,
+                         "engine": settings.engine, "vector": settings.vector, "vector_weight": settings.vector_weight,
+                         "vector_gate": settings.vector_gate, "rerank": settings.rerank,
                          "rerank": bool(settings.rerank_command)},
             "metrics": groups, "rows": rows}
 

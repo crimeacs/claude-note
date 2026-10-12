@@ -128,8 +128,40 @@ followed the team's note 5 times with recall and 3 times without; on the control
 questions that got notes 0% -> 25% and p95 ~2 s -> ~6 s. On our vault it can only affect the few
 empty results, so it stays off by default.
 
+### After: QMD 2.8.3, the recall server, hybrid search and the reranker (12 October 2026, later)
+
+Same 80 probes, plus 30 hand-written off-topic questions (`--negatives`). Every setting below was
+chosen on the dev half; the test half was looked at once, at the end.
+
+| Test half (36 answerable, 15 off-topic) | Before (QMD 1.0, CLI ladder) | Hybrid, no rerank | Hybrid + rerank (default) |
+|---|---|---|---|
+| Right note injected | 28% | 58% | **78%** |
+| Right note first | 22% | 39% | **56%** |
+| MRR | 0.25 | 0.46 | **0.66** |
+| Off-topic questions that got notes | not measured | 1 of 15 | 1 of 15 |
+| Latency p50 / p95 | not measured / 11 s | 0.36 s / 1.3 s | 3.3 s / 5.3 s |
+
+What changed, and how each choice was made:
+
+- **Clean index.** QMD 2.8.3 would not adopt 1.0's vectors (no fingerprint), and 87% of the 370k
+  were stale copies of edited notes. `qmd embed --force` rebuilt 61,896 current vectors in about
+  1.5 hours. (It needs room: clearing vectors grows the WAL first; check free space.)
+- **The recall server** (`recall_server.mjs`, QMD's SDK, models warm, 127.0.0.1:8182): the whole
+  keyword ladder in ~46 ms and a search by meaning in ~290 ms, against ~1.5 s per `qmd search`
+  process. `claude-note setup` installs it; recall falls back to the CLI ladder when it is down.
+- **Fusion.** Reciprocal-rank fusion of the keyword rungs and the meaning list. Vector weight swept
+  on dev over 0.5-6: 3 was best (73% right note on dev; keyword ladder alone 45%, meaning alone 61%).
+- **Gate.** On dev, the best meaning score of every answerable question was >= 0.455 and of every
+  off-topic question <= 0.36. Any gate in 0.38-0.45 gave 0% junk with no answerable question lost;
+  0.40 (the middle) is the default. On test it let 1 of 15 off-topic questions through.
+- **Reranker** (QMD's Qwen3-Reranker-0.6B, top 12, first 2000 characters of each note): on dev,
+  right note first 32% -> 59%. Costs ~2.7 s; `rerank = false` keeps the 0.36 s path.
+
 ## What we tried and dropped
 
+- **QMD's own HTTP daemon (`qmd mcp --http`, `POST /query` with lex + vec searches).** 4-5 s per
+  query warm on our index, with worse top results than the same searches through the SDK; the time
+  is in its full search pipeline, not the vector lookup (~180 ms through the SDK).
 - **Search by meaning on a miss.** On QMD 1.0, `qmd vsearch` expands the query with a 1.3 GB
   model before searching. It took 27 to 67 seconds on a 15,000-note index, against an 8 second
   budget for the whole hook, and loading that model inside an agent turn has taken a server down

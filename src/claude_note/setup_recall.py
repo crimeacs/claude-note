@@ -38,7 +38,7 @@ HEARTBEAT = SHARE / "refresh.ok"
 REFRESH_LOG = SHARE / "refresh.log"
 LOCKDIR = SHARE / "refresh.lock"
 PLIST_LABEL = "com.claude-note.qmd-refresh"
-DAEMON_LABEL = "com.claude-note.qmd-daemon"
+SERVER_LABEL = "com.claude-note.recall-server"
 
 RULE_START = "<!-- claude-note:recall-rule:start -->"
 RULE_END = "<!-- claude-note:recall-rule:end -->"
@@ -325,36 +325,55 @@ def qmd_major(exe: str) -> int:
         return 0
 
 
-def install_daemon_agent(qmd: str, port: int = 8181, dry_run: bool = False) -> str:
-    """Keep QMD 2.x's HTTP server warm, so recall is one local request with the models loaded
-    instead of a dozen cold processes. Recall falls back to the CLI if it is down."""
+def qmd_sdk(qmd: str) -> Optional[Path]:
+    """The QMD 2.x SDK entry (dist/index.js) of the installed `qmd`, found from its executable."""
+    try:
+        real = Path(qmd).resolve()
+    except OSError:
+        return None
+    for parent in [real.parent, *real.parents][:6]:
+        for cand in (parent / "node_modules" / "@tobilu" / "qmd" / "dist" / "index.js", parent / "dist" / "index.js"):
+            if cand.is_file() and (cand.parent / "llm.js").is_file():
+                return cand
+    return None
+
+
+def install_server_agent(qmd: str, port: int = 8182, dry_run: bool = False) -> str:
+    """Keep the recall server warm: QMD's keyword and meaning search plus its reranker, models
+    loaded, on 127.0.0.1. Recall falls back to the CLI ladder whenever it is not answering."""
     if not qmd:
         return "skipped: qmd not installed"
     if qmd_major(qmd) < 2:
-        return "skipped: QMD 2.x needed for the fast engine (`npm i -g @tobilu/qmd`); recall uses the CLI"
+        return "skipped: QMD 2.x needed for search by meaning (`npm i -g @tobilu/qmd`); recall uses keywords only"
+    sdk = qmd_sdk(qmd)
+    node = shutil.which("node")
+    if not sdk or not node:
+        return "skipped: could not find QMD's SDK or node; recall uses keywords only"
+    server = Path(__file__).with_name("recall_server.mjs")
     if sys.platform != "darwin":
-        return f"not macOS: run `{qmd} mcp --http --port {port}` under systemd (Restart=always)"
-    plist = HOME / "Library" / "LaunchAgents" / f"{DAEMON_LABEL}.plist"
+        return f"not macOS: run `{node} {server} {sdk} {port}` under systemd (Restart=always)"
+    plist = HOME / "Library" / "LaunchAgents" / f"{SERVER_LABEL}.plist"
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>{DAEMON_LABEL}</string>
-  <key>ProgramArguments</key><array><string>{qmd}</string><string>mcp</string><string>--http</string><string>--port</string><string>{port}</string></array>
+  <key>Label</key><string>{SERVER_LABEL}</string>
+  <key>ProgramArguments</key><array><string>{node}</string><string>{server}</string><string>{sdk}</string><string>{port}</string></array>
+  <key>EnvironmentVariables</key><dict><key>QMD_METAL_KEEP_RESIDENCY</key><string>1</string></dict>
   <key>KeepAlive</key><true/>
   <key>RunAtLoad</key><true/>
   <key>Nice</key><integer>5</integer>
   <key>StandardOutPath</key><string>/dev/null</string>
-  <key>StandardErrorPath</key><string>{SHARE}/qmd-daemon.err</string>
+  <key>StandardErrorPath</key><string>{SHARE}/recall-server.err</string>
 </dict></plist>
 """
     if dry_run:
-        return f"would install {plist.name} (port {port})"
+        return f"would install {plist.name} (127.0.0.1:{port})"
     plist.parent.mkdir(parents=True, exist_ok=True)
     plist.write_text(body)
     uid = os.getuid()
     subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist)], capture_output=True, timeout=30)
     subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist)], capture_output=True, timeout=30)
-    return f"installed {plist.name} (port {port}, restarts if it stops)"
+    return f"installed {plist.name} (127.0.0.1:{port}, restarts if it stops)"
 
 
 # --------------------------------------------------------------------------- #
@@ -414,11 +433,11 @@ def cmd_setup(args) -> int:
     else:
         print(f"   {install_refresh_agent(exe, dry)}")
 
-    print("\n6. Warm search daemon (QMD 2.x)")
+    print("\n6. Warm recall server (search by meaning + reranker, QMD 2.x)")
     if args.no_schedule:
         print("   skipped (--no-schedule)")
     else:
-        print(f"   {install_daemon_agent(qmd_exe() or '', dry_run=dry)}")
+        print(f"   {install_server_agent(qmd_exe() or '', dry_run=dry)}")
 
     print("\nNext: `claude-note doctor` proves the loop end to end.")
     return 0
@@ -527,10 +546,10 @@ def cmd_doctor(args) -> int:
             break
     settings = recall_mod.Settings.load()
     if settings.engine != "cli":
-        alive = recall_mod.daemon_alive(settings, timeout=2)
-        rows.append(("configured", "warm search daemon (QMD 2.x)", alive or settings.engine == "auto",
-                     f"{settings.daemon_url} answering" if alive else
-                     "not answering: recall uses the slower CLI path (`claude-note setup` installs it)"))
+        alive = recall_mod.server_alive(settings, timeout=2)
+        rows.append(("configured", "warm recall server (meaning + rerank)", alive or settings.engine == "auto",
+                     f"{settings.server_url} answering" if alive else
+                     "not answering: recall uses keywords only (`claude-note setup` installs it)"))
     rows.append(("configured", "index refreshed recently", age is not None and age < 3,
                  f"{age:.1f} h ago" if age is not None else "no refresh heartbeat"))
 
