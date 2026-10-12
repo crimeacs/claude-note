@@ -38,6 +38,7 @@ HEARTBEAT = SHARE / "refresh.ok"
 REFRESH_LOG = SHARE / "refresh.log"
 LOCKDIR = SHARE / "refresh.lock"
 PLIST_LABEL = "com.claude-note.qmd-refresh"
+DAEMON_LABEL = "com.claude-note.qmd-daemon"
 
 RULE_START = "<!-- claude-note:recall-rule:start -->"
 RULE_END = "<!-- claude-note:recall-rule:end -->"
@@ -315,6 +316,47 @@ def install_refresh_agent(exe: str, dry_run: bool = False) -> str:
     return f"installed {plist.name} (hourly)"
 
 
+def qmd_major(exe: str) -> int:
+    try:
+        out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=20).stdout
+        m = re.search(r"(\d+)\.\d+\.\d+", out)
+        return int(m.group(1)) if m else 0
+    except Exception:
+        return 0
+
+
+def install_daemon_agent(qmd: str, port: int = 8181, dry_run: bool = False) -> str:
+    """Keep QMD 2.x's HTTP server warm, so recall is one local request with the models loaded
+    instead of a dozen cold processes. Recall falls back to the CLI if it is down."""
+    if not qmd:
+        return "skipped: qmd not installed"
+    if qmd_major(qmd) < 2:
+        return "skipped: QMD 2.x needed for the fast engine (`npm i -g @tobilu/qmd`); recall uses the CLI"
+    if sys.platform != "darwin":
+        return f"not macOS: run `{qmd} mcp --http --port {port}` under systemd (Restart=always)"
+    plist = HOME / "Library" / "LaunchAgents" / f"{DAEMON_LABEL}.plist"
+    body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>{DAEMON_LABEL}</string>
+  <key>ProgramArguments</key><array><string>{qmd}</string><string>mcp</string><string>--http</string><string>--port</string><string>{port}</string></array>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>Nice</key><integer>5</integer>
+  <key>StandardOutPath</key><string>/dev/null</string>
+  <key>StandardErrorPath</key><string>{SHARE}/qmd-daemon.err</string>
+</dict></plist>
+"""
+    if dry_run:
+        return f"would install {plist.name} (port {port})"
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    plist.write_text(body)
+    uid = os.getuid()
+    subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist)], capture_output=True, timeout=30)
+    subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist)], capture_output=True, timeout=30)
+    return f"installed {plist.name} (port {port}, restarts if it stops)"
+
+
 # --------------------------------------------------------------------------- #
 # setup command
 # --------------------------------------------------------------------------- #
@@ -371,6 +413,12 @@ def cmd_setup(args) -> int:
         print("   skipped (--no-schedule): run `claude-note refresh` from your own scheduler")
     else:
         print(f"   {install_refresh_agent(exe, dry)}")
+
+    print("\n6. Warm search daemon (QMD 2.x)")
+    if args.no_schedule:
+        print("   skipped (--no-schedule)")
+    else:
+        print(f"   {install_daemon_agent(qmd_exe() or '', dry_run=dry)}")
 
     print("\nNext: `claude-note doctor` proves the loop end to end.")
     return 0
@@ -477,6 +525,12 @@ def cmd_doctor(args) -> int:
         if hb.exists():
             age = (time.time() - hb.stat().st_mtime) / 3600
             break
+    settings = recall_mod.Settings.load()
+    if settings.engine != "cli":
+        alive = recall_mod.daemon_alive(settings, timeout=2)
+        rows.append(("configured", "warm search daemon (QMD 2.x)", alive or settings.engine == "auto",
+                     f"{settings.daemon_url} answering" if alive else
+                     "not answering: recall uses the slower CLI path (`claude-note setup` installs it)"))
     rows.append(("configured", "index refreshed recently", age is not None and age < 3,
                  f"{age:.1f} h ago" if age is not None else "no refresh heartbeat"))
 

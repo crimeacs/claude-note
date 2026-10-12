@@ -16,7 +16,8 @@ from claude_note import evals, evals_dashboard, recall
 
 def settings(**kw):
     s = recall.Settings()
-    s.qmd = "/bin/echo"  # executable; the runner is faked
+    s.qmd = "/bin/echo"
+    s.engine = "cli"  # never reach a real daemon from a unit test  # executable; the runner is faked
     s.log = False
     for k, v in kw.items():
         setattr(s, k, v)

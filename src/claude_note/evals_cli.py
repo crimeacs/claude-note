@@ -25,6 +25,12 @@ def add_parser(sub) -> None:
     r.add_argument("--inject", type=int, help="Notes injected per prompt (to compare settings)")
     r.add_argument("--label", default="", help="Name this run, e.g. the setting you changed")
     r.add_argument("--single-term-fallback", action="store_true", help="Try the [recall] single_term_fallback setting")
+    r.add_argument("--negatives", action="store_true", help="Add the bundled off-topic questions (junk-injection check)")
+    r.add_argument("--engine", choices=["auto", "daemon", "cli"], help="Recall engine to measure")
+    r.add_argument("--no-vector", action="store_true", help="Daemon engine without the search by meaning")
+    r.add_argument("--vector-last", action="store_true", help="Weight the keyword ladder above the vector search")
+    r.add_argument("--rerank", action="store_true", help="Use QMD's reranker on the fused candidates")
+    r.add_argument("--min-score", type=float, help="Drop fused results below this score")
     r.add_argument("--no-save", action="store_true", help="Do not add this run to the history")
     r.add_argument("--json", action="store_true")
     r.add_argument("--quiet", action="store_true")
@@ -65,10 +71,26 @@ def _settings(args) -> recall_mod.Settings:
         s.inject = args.inject
     if getattr(args, "single_term_fallback", False):
         s.single_term_fallback = True
+    if getattr(args, "engine", None):
+        s.engine = args.engine
+    if getattr(args, "no_vector", False):
+        s.vector = False
+    if getattr(args, "vector_last", False):
+        s.vector_first = False
+    if getattr(args, "rerank", False):
+        s.daemon_rerank = True
+    if getattr(args, "min_score", None) is not None:
+        s.min_score = args.min_score
     return s
 
 
 def _cases(args):
+    extra = evals.load_cases(evals.FIXTURE.parent / "offtopic.jsonl") if getattr(args, "negatives", False) else []
+    base = _base_cases(args)
+    return None if base is None else base + extra
+
+
+def _base_cases(args):
     if args.set:
         return evals.load_cases(Path(args.set).expanduser())
     if args.fixture:

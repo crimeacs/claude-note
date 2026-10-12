@@ -16,7 +16,8 @@ from claude_note import recall, remember, sentinel, setup_recall
 
 def settings(**kw):
     s = recall.Settings()
-    s.qmd = "/bin/echo"  # executable; runner is mocked
+    s.qmd = "/bin/echo"
+    s.engine = "cli"  # never reach a real daemon from a unit test  # executable; runner is mocked
     s.log = False
     for k, v in kw.items():
         setattr(s, k, v)
@@ -285,3 +286,37 @@ class SetupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DaemonEngineTests(unittest.TestCase):
+    """QMD 2.x daemon: one request with the ladder as keyword searches plus the question by meaning."""
+
+    def test_one_request_vector_first_and_fused_order_kept(self):
+        sent = {}
+
+        def fake(settings_, body, deadline):
+            sent.update(body)
+            return [item("qmd://notes/b.md", "B"), item("qmd://notes/a.md", "A")]
+        s = settings(engine="daemon")
+        with mock.patch.object(recall, "daemon_query", side_effect=fake):
+            res = recall.recall("Can I just run npm run build on the 4 GB box?", s, runner=lambda c, t: self.fail("no CLI call"))
+        self.assertEqual(res.engine, "daemon")
+        self.assertEqual(sent["searches"][0]["type"], "vec")
+        self.assertTrue(all(x["type"] == "lex" for x in sent["searches"][1:]))
+        self.assertFalse(sent["rerank"])
+        self.assertEqual([h.uri for h in res.hits], ["qmd://notes/b.md", "qmd://notes/a.md"])
+
+    def test_auto_falls_back_to_the_cli_ladder(self):
+        calls = []
+        s = settings(engine="auto")
+        with mock.patch.object(recall, "daemon_query", return_value=None):
+            res = recall.recall("Can I just run npm run build on the 4 GB box?", s,
+                                runner=lambda c, t: calls.append(c) or [item("qmd://notes/a.md", "A")])
+        self.assertTrue(calls)
+        self.assertEqual(res.engine, "cli")
+        self.assertEqual(res.status, "hit")
+
+    def test_daemon_only_reports_unavailable(self):
+        with mock.patch.object(recall, "daemon_query", return_value=None):
+            res = recall.recall("Can I just run npm run build on the 4 GB box?", settings(engine="daemon"))
+        self.assertEqual(res.status, "unavailable")

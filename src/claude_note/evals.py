@@ -139,11 +139,11 @@ def score_case(case: Case, settings: recall_mod.Settings, runner: recall_mod.Run
     res = recall_mod.recall(case.question, settings, runner)
     refs = [h.path or h.uri for h in res.hits]
     titles = [h.title for h in res.hits]
-    row = {"id": case.id, "question": case.question, "expect": case.expect, "split": case.split,
+    row = {"id": case.id, "question": case.question, "expect": case.expect, "split": case.split, "engine": res.engine,
            "source": case.source, "note_type": case.note_type, "overlap": round(case.overlap, 2),
            "status": res.status, "reason": res.reason, "ms": res.ms,
            "query": " ".join(res.query), "narrowed": " ".join(res.narrowed),
-           "injected": [{"ref": h.path or h.uri, "title": h.title, "type": h.type} for h in res.hits]}
+           "injected": [{"ref": h.path or h.uri, "title": h.title, "type": h.type, "score": round(h.score, 4)} for h in res.hits]}
     if case.expect:
         row["rank"] = _rank(refs, case.expect, titles, case.note_title)
         row["in_candidates"] = _rank(res.candidates, case.expect) is not None
@@ -196,6 +196,8 @@ def run_retrieval(cases: list[Case], settings: Optional[recall_mod.Settings] = N
             "settings": {"inject": settings.inject, "search_n": settings.search_n,
                          "memory_slots": settings.memory_slots, "index": settings.index,
                          "single_term_fallback": settings.single_term_fallback,
+                         "engine": settings.engine, "vector": settings.vector, "vector_first": settings.vector_first,
+                         "daemon_rerank": settings.daemon_rerank, "min_score": settings.min_score,
                          "rerank": bool(settings.rerank_command)},
             "metrics": groups, "rows": rows}
 

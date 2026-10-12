@@ -103,6 +103,15 @@ class Settings:
     skip_paths: list[str] = field(default_factory=lambda: [
         r"/sessions/", r"/claude-session-", r"/claude-note-inbox\.md$"])
     single_term_fallback: bool = False  # on a miss, also search the two most specific words alone
+    # QMD 2.x daemon (`qmd mcp --http`): one warm request does the keyword ladder AND a search by
+    # meaning (no query expansion), optionally reranked. Falls back to the per-rung CLI path.
+    engine: str = "auto"          # auto (daemon if it answers) | daemon | cli
+    daemon_url: str = "http://localhost:8181"
+    vector: bool = True           # add the whole question as a `vec` search (daemon only)
+    vector_first: bool = True     # QMD weights the FIRST search 2x in its fusion
+    daemon_rerank: bool = False   # QMD's own reranker on the fused candidates
+    min_score: float = 0.0        # drop fused results below this (fit on labelled data)
+    candidate_limit: int = 40
     rerank_command: str = ""      # optional external relevance judge
     rerank_timeout: float = 2.5
     log: bool = True
@@ -128,6 +137,15 @@ class Settings:
         if "skip_paths" in raw:
             s.skip_paths = _as_list(raw["skip_paths"])
         s.single_term_fallback = _as_bool(raw.get("single_term_fallback"), False)
+        s.engine = str(raw.get("engine", "auto") or "auto")
+        s.daemon_url = str(raw.get("daemon_url", s.daemon_url) or s.daemon_url).rstrip("/")
+        s.vector = _as_bool(raw.get("vector"), True)
+        s.vector_first = _as_bool(raw.get("vector_first"), True)
+        s.daemon_rerank = _as_bool(raw.get("daemon_rerank"), False)
+        if "min_score" in raw:
+            s.min_score = float(raw["min_score"])
+        if "candidate_limit" in raw:
+            s.candidate_limit = int(raw["candidate_limit"])
         s.rerank_command = str(raw.get("rerank_command", "") or "")
         s.log = _as_bool(raw.get("log"), True) and os.environ.get("CLAUDE_NOTE_RECALL_LOG") != "0"
         s.qmd = str(raw.get("qmd", "") or "")
@@ -255,6 +273,42 @@ def _run_qmd(cmd: list[str], timeout: float) -> Optional[list]:
     return data if isinstance(data, list) else []
 
 
+def daemon_query(settings: "Settings", body: dict, deadline: float) -> Optional[list]:
+    """POST /query to a warm `qmd mcp --http` daemon. None = no daemon / failed / too slow.
+
+    The bound is wall clock: the request runs on a daemon thread and is abandoned at the
+    deadline (a socket timeout bounds inactivity, not elapsed time)."""
+    import threading
+    import urllib.request
+    box: dict = {}
+
+    def call():
+        try:
+            req = urllib.request.Request(settings.daemon_url + "/query", data=json.dumps(body).encode(),
+                                         headers={"content-type": "application/json"})
+            with urllib.request.urlopen(req, timeout=max(0.5, deadline)) as r:
+                box["data"] = json.loads(r.read().decode("utf-8", "ignore"))
+        except Exception as exc:  # noqa: BLE001 - the caller falls back
+            box["error"] = type(exc).__name__
+    t = threading.Thread(target=call, daemon=True)
+    t.start()
+    t.join(max(0.1, deadline))
+    data = box.get("data")
+    if t.is_alive() or not isinstance(data, dict):
+        return None
+    res = data.get("results")
+    return res if isinstance(res, list) else None
+
+
+def daemon_alive(settings: "Settings", timeout: float = 0.4) -> bool:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(settings.daemon_url + "/health", timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
 def _collection_dirs(index: str = "") -> dict[str, Path]:
     """Collection name -> directory, read from QMD's own config."""
     # QMD reads ~/.config/qmd even when XDG_CONFIG_HOME points elsewhere; try both.
@@ -377,6 +431,7 @@ class Hit:
     votes: int = 0
     fresh_label: str = ""
     path: str = ""                 # local file, when it resolves: readable without qmd
+    score: float = 0.0             # the engine's own score (QMD), for fitting a floor offline
 
     def to_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items() if v not in ("", None)}
@@ -392,6 +447,7 @@ class Result:
     ms: int = 0
     pool: int = 0
     candidates: list[str] = field(default_factory=list)   # usable matches before the inject cut (evals)
+    engine: str = "cli"
 
     def to_dict(self) -> dict:
         return {"status": self.status, "reason": self.reason, "query": " ".join(self.query),
@@ -445,6 +501,32 @@ def recall(prompt: str, settings: Optional[Settings] = None, runner: Runner = _r
     return result
 
 
+def _daemon_pool(prompt: str, ladder: list[list[str]], settings: "Settings", started: float) -> Optional[dict]:
+    """One request: every ladder rung as a keyword search plus the question as a vector search."""
+    lex = [{"type": "lex", "query": " ".join(r)} for r in ladder]
+    vec = [{"type": "vec", "query": prompt[:600]}] if settings.vector else []
+    searches = (vec + lex) if settings.vector_first else (lex + vec)
+    cols = (settings.collections or []) + [c for c in settings.memory_collections if c not in settings.collections]
+    body = {"searches": searches, "limit": max(settings.search_n, 16), "rerank": settings.daemon_rerank,
+            "minScore": settings.min_score, "candidateLimit": settings.candidate_limit}
+    if settings.collections:
+        body["collections"] = cols
+    left = settings.budget - (time.monotonic() - started)
+    got = daemon_query(settings, body, min(left, settings.timeout))
+    if got is None:
+        return None
+    pool: dict[str, dict] = {}
+    for pos, item in enumerate(got):
+        uri = isinstance(item, dict) and item.get("file")
+        if not isinstance(uri, str) or not uri:
+            continue
+        coll = (re.match(r"qmd://([^/]+)/", uri) or [None, ""])[1]
+        # Fused order is the ranking; `votes` keeps the downstream sort stable.
+        pool[uri] = {"item": {**item, "snippet": item.get("snippet", "")}, "votes": 1, "best": pos,
+                     "memory": coll in settings.memory_collections}
+    return pool
+
+
 def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs):
     if not settings.enabled:
         result.reason = "recall disabled"
@@ -480,7 +562,15 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
 
     pool: dict[str, dict] = {}
     ran = False
-    for scope, is_memory in scopes:
+    if settings.engine in ("auto", "daemon") and not extra_rungs:
+        got = _daemon_pool(prompt, ladder, settings, started)
+        if got is not None:
+            pool, ran = got, True
+            result.engine = "daemon"
+        elif settings.engine == "daemon":
+            result.status, result.reason = "unavailable", "the qmd daemon did not answer"
+            return
+    for scope, is_memory in ([] if ran else scopes):
         for rung_i, rung in enumerate(ladder):
             if time.monotonic() - started > settings.budget:
                 break
@@ -536,7 +626,7 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
         body = clean(item.get("snippet", ""), settings.snippet_chars)
         hit = Hit(uri=uri, title=str(item.get("title") or Path(uri).stem), snippet=body,
                   collection=(re.match(r"qmd://([^/]+)/", uri) or [None, ""])[1],
-                  memory=c["memory"], votes=c["votes"])
+                  memory=c["memory"], votes=c["votes"], score=float(item.get("score") or 0.0))
         path = local_path(uri, settings.index)
         if path:
             hit.path = str(path)
