@@ -1,0 +1,22 @@
+claude-note setup
+
+1. One index across your knowledge
+   vault ~/notes: added
+   Claude Code memories ~/.claude/projects: added
+
+2. Recall and sentinel hooks
+   Claude Code (~/.claude/settings.json): UserPromptSubmit: hook recall, PostToolUse [Bash]: hook sentinel, PostToolUseFailure [Bash]: hook sentinel
+   Codex (~/.codex/hooks.json): UserPromptSubmit: hook recall
+   Codex runs new hooks only after you trust them (`codex`, accept the prompt).
+
+3. Recall rule in agent instructions
+   ~/.claude/CLAUDE.md: added
+   ~/.codex/AGENTS.md: added
+
+4. Config
+   ~/.config/claude-note/config.toml: added [recall] and [sentinel]
+
+5. Hourly index refresh
+   skipped (--no-schedule): run `claude-note refresh` from your own scheduler
+
+Next: `claude-note doctor` proves the loop end to end.

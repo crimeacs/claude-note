@@ -1,4 +1,32 @@
-# Memory and vault modernization — 10 October 2026
+# Developments
+
+## 2.0 — recall before action (10 October 2026)
+
+1.x wrote knowledge down. Nothing put it back in front of an agent: the docs said prompt-time
+recall needed "a separate host integration". 2.0 ships that integration, ported from the recall
+hook that has run on every prompt of a working memory system since September 2026, and adds the
+pieces that make the loop provable.
+
+| Added | What it does | Evidence |
+| --- | --- | --- |
+| `hook recall` | Prompt-time recall for Claude Code and Codex: content-word ladder, pooled rungs, compound splitting, session skipping, newest-block snippets, memory slots, announced misses, wall-clock budget. | `recall.py`, `tests/test_recall.py`; real runs in [demo](demo.md) |
+| `hook sentinel` | Known fixes for failed shell commands; "do not retry" for auth, quota, disk-full; reads output only. | `sentinel.py`, tests |
+| `remember` | Typed lesson now, append-not-overwrite, reindexed in ~0.5 s. | `remember.py`, tests |
+| `setup` | One idempotent command: collections (vault + Claude Code memories), hooks, agent rule, hourly refresh. | `setup_recall.py`, tests |
+| `doctor` | Configured / exercised / in use; canary in a throwaway QMD index. | Found a real 8-hour refresh outage on its first run |
+| `refresh` | Text index then vectors, locked, bounded, heartbeat. | `setup_recall.py` |
+| `recall` | The hook's search by hand, `--json`, `--stats`. | `entry.py` |
+
+Corrections to 1.x documentation: the bundled hooks now *do* inject prior knowledge; Codex's
+`UserPromptSubmit` hook output *does* reach the model (Codex 0.162.1, after trust).
+
+Bugs found while building it, each now covered by a test: underscore and dotted tokens zeroed
+queries; exception class names outranked the words that mattered; a frontmatter-only snippet
+dropped a correct hit; QMD's own config lives in `~/.config` even when `XDG_CONFIG_HOME` is set;
+the doctor's probes were counted as real usage; and the earlier hand-written sentinel fired on
+`grep` output three times in one afternoon.
+
+## 1.6 — memory and vault modernization (10 October 2026)
 
 This update consolidates verified operating lessons from the wider Sweat AI memory system into the public Claude Note fork. It compares current code with local unpublished improvements and current memory/vault implementations, rather than treating old notes as current state. Private notes, customer records, credentials, and machine configuration are not part of this repository update.
 
@@ -42,7 +70,7 @@ These are documented design lessons. Claude Note does not bundle the external au
 
 ## Knowledge-loop demo
 
-[Remember. Then act.](knowledge-loop-demo.md) is a 112-second walkthrough for technical builders, with captions, a controlled retry example, and an inspectable media manifest. It shows recall, source verification, a tested change, capture, correction, and reindexing. The custom prompt-recall integration is labeled separately from bundled capture hooks.
+[Remember. Then act.](knowledge-loop-demo.md) (superseded by the [2.0 demo](demo.md)) was a 112-second walkthrough for technical builders, with captions, a controlled retry example, and an inspectable media manifest. It shows recall, source verification, a tested change, capture, correction, and reindexing. The custom prompt-recall integration is labeled separately from bundled capture hooks.
 
 The film and its receipts preserve the reviewed source snapshot from PR #8, including on-screen proposal labels. Repository merges do not change that historical evidence or update installed services. Install from the intended checkout and compare its recorded commit when verifying an update; the package version alone cannot identify the installed source revision.
 
@@ -50,4 +78,4 @@ The film and its receipts preserve the reviewed source snapshot from PR #8, incl
 
 The repository test suite uses synthetic transcripts, disposable vaults, mocked model/API calls, and fake installer executables. Local CLI help and the installed QMD keyword interface are checked separately. Repository validation does not exercise private accounts, upload personal notes, install this branch over a running service, or publish a release tag.
 
-The demo's offline recall probe checks context formatting with synthetic input and mocked retrieval; it does not test host delivery, retrieval quality, or latency. Its SQLite replay verifies one controlled retry boundary, not a production backend or customer outcome. The delivered MP4 passed full decode, playback review, and audio/video checks described in its [manifest](examples/knowledge-loop/media-manifest.json).
+The demo's offline recall probe checks context formatting with synthetic input and mocked retrieval; it does not test host delivery, retrieval quality, or latency. Its SQLite replay verifies one controlled retry boundary, not a production backend or customer outcome. The delivered MP4 passed full decode, playback review, and audio/video checks described in its manifest (retired in 2.0; see git history at `61d1415`).

@@ -1,0 +1,17 @@
+
+configured
+  ✓ qmd installed                                        ~/.bun/bin/qmd
+  ✓ collections indexed                                  notes, agentmem
+  ✓ Claude Code hooks                                    recall, sentinel, capture
+  ✓ Codex hooks                                          recall
+  ✓ index refreshed recently                             0.0 h ago
+
+exercised
+  ✓ recall hook injects a matching note                  2692 ms end to end
+  ✓ recall announces a miss instead of staying silent    miss notice present
+  ✓ sentinel surfaces the known fix for a failed command fix recalled
+  ✓ sentinel ignores error words in successful output    quiet
+
+in use
+  ✓ recall on real prompts, 7 days                       4 prompts, 2 with notes (50%), p50 1953 ms
+

@@ -1,0 +1,492 @@
+"""Wire the knowledge loop end to end, and prove it works.
+
+`claude-note setup` turns capture into a loop:
+
+* registers the vault (and, optionally, Claude Code's own per-project memories
+  and agent rule files) as QMD collections, so one index spans them;
+* installs the recall hook (UserPromptSubmit) and the failure sentinel
+  (PostToolUse / PostToolUseFailure on Bash) next to the capture hooks;
+* adds a short "recall before action" rule to the agent instruction files, so
+  agents also search deliberately when the automatic lookup misses;
+* schedules an hourly `claude-note refresh` (text index, then vectors) with a
+  lock, hard timeouts and a heartbeat.
+
+`claude-note doctor` separates *configured* from *working*: it plants a canary
+note in a throwaway QMD index, runs the real hook commands against it, and
+reports what an agent would have seen.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+from . import recall as recall_mod
+
+HOME = Path.home()
+SHARE = HOME / ".local" / "share" / "claude-note"
+HEARTBEAT = SHARE / "refresh.ok"
+REFRESH_LOG = SHARE / "refresh.log"
+LOCKDIR = SHARE / "refresh.lock"
+PLIST_LABEL = "com.claude-note.qmd-refresh"
+
+RULE_START = "<!-- claude-note:recall-rule:start -->"
+RULE_END = "<!-- claude-note:recall-rule:end -->"
+RULE_BODY = """## Recall before action (claude-note)
+
+Prior sessions are indexed. Use them.
+
+1. Before work that touches past work, an incident, a recurring error or a decision,
+   search first: `claude-note recall "<two or three content words>"`
+   (or `qmd vsearch "<question>"` when you do not know the vocabulary).
+2. A hit is a lead, not an answer. Open the note (`qmd get <uri>`), check that it
+   still applies to the code and data in front of you, then act.
+3. A miss is not evidence that nothing is known: keyword search is conjunctive.
+   Drop a word and search again before concluding.
+4. When you learn something durable, write it back the same session:
+   `claude-note remember --type gotcha|pattern|decision "<what, why, the fix>"`.
+5. Never retry a failed auth, quota or disk-full command unchanged; those fail
+   the same way every time."""
+
+
+# --------------------------------------------------------------------------- #
+# QMD collections
+# --------------------------------------------------------------------------- #
+
+
+def qmd_exe() -> Optional[str]:
+    return recall_mod.qmd_executable(recall_mod.Settings.load())
+
+
+def registered_collections(index: str = "") -> dict[str, Path]:
+    return recall_mod._collection_dirs(index)
+
+
+def add_collection(path: Path, name: str, mask: str, index: str = "", dry_run: bool = False) -> str:
+    exe = qmd_exe()
+    if not exe:
+        return "skipped (qmd not installed)"
+    existing = registered_collections(index)
+    for n, p in existing.items():
+        if p.expanduser().resolve() == path.expanduser().resolve():
+            return f"already indexed as '{n}'"
+    if name in existing:
+        return f"name '{name}' is taken by {existing[name]}; skipped"
+    if dry_run:
+        return "would add"
+    cmd = [exe] + (["--index", index] if index else []) + [
+        "collection", "add", str(path), "--name", name, "--mask", mask]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900, stdin=subprocess.DEVNULL)
+    return "added" if proc.returncode == 0 else f"failed: {(proc.stderr or proc.stdout).strip()[:200]}"
+
+
+# --------------------------------------------------------------------------- #
+# Hooks
+# --------------------------------------------------------------------------- #
+
+
+def _write_json(path: Path, data: dict) -> None:
+    if path.exists():
+        shutil.copy2(path, path.with_name(f"{path.name}.bak-{datetime.now():%Y%m%d-%H%M%S}"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    tmp.replace(path)
+
+
+def _has_command(groups: list, needle: str) -> bool:
+    return any(needle in h.get("command", "") for g in groups for h in g.get("hooks", []))
+
+
+def install_hooks(path: Path, exe: str, *, codex: bool = False, dry_run: bool = False) -> list[str]:
+    """Add recall (and, for Claude Code, the sentinel). Idempotent; backs up first."""
+    data = json.loads(path.read_text()) if path.exists() else {}
+    hooks = data.setdefault("hooks", {})
+    wanted = [("UserPromptSubmit", None, f"{exe} hook recall", 10,
+               "Notes vault: recall prior knowledge for this prompt")]
+    if not codex:
+        for event in ("PostToolUse", "PostToolUseFailure"):
+            wanted.append((event, "Bash", f"{exe} hook sentinel", 10,
+                           "Notes vault: look up known fixes for a failed command"))
+    added = []
+    for event, matcher, command, timeout, status in wanted:
+        groups = hooks.setdefault(event, [])
+        needle = command.split(" ", 1)[1]  # "hook recall" / "hook sentinel"
+        if _has_command(groups, needle):
+            continue
+        entry: dict = {"type": "command", "command": command, "timeout": timeout}
+        if codex:
+            entry["statusMessage"] = status
+        group: dict = {"hooks": [entry]}
+        if matcher:
+            group["matcher"] = matcher
+        groups.append(group)
+        added.append(f"{event}{f' [{matcher}]' if matcher else ''}: {needle}")
+    if added and not dry_run:
+        _write_json(path, data)
+    return added
+
+
+def hooks_status(path: Path) -> dict[str, bool]:
+    try:
+        hooks = json.loads(path.read_text()).get("hooks", {})
+    except (OSError, ValueError):
+        return {"recall": False, "sentinel": False, "capture": False}
+    flat = " ".join(h.get("command", "") for groups in hooks.values() for g in groups
+                    for h in g.get("hooks", []))
+    return {"recall": "hook recall" in flat, "sentinel": "hook sentinel" in flat,
+            "capture": "claude-note enqueue" in flat}
+
+
+# --------------------------------------------------------------------------- #
+# Agent instruction files
+# --------------------------------------------------------------------------- #
+
+
+def install_rule(path: Path, dry_run: bool = False) -> str:
+    text = path.read_text() if path.exists() else ""
+    block = f"{RULE_START}\n{RULE_BODY}\n{RULE_END}"
+    if RULE_START in text and RULE_END in text:
+        new = re.sub(re.escape(RULE_START) + r".*?" + re.escape(RULE_END), block, text, flags=re.S)
+        if new == text:
+            return "up to date"
+        verdict = "updated"
+    else:
+        new = (text.rstrip() + "\n\n" if text.strip() else "") + block + "\n"
+        verdict = "added"
+    if not dry_run:
+        if path.exists():
+            shutil.copy2(path, path.with_name(f"{path.name}.bak-{datetime.now():%Y%m%d-%H%M%S}"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(new)
+    return verdict if not dry_run else f"would be {verdict}"
+
+
+# --------------------------------------------------------------------------- #
+# Config
+# --------------------------------------------------------------------------- #
+
+
+def ensure_recall_config(memory_collections: list[str], dry_run: bool = False) -> str:
+    path = recall_mod._config_path()
+    text = path.read_text() if path.exists() else ""
+    if re.search(r"^\[recall\]", text, re.M):
+        return "has a [recall] section (left as is)"
+    lines = ["", "[recall]", "enabled = true",
+             "collections = []          # empty = every QMD collection",
+             f"memory_collections = {json.dumps(memory_collections)}",
+             "inject = 4", "timeout = 6", "", "[sentinel]", "enabled = true", ""]
+    if not dry_run:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a") as fh:
+            fh.write("\n".join(lines))
+    return "added [recall] and [sentinel]" if not dry_run else "would add [recall] and [sentinel]"
+
+
+# --------------------------------------------------------------------------- #
+# Hourly refresh
+# --------------------------------------------------------------------------- #
+
+
+def _log(line: str) -> None:
+    SHARE.mkdir(parents=True, exist_ok=True)
+    with open(REFRESH_LOG, "a") as fh:
+        fh.write(f"{datetime.now():%Y-%m-%dT%H:%M:%S} {line}\n")
+
+
+def refresh(embed: bool = True, update_timeout: int = 900, embed_timeout: int = 3000) -> int:
+    """`qmd update` then `qmd embed`, once at a time, bounded, with a heartbeat.
+
+    A bare `qmd update` indexes text but never embeds: semantic search quietly dies
+    while keyword search looks fine. Each stage is reported separately.
+    """
+    exe = qmd_exe()
+    if not exe:
+        _log("FAIL qmd not installed")
+        return 1
+    SHARE.mkdir(parents=True, exist_ok=True)
+    try:
+        LOCKDIR.mkdir()
+    except FileExistsError:
+        if time.time() - LOCKDIR.stat().st_mtime < 90 * 60:
+            _log("SKIP another refresh is running")
+            return 0
+        _log("WARN clearing stale lock")
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "CI": "1"}
+    index = recall_mod.Settings.load().index
+    base = [exe] + (["--index", index] if index else [])
+    started = time.monotonic()
+    try:
+        for stage, timeout in (("update", update_timeout), ("embed", embed_timeout)):
+            if stage == "embed" and not embed:
+                continue
+            try:
+                proc = subprocess.run(base + [stage], capture_output=True, text=True,
+                                      timeout=timeout, stdin=subprocess.DEVNULL, env=env)
+            except subprocess.TimeoutExpired:
+                _log(f"FAIL qmd {stage} timed out after {timeout}s")
+                return 1
+            if proc.returncode != 0:
+                _log(f"FAIL qmd {stage} rc={proc.returncode}"
+                     + (" (text index is current, vectors are stale)" if stage == "embed" else ""))
+                return 1
+        HEARTBEAT.write_text(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n")
+        _log(f"OK {'update+embed' if embed else 'update'} in {time.monotonic() - started:.0f}s")
+        return 0
+    finally:
+        try:
+            LOCKDIR.rmdir()
+        except OSError:
+            pass
+
+
+def existing_refresh_job() -> Optional[Path]:
+    """Another hourly qmd job already installed (ours or hand-made)."""
+    agents = HOME / "Library" / "LaunchAgents"
+    if not agents.is_dir():
+        return None
+    for p in agents.glob("*.plist"):
+        if p.name == f"{PLIST_LABEL}.plist":
+            continue
+        try:
+            text = p.read_text(errors="ignore")
+        except OSError:
+            continue
+        if "qmd" in text and ("refresh" in text or "update" in text) and "claude-note.worker" not in text:
+            return p
+    return None
+
+
+def install_refresh_agent(exe: str, dry_run: bool = False) -> str:
+    if sys.platform != "darwin":
+        return ("not macOS: schedule `claude-note refresh` hourly with cron or a systemd timer")
+    other = existing_refresh_job()
+    if other:
+        return f"skipped: {other.name} already refreshes QMD"
+    plist = HOME / "Library" / "LaunchAgents" / f"{PLIST_LABEL}.plist"
+    body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>{PLIST_LABEL}</string>
+  <key>ProgramArguments</key><array><string>{exe}</string><string>refresh</string></array>
+  <key>StartInterval</key><integer>3600</integer>
+  <key>RunAtLoad</key><true/>
+  <key>LowPriorityIO</key><true/>
+  <key>Nice</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/dev/null</string>
+  <key>StandardErrorPath</key><string>{SHARE}/refresh.err</string>
+</dict></plist>
+"""
+    if dry_run:
+        return f"would install {plist.name}"
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    plist.write_text(body)
+    uid = os.getuid()
+    subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist)], capture_output=True, timeout=30)
+    subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist)], capture_output=True, timeout=30)
+    return f"installed {plist.name} (hourly)"
+
+
+# --------------------------------------------------------------------------- #
+# setup command
+# --------------------------------------------------------------------------- #
+
+
+def cmd_setup(args) -> int:
+    exe = shutil.which("claude-note") or str(HOME / ".local" / "bin" / "claude-note")
+    dry = args.dry_run
+    print("claude-note setup" + ("  (dry run: nothing is written)" if dry else ""))
+
+    print("\n1. One index across your knowledge")
+    try:
+        from . import config
+        vault = config.VAULT_ROOT
+    except SystemExit:
+        print("   no vault configured; run the installer first")
+        return 1
+    print(f"   vault {vault}: {add_collection(vault, args.vault_name, '**/*.md', dry_run=dry)}")
+    memory_collections: list[str] = []
+    if not args.no_claude_memory:
+        projects = HOME / ".claude" / "projects"
+        if projects.is_dir():
+            verdict = add_collection(projects, "agentmem", "**/memory/*.md", dry_run=dry)
+            print(f"   Claude Code memories {projects}: {verdict}")
+            name = next((n for n, p in registered_collections().items() if p.resolve() == projects.resolve()), "agentmem")
+            memory_collections.append(name)
+    for extra in args.add or []:
+        p = Path(extra).expanduser()
+        print(f"   {p}: {add_collection(p, slugify_name(p), '**/*.md', dry_run=dry)}")
+
+    print("\n2. Recall and sentinel hooks")
+    claude_settings = Path(args.claude_settings).expanduser()
+    added = install_hooks(claude_settings, exe, dry_run=dry)
+    print(f"   Claude Code ({claude_settings}): " + (", ".join(added) if added else "already installed"))
+    if args.codex:
+        codex_hooks = Path(args.codex_hooks).expanduser()
+        added = install_hooks(codex_hooks, exe, codex=True, dry_run=dry)
+        print(f"   Codex ({codex_hooks}): " + (", ".join(added) if added else "already installed"))
+        print("   Codex runs new hooks only after you trust them (`codex`, accept the prompt).")
+
+    print("\n3. Recall rule in agent instructions")
+    if not args.no_rules:
+        print(f"   ~/.claude/CLAUDE.md: {install_rule(HOME / '.claude' / 'CLAUDE.md', dry)}")
+        if args.codex:
+            print(f"   ~/.codex/AGENTS.md: {install_rule(HOME / '.codex' / 'AGENTS.md', dry)}")
+    else:
+        print("   skipped (--no-rules)")
+
+    print("\n4. Config")
+    print(f"   {recall_mod._config_path()}: {ensure_recall_config(memory_collections, dry)}")
+
+    print("\n5. Hourly index refresh")
+    if args.no_schedule:
+        print("   skipped (--no-schedule): run `claude-note refresh` from your own scheduler")
+    else:
+        print(f"   {install_refresh_agent(exe, dry)}")
+
+    print("\nNext: `claude-note doctor` proves the loop end to end.")
+    return 0
+
+
+def slugify_name(path: Path) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", path.name.lower()).strip("-") or "notes"
+
+
+# --------------------------------------------------------------------------- #
+# doctor
+# --------------------------------------------------------------------------- #
+
+CANARY = """---
+title: "Doctor canary: retried payments double-charge"
+type: gotcha
+---
+# Doctor canary: retried payments double-charge
+
+Customers were charged twice when a payment request was retried after a timeout:
+the client minted a new idempotency key on every attempt, so the server saw two
+payments. Mint the key once per payment and reuse it on every retry.
+"""
+
+
+def _hook(exe: list[str], which: str, payload: dict, env: dict) -> str:
+    proc = subprocess.run(exe + ["hook", which], input=json.dumps(payload), capture_output=True,
+                          text=True, timeout=30, env=env)
+    try:
+        return json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+    except (ValueError, KeyError, TypeError):
+        return ""
+
+
+def probe_loop(exe: list[str]) -> list[tuple[str, bool, str]]:
+    """Run the real hook commands against a throwaway index holding one canary."""
+    q = qmd_exe()
+    if not q:
+        return [("qmd installed", False, "install https://github.com/tobi/qmd")]
+    index = f"claude-note-doctor-{os.getpid()}"
+    tmp = Path(tempfile.mkdtemp(prefix="claude-note-doctor-"))
+    checks: list[tuple[str, bool, str]] = []
+    try:
+        vault = tmp / "vault"
+        vault.mkdir()
+        (vault / "doctor-canary.md").write_text(CANARY)
+        subprocess.run([q, "--index", index, "collection", "add", str(vault), "--name", "canary",
+                        "--mask", "**/*.md"], capture_output=True, text=True, timeout=120,
+                       stdin=subprocess.DEVNULL)
+        env = {**os.environ, "CLAUDE_NOTE_RECALL_INDEX": index, "CLAUDE_NOTE_RECALL": "on",
+               "CLAUDE_NOTE_RECALL_LOG": "0",
+               "HOME": str(HOME)}
+        t0 = time.monotonic()
+        ctx = _hook(exe, "recall", {"hook_event_name": "UserPromptSubmit", "prompt":
+                    "Why are customers charged twice when a payment request is retried?", "cwd": str(tmp)}, env)
+        ms = (time.monotonic() - t0) * 1000
+        checks.append(("recall hook injects a matching note", "Doctor canary" in ctx,
+                       f"{ms:.0f} ms end to end" if ctx else "no additionalContext returned"))
+        ctx = _hook(exe, "recall", {"hook_event_name": "UserPromptSubmit",
+                    "prompt": "Configure the zeppelin hangar lighting schedule", "cwd": str(tmp)}, env)
+        checks.append(("recall announces a miss instead of staying silent",
+                       "found nothing" in ctx, "miss notice present" if ctx else "silent on a miss"))
+        payload = {"hook_event_name": "PostToolUseFailure", "tool_name": "Bash",
+                   "session_id": f"doctor-{os.getpid()}-{time.time()}",
+                   "tool_input": {"command": "python pay.py --retry"},
+                   "error": "Exit code 1\nAssertionError: customer charged twice after payment retry"}
+        ctx = _hook(exe, "sentinel", payload, env)
+        checks.append(("sentinel surfaces the known fix for a failed command",
+                       "Doctor canary" in ctx, "fix recalled" if ctx else "nothing surfaced"))
+        quiet = {"hook_event_name": "PostToolUse", "tool_name": "Bash", "session_id": payload["session_id"] + "q",
+                 "tool_input": {"command": "grep -n 'invalid_grant|401' sentinel.py"},
+                 "tool_response": {"stdout": "41: invalid_grant|401 Unauthorized", "stderr": ""}}
+        ctx = _hook(exe, "sentinel", quiet, env)
+        checks.append(("sentinel ignores error words in successful output", ctx == "",
+                       "quiet" if not ctx else "fired on a grep"))
+    finally:
+        cache = Path(os.environ.get("XDG_CACHE_HOME", str(HOME / ".cache"))) / "qmd"
+        for p in cache.glob(f"{index}.sqlite*"):
+            p.unlink(missing_ok=True)
+        cfg = Path(os.environ.get("XDG_CONFIG_HOME", str(HOME / ".config"))) / "qmd" / f"{index}.yml"
+        cfg.unlink(missing_ok=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+    return checks
+
+
+def cmd_doctor(args) -> int:
+    exe = [sys.executable, "-m", "claude_note"]
+    rows: list[tuple[str, str, bool, str]] = []
+
+    q = qmd_exe()
+    rows.append(("configured", "qmd installed", bool(q), q or "missing"))
+    cols = registered_collections()
+    rows.append(("configured", "collections indexed", bool(cols), ", ".join(cols) or "none"))
+    for label, path in (("Claude Code", Path(args.claude_settings).expanduser()),
+                        ("Codex", Path(args.codex_hooks).expanduser())):
+        if not path.exists():
+            continue
+        st = hooks_status(path)
+        parts = [k for k, v in st.items() if v]
+        ok = st["recall"] and (st["sentinel"] or label == "Codex")
+        rows.append(("configured", f"{label} hooks", ok, ", ".join(parts) or "none"))
+    age = None
+    for hb in (HEARTBEAT, Path("/var/tmp/heartbeats/qmd-refresh.ok")):
+        if hb.exists():
+            age = (time.time() - hb.stat().st_mtime) / 3600
+            break
+    rows.append(("configured", "index refreshed recently", age is not None and age < 3,
+                 f"{age:.1f} h ago" if age is not None else "no refresh heartbeat"))
+
+    if not args.skip_probe:
+        for name, ok, detail in probe_loop(exe):
+            rows.append(("exercised", name, ok, detail))
+
+    st = recall_mod.stats(7)
+    prompts = st["by_kind"].get("prompt", {})
+    total = sum(prompts.values())
+    if total:
+        hit = prompts.get("hit", 0)
+        rows.append(("in use", "recall on real prompts, 7 days", True,
+                     f"{total} prompts, {hit} with notes ({100 * hit / total:.0f}%), p50 {st['p50_ms']} ms"))
+        fail = st["by_kind"].get("failure", {})
+        if fail:
+            rows.append(("in use", "failures with a known fix, 7 days", True,
+                         f"{sum(fail.values())} surfaced"))
+    else:
+        rows.append(("in use", "recall on real prompts, 7 days", False, "no recall activity logged yet"))
+
+    if args.json:
+        print(json.dumps([{"stage": s, "check": n, "ok": ok, "detail": d} for s, n, ok, d in rows], indent=2))
+    else:
+        stage = None
+        for s, name, ok, detail in rows:
+            if s != stage:
+                print(f"\n{s}")
+                stage = s
+            print(f"  {'✓' if ok else '✗'} {name:<52} {detail}")
+        print()
+    return 0 if all(ok for s, _, ok, _ in rows if s != "in use") else 1

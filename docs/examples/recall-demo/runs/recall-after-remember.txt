@@ -1,0 +1,9 @@
+2 note(s) in 1108 ms  (query: new notes found recall)
+
+1. A full disk silently stops the index refresh [gotcha]
+   ~/notes/a-full-disk-silently-stops-the-index-refresh.md
+   **Why:** Recall only finds what the index has seen; hours of new notes were invisible.
+
+2. Keyword search is conjunctive: one rare word zeroes the query [gotcha]
+   ~/notes/qmd-keyword-search-is-conjunctive.md
+   Keyword search is conjunctive: one rare word zeroes the query

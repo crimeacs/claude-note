@@ -15,7 +15,16 @@ Python 3.11+ and uv are required. `--install-uv` explicitly permits fetching uv.
 2. Run `claude-note status --json`. It reports configuration and operational problems even before setup; exit 1 means inspect its `problems` list.
 3. Start a short assistant session that establishes one useful synthetic lesson. End the turn and wait for processing. Check the event queue, session note and curated output separately.
 4. Inspect `{vault}/.claude-note/logs/worker-*.log`. A session note proves capture, not necessarily successful synthesis.
-5. Enable [QMD](qmd-integration.md) with an explicit collection for this vault if you want source context.
+5. Install [QMD](https://github.com/tobi/qmd), then close the loop:
+
+   ```bash
+   claude-note setup --codex    # index, recall + sentinel hooks, recall rule, hourly refresh
+   claude-note doctor           # every "configured" and "exercised" line should be ✓
+   ```
+
+6. Ask your agent about something a note covers. Its context now starts with the note; it should
+   open the file and say where its answer came from. `claude-note recall --stats` shows the hook's
+   hit rate after a few days. See [recall](recall.md).
 
 For Codex hosts that support hooks, run `claude-note install-codex-hooks` and trust the hook file in the host. Presence of `~/.codex/hooks.json` does not prove delivery. The recovery sweep can pick up missed rollouts. Cursor import and supported exported conversations use the same worker pipeline; see [commands](commands.md).
 
@@ -33,6 +42,7 @@ Update from the same checkout:
 cd ~/src/claude-note
 git pull --ff-only
 scripts/install-from-checkout.sh --claude-hooks --codex-hooks
+claude-note setup --codex && claude-note doctor
 ```
 
 Do not use a temporary checkout or an unrelated fork to update an existing install. Source-managed `claude-note update` explains the recorded source instead of replacing it.

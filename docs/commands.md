@@ -4,6 +4,12 @@ The executable is `claude-note`. `python3 -m claude_note` uses the same entry po
 
 | Command | Supported options / behavior |
 | --- | --- |
+| `setup` | Index the vault and agent memories, install recall + sentinel hooks, add the recall rule to `CLAUDE.md`/`AGENTS.md`, schedule hourly refresh. `--codex`, `--dry-run`, `--no-claude-memory`, `--no-rules`, `--no-schedule`, `--add DIR`. |
+| `doctor` | Configured / exercised / in use. Plants a canary in a throwaway QMD index and runs the real hooks. `--json`, `--skip-probe`. Exit 1 if a configured or exercised check fails. |
+| `recall QUERY` | The recall hook's search, by hand. `-n N`, `-c COLLECTION` (repeatable), `--json`; `--stats [--days N]` for hook hit rate and latency. Exit 1 on a miss. |
+| `remember TEXT` | Write a typed lesson and reindex. `--type gotcha|pattern|decision|reference|feedback|project`, `--title`, `--tags a,b`, `--why`, `--how`, `--folder`, `--no-index`; `-` reads stdin. Appends to an existing note. |
+| `refresh` | `qmd update` then `qmd embed`, locked, bounded, with a heartbeat. `--no-embed`. |
+| `hook recall` / `hook sentinel` | Hook handlers; read the host's JSON on stdin and print `additionalContext`. |
 | `status` | Human-readable queue/index view. `--json` provides bounded local health and works before configuration; exit 1 on problems. |
 | `enqueue` | Reads the host's event JSON from stdin. No positional event or session arguments. |
 | `worker` | `--foreground`, `--verbose`; background event processing and periodic import sweep. |

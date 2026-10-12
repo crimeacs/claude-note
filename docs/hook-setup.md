@@ -1,6 +1,6 @@
 # Hook setup and verification
 
-The bundled hooks capture events for later processing. They do not search knowledge or inject recall into an assistant's prompt.
+Claude Note installs two kinds of hooks. **Capture** hooks (`claude-note enqueue`) queue events for the worker. **Recall** hooks (`claude-note hook recall`, `claude-note hook sentinel`) search your notes and hand the agent prior knowledge before it acts. `claude-note setup` installs both; the commands below install capture only.
 
 Use the idempotent installers instead of replacing the host's settings:
 
@@ -31,10 +31,23 @@ The enqueue interface reads host JSON on stdin; it has no positional `test` or `
 
 Cursor uses a read-only local database importer. Claude desktop/web and ChatGPT web use explicit conversation exports. Those are separate adapters, not hooks into their accounts.
 
-## Recall before answering
+## Recall and sentinel hooks
 
-A separate Claude Code `UserPromptSubmit` integration can return source-linked leads in `hookSpecificOutput.additionalContext`. That is a custom host integration, not the `claude-note enqueue` hook installed here. It should tell the assistant to open full sources, verify current applicability, search further after a miss, and record durable corrections. Context injection does not enforce those actions or prove that recall runs for every prompt.
+`claude-note setup` adds these, idempotently and with a backup:
 
-For Codex, the bundled hooks enqueue capture events. Use explicit search and source-reading instructions for recall unless a separate recall integration has been installed and exercised in that host. Verify capture and recall independently.
+| Host | Event | Matcher | Command | Timeout |
+| --- | --- | --- | --- | --- |
+| Claude Code | `UserPromptSubmit` | | `claude-note hook recall` | 10 s |
+| Claude Code | `PostToolUse`, `PostToolUseFailure` | `Bash` | `claude-note hook sentinel` | 10 s |
+| Codex | `UserPromptSubmit` | | `claude-note hook recall` | 10 s |
 
-The [demo and operating rule](knowledge-loop-demo.md) show this separation. Its custom-Claude recall receipt uses mocked retrieval and synthetic input; it does not establish real assistant-event delivery, retrieval quality, or latency.
+Both print `hookSpecificOutput.additionalContext`, which Claude Code 2.1.296 and Codex 0.162.1 add
+to the model's context (verified by recording what each model then said). Both fail open: a
+missing QMD, a locked index or a timeout returns normally with nothing worse than a miss notice.
+They are answered before the rest of the CLI is imported, so they work, and stay fast, even on a
+machine with no vault configured.
+
+Verify with `claude-note doctor`: it runs these exact commands against a canary note in a
+throwaway index. Context injection is advice, not enforcement; the recall rule that `setup` adds to
+`CLAUDE.md` / `AGENTS.md` tells the agent to open the note, check it still applies, and search
+again after a miss. See [recall](recall.md).
