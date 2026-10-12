@@ -198,7 +198,7 @@ def run_retrieval(cases: list[Case], settings: Optional[recall_mod.Settings] = N
                          "single_term_fallback": settings.single_term_fallback,
                          "engine": settings.engine, "vector": settings.vector, "vector_weight": settings.vector_weight,
                          "vector_gate": settings.vector_gate, "rerank": settings.rerank,
-                         "rerank": bool(settings.rerank_command)},
+                         "rerank_command": bool(settings.rerank_command)},
             "metrics": groups, "rows": rows}
 
 

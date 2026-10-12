@@ -141,6 +141,9 @@ chosen on the dev half; the test half was looked at once, at the end.
 | Off-topic questions that got notes | not measured | 1 of 15 | 1 of 15 |
 | Latency p50 / p95 | not measured / 11 s | 0.36 s / 1.3 s | 3.3 s / 5.3 s |
 
+A repeat run of the default setting gave 81% right note injected and 58% first on test: expect a few
+points of run-to-run variation (reranker, timing).
+
 What changed, and how each choice was made:
 
 - **Clean index.** QMD 2.8.3 would not adopt 1.0's vectors (no fingerprint), and 87% of the 370k

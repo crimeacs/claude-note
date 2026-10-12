@@ -35,8 +35,11 @@ def _fmt(v, kind):
 def render(runs: list[dict], last: Optional[dict], live: Optional[dict], answers: Optional[dict],
            tips: list[dict]) -> str:
     # Only runs on the same question set are comparable: plot the latest run's set.
-    current_set = (last or {}).get("set")
-    retrieval = [r for r in runs if r.get("kind") == "retrieval" and (not current_set or r.get("set") == current_set)]
+    # Only runs on the same question set AND the same settings are comparable: a settings change
+    # is an experiment, not a trend. Plot the latest run's set and settings.
+    current_set, current_cfg = (last or {}).get("set"), (last or {}).get("settings")
+    retrieval = [r for r in runs if r.get("kind") == "retrieval" and (not current_set or r.get("set") == current_set)
+                 and (not current_cfg or r.get("settings") == current_cfg)]
     series = {}
     for key, label, group, kind, better, help_ in METRICS:
         pts = []
