@@ -684,7 +684,8 @@ def main() -> int:
     for name, text in (("recall", "Search prior knowledge the way the recall hook does"),
                        ("doctor", "Prove the knowledge loop works end to end"),
                        ("refresh", "Refresh the QMD index (text, then vectors) with a heartbeat"),
-                       ("hook", "Hook handlers: `hook recall`, `hook sentinel`")):
+                       ("hook", "Hook handlers: `hook recall`, `hook sentinel`"),
+                       ("eval", "Measure recall: labelled runs, live signals, answer A/B, dashboard")):
         subparsers.add_parser(name, help=text, add_help=False)
 
     # ingest command

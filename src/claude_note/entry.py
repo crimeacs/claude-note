@@ -10,7 +10,7 @@ import argparse
 import sys
 
 
-def _knowledge_parser() -> argparse.ArgumentParser:
+def _knowledge_parser(with_eval: bool = False) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="claude-note")
     sub = p.add_subparsers(dest="command")
 
@@ -33,14 +33,18 @@ def _knowledge_parser() -> argparse.ArgumentParser:
     d.add_argument("--skip-probe", action="store_true", help="Configuration checks only")
     d.add_argument("--claude-settings", default="~/.claude/settings.json")
     d.add_argument("--codex-hooks", default="~/.codex/hooks.json")
+
+    if with_eval:  # only for `eval`: the hooks run on every prompt and must not pay for it
+        from .evals_cli import add_parser as add_eval_parser
+        add_eval_parser(sub)
     return p
 
 
-KNOWLEDGE_COMMANDS = {"hook", "recall", "refresh", "doctor"}
+KNOWLEDGE_COMMANDS = {"hook", "recall", "refresh", "doctor", "eval"}
 
 
 def _knowledge_main(argv: list) -> int:
-    args = _knowledge_parser().parse_args(argv)
+    args = _knowledge_parser(with_eval=argv[:1] == ["eval"]).parse_args(argv)
     if args.command == "hook":
         if args.which == "recall":
             from .recall import hook_main
@@ -71,6 +75,9 @@ def _knowledge_main(argv: list) -> int:
             recall.log_event("manual", result)
         print(json.dumps(result.to_dict(), indent=2) if args.json else recall.format_terminal(result))
         return 0 if result.status == "hit" else 1
+    if args.command == "eval":
+        from .evals_cli import main as eval_main
+        return eval_main(args)
     if args.command == "refresh":
         from .setup_recall import refresh
         return refresh(embed=not args.no_embed)

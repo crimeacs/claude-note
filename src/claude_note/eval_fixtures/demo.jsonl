@@ -1,0 +1,27 @@
+# Hand-written labels for docs/examples/recall-demo/vault (index it as collection "notes").
+# Two questions per note: one in the asker's likely words, one worded unlike the note. Off-topic
+# questions (expect []) must not inject anything. Split is fixed so dev and test never share a note.
+{"id": "build-1", "question": "Can I just run npm run build on the 4 GB box?", "expect": ["never-build-on-a-small-box"], "split": "dev"}
+{"id": "build-2", "question": "The production server keeps dying with heap out of memory whenever we compile the Next app there", "expect": ["never-build-on-a-small-box"], "split": "dev"}
+{"id": "oauth-1", "question": "Gmail calls fail with 403 since I added the Calendar scope", "expect": ["google-oauth-new-scope-needs-reconsent"], "split": "test"}
+{"id": "oauth-2", "question": "We asked Google for an extra permission but the old login token still cannot read calendars", "expect": ["google-oauth-new-scope-needs-reconsent"], "split": "test"}
+{"id": "env-1", "question": "Why does my NEXT_PUBLIC_API_URL still show the old value after I changed it on the server?", "expect": ["public-env-vars-are-baked-at-build"], "split": "dev"}
+{"id": "env-2", "question": "Edited the environment file on the box and restarted, the browser still talks to the old API", "expect": ["public-env-vars-are-baked-at-build"], "split": "dev"}
+{"id": "timeout-1", "question": "My urlopen call has timeout=10 but it hung for an hour", "expect": ["socket-timeout-is-not-a-deadline"], "split": "test"}
+{"id": "timeout-2", "question": "A slow server trickles bytes and our HTTP client never gives up even with a timeout set", "expect": ["socket-timeout-is-not-a-deadline"], "split": "test"}
+{"id": "credits-1", "question": "Anthropic says credit balance is too low halfway through a batch, should I retry?", "expect": ["anthropic-credits-exhausted"], "split": "dev"}
+{"id": "credits-2", "question": "The bulk summarisation job ran out of API money, what do we do with the remaining items?", "expect": ["anthropic-credits-exhausted"], "split": "dev"}
+{"id": "idem-1", "question": "Where should the idempotency key be generated so retries do not charge twice?", "expect": ["idempotency-key-once-per-operation"], "split": "test"}
+{"id": "idem-2", "question": "How do we handle duplicate payments when a webhook fires twice?", "expect": ["idempotency-key-once-per-operation"], "split": "test"}
+{"id": "tcc-1", "question": "Screen recording permission is granted but capture still fails after I rebuilt the Swift tool", "expect": ["macos-screen-recording-permission"], "split": "dev"}
+{"id": "tcc-2", "question": "macOS keeps denying our recorder even though the toggle in System Settings is on", "expect": ["macos-screen-recording-permission"], "split": "dev"}
+{"id": "memory-1", "question": "Claude Code seems to ignore the newest entries in MEMORY.md", "expect": ["memory-cap-claude-code"], "split": "test"}
+{"id": "memory-2", "question": "The agent forgets things we wrote at the bottom of its project memory file", "expect": ["memory-cap-claude-code"], "split": "test"}
+{"id": "bm25-1", "question": "Keyword search returns nothing for a long question but finds notes for a short one", "expect": ["qmd-keyword-search-is-conjunctive"], "split": "dev"}
+{"id": "bm25-2", "question": "Why does adding one more word to my search make every result disappear?", "expect": ["qmd-keyword-search-is-conjunctive"], "split": "dev"}
+{"id": "miss-1", "question": "Should the recall hook print something when it finds no notes?", "expect": ["recall-misses-must-be-announced"], "split": "test"}
+{"id": "miss-2", "question": "The memory lookup stayed silent and the agent assumed we knew nothing about it", "expect": ["recall-misses-must-be-announced"], "split": "test"}
+{"id": "off-1", "question": "How do I center a div horizontally and vertically with flexbox?", "expect": [], "split": "test"}
+{"id": "off-2", "question": "What is a good recipe for a sourdough starter at home?", "expect": [], "split": "test"}
+{"id": "off-3", "question": "Explain the difference between a list and a tuple in Python", "expect": [], "split": "dev"}
+{"id": "off-4", "question": "Which time zone does Tokyo use during the summer months?", "expect": [], "split": "dev"}

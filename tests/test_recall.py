@@ -16,7 +16,8 @@ from claude_note import recall, remember, sentinel, setup_recall
 
 def settings(**kw):
     s = recall.Settings()
-    s.qmd = "/bin/echo"  # executable; runner is mocked
+    s.qmd = "/bin/echo"
+    s.engine = "cli"  # never reach a real daemon from a unit test  # executable; runner is mocked
     s.log = False
     for k, v in kw.items():
         setattr(s, k, v)
@@ -285,3 +286,55 @@ class SetupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ServerEngineTests(unittest.TestCase):
+    """The warm recall server: keyword rungs + meaning, fused here, gated, reranked."""
+
+    def lists(self):
+        body = "A note body long enough to count as a real snippet for recall to inject."
+        lex = [[{"file": "qmd://notes/a.md", "title": "A", "score": 0.9, "snippet": body}, {"file": "qmd://notes/b.md", "title": "B", "score": 0.5, "snippet": body}]]
+        vec = [{"file": "qmd://notes/b.md", "title": "B", "score": 0.62, "snippet": body}, {"file": "qmd://foresyn/inbox/x/b-copy.md", "title": "B", "score": 0.6, "snippet": body},
+               {"file": "qmd://notes/c.md", "title": "C", "score": 0.55, "snippet": body}]
+        return lex, vec
+
+    def test_fusion_weights_meaning_and_merges_pushed_copies(self):
+        lex, vec = self.lists()
+        fused, best = recall.fuse(lex, vec, settings(vector_weight=3.0))
+        self.assertEqual([h["file"] for h in fused], ["qmd://notes/b.md", "qmd://notes/c.md", "qmd://notes/a.md"])
+        self.assertAlmostEqual(best, 0.62)
+
+    def test_gate_injects_nothing_for_far_questions(self):
+        lex, vec = self.lists()
+        vec = [{**h, "score": 0.2} for h in vec]
+        with mock.patch.object(recall, "server_post", return_value={"lex": lex, "vec": vec}):
+            res = recall.recall("How do I keep basil alive on a windowsill in winter?", settings(engine="server", rerank=False))
+        self.assertEqual(res.status, "miss")
+        self.assertIn("close enough in meaning", res.reason)
+
+    def test_rerank_orders_the_injected_notes(self):
+        lex, vec = self.lists()
+
+        def post(s_, path, body, deadline):
+            if path == "/search":
+                return {"lex": lex, "vec": vec}
+            return {"scores": {"qmd://notes/a.md": 0.9, "qmd://notes/b.md": 0.1, "qmd://notes/c.md": 0.5}}
+        with mock.patch.object(recall, "server_post", side_effect=post), \
+                mock.patch.object(recall, "local_path", return_value=None):
+            res = recall.recall("Can I just run npm run build on the 4 GB box?", settings(engine="server"))
+        self.assertTrue(res.reranked)
+        self.assertEqual(res.engine, "server")
+        self.assertEqual(res.candidates[:3], ["qmd://notes/a.md", "qmd://notes/c.md", "qmd://notes/b.md"])
+
+    def test_auto_falls_back_to_the_cli_ladder(self):
+        calls = []
+        with mock.patch.object(recall, "server_post", return_value=None):
+            res = recall.recall("Can I just run npm run build on the 4 GB box?", settings(engine="auto"),
+                                runner=lambda c, t: calls.append(c) or [item("qmd://notes/a.md", "A")])
+        self.assertTrue(calls)
+        self.assertEqual(res.engine, "cli")
+
+    def test_server_only_reports_unavailable(self):
+        with mock.patch.object(recall, "server_post", return_value=None):
+            res = recall.recall("Can I just run npm run build on the 4 GB box?", settings(engine="server"))
+        self.assertEqual(res.status, "unavailable")

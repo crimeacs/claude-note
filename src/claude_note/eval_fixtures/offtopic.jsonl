@@ -1,0 +1,32 @@
+# Off-topic questions for a personal or company vault: none should get notes injected.
+# Merge with a probe set (`eval run --negatives`) to measure junk injection; split fixed by row parity.
+{"id": "neg-00", "question": "What is the best way to keep basil alive on a windowsill through winter?", "expect": [], "split": "test", "source": "offtopic"}
+{"id": "neg-01", "question": "How long should I rest a steak after grilling it to medium rare?", "expect": [], "split": "dev", "source": "offtopic"}
+{"id": "neg-02", "question": "Which chess opening is better for beginners, the Italian Game or the London System?", "expect": [], "split": "test", "source": "offtopic"}
+{"id": "neg-03", "question": "How do I get rid of aphids on rose bushes without killing the bees?", "expect": [], "split": "dev", "source": "offtopic"}
+{"id": "neg-04", "question": "What causes the northern lights and when is the best time to see them in Iceland?", "expect": [], "split": "test", "source": "offtopic"}
+{"id": "neg-05", "question": "How often should I change the oil in a 2015 Honda Civic?", "expect": [], "split": "dev", "source": "offtopic"}
+{"id": "neg-06", "question": "What is a good beginner knitting pattern for a scarf with chunky yarn?", "expect": [], "split": "test", "source": "offtopic"}
+{"id": "neg-07", "question": "Which wine pairs best with spicy Thai green curry?", "expect": [], "split": "dev", "source": "offtopic"}
+{"id": "neg-08", "question": "How do I teach my dog to stop pulling on the leash during walks?", "expect": [], "split": "test", "source": "offtopic"}
+{"id": "neg-09", "question": "What is the difference between a crocodile and an alligator?", "expect": [], "split": "dev", "source": "offtopic"}
+{"id": "neg-10", "question": "How do I fix a dripping bathroom faucet with a compression valve?", "expect": [], "split": "test", "source": "offtopic"}
+{"id": "neg-11", "question": "What should I pack for a week of hiking in the Scottish Highlands in May?", "expect": [], "split": "dev", "source": "offtopic"}
+{"id": "neg-12", "question": "How do sourdough starters get their sour flavour?", "expect": [], "split": "test", "source": "offtopic"}
+{"id": "neg-13", "question": "Who won the most Tour de France titles in history?", "expect": [], "split": "dev", "source": "offtopic"}
+{"id": "neg-14", "question": "How do I repot an orchid whose roots are growing out of the pot?", "expect": [], "split": "test", "source": "offtopic"}
+{"id": "neg-15", "question": "What are the rules of pickleball scoring for doubles?", "expect": [], "split": "dev", "source": "offtopic"}
+{"id": "neg-16", "question": "How do I remove a red wine stain from a wool carpet?", "expect": [], "split": "test", "source": "offtopic"}
+{"id": "neg-17", "question": "Which constellations are visible from the southern hemisphere in July?", "expect": [], "split": "dev", "source": "offtopic"}
+{"id": "neg-18", "question": "How many hours of sleep does a teenager need each night?", "expect": [], "split": "test", "source": "offtopic"}
+{"id": "neg-19", "question": "What is the best way to store fresh strawberries so they last longer?", "expect": [], "split": "dev", "source": "offtopic"}
+{"id": "neg-20", "question": "How do I tune a ukulele by ear without a tuner?", "expect": [], "split": "test", "source": "offtopic"}
+{"id": "neg-21", "question": "What are good stretches for lower back pain after long drives?", "expect": [], "split": "dev", "source": "offtopic"}
+{"id": "neg-22", "question": "How do hummingbirds hover in place?", "expect": [], "split": "test", "source": "offtopic"}
+{"id": "neg-23", "question": "What is the safest way to thaw a frozen turkey before Thanksgiving?", "expect": [], "split": "dev", "source": "offtopic"}
+{"id": "neg-24", "question": "Which houseplants are safe for cats?", "expect": [], "split": "test", "source": "offtopic"}
+{"id": "neg-25", "question": "How do I choose the right size of running shoes for flat feet?", "expect": [], "split": "dev", "source": "offtopic"}
+{"id": "neg-26", "question": "What is the history of the Eiffel Tower's construction?", "expect": [], "split": "test", "source": "offtopic"}
+{"id": "neg-27", "question": "How do I make a paper airplane that flies the farthest?", "expect": [], "split": "dev", "source": "offtopic"}
+{"id": "neg-28", "question": "Why do onions make you cry when you cut them?", "expect": [], "split": "test", "source": "offtopic"}
+{"id": "neg-29", "question": "What is a good watering schedule for tomatoes in a hot summer?", "expect": [], "split": "dev", "source": "offtopic"}
