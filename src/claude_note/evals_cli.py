@@ -32,6 +32,8 @@ def add_parser(sub) -> None:
     r.add_argument("--vector-weight", type=float, help="Weight of the meaning list in the fusion")
     r.add_argument("--gate", type=float, help="Minimum meaning score before anything is injected")
     r.add_argument("--no-save", action="store_true", help="Do not add this run to the history")
+    r.add_argument("--set-option", action="append", default=[], metavar="KEY=VALUE",
+                   help="Try any [recall] setting for this run, e.g. rerank_top=20 (repeatable)")
     r.add_argument("--json", action="store_true")
     r.add_argument("--quiet", action="store_true")
 
@@ -56,6 +58,9 @@ def add_parser(sub) -> None:
     rp = es.add_parser("report", help="Latest results and what to fix, for people and agents")
     rp.add_argument("--json", action="store_true")
 
+    n = es.add_parser("nightly", help="Run the evals the same way every night; exit 3 on a regression")
+    n.add_argument("--heartbeat", help="Also touch this file when the run completes (for an absence alert)")
+    n.add_argument("--json", action="store_true")
     d = es.add_parser("dashboard", help="Write the HTML dashboard (and open it)")
     d.add_argument("--out", default=str(evals.EVAL_DIR / "dashboard.html"))
     d.add_argument("--no-open", action="store_true")
@@ -81,6 +86,23 @@ def _settings(args) -> recall_mod.Settings:
         s.vector_weight = args.vector_weight
     if getattr(args, "gate", None) is not None:
         s.vector_gate = args.gate
+    for kv in getattr(args, "set_option", None) or []:
+        key, _, raw = kv.partition("=")
+        key = key.strip()
+        if not hasattr(s, key):
+            raise SystemExit(f"unknown [recall] setting: {key}")
+        cur = getattr(s, key)
+        if isinstance(cur, bool):
+            val = raw.strip().lower() in ("1", "true", "yes", "on")
+        elif isinstance(cur, int):
+            val = int(raw)
+        elif isinstance(cur, float):
+            val = float(raw)
+        elif isinstance(cur, list):
+            val = [x.strip() for x in raw.split(",") if x.strip()]
+        else:
+            val = raw
+        setattr(s, key, val)
     return s
 
 
@@ -208,6 +230,8 @@ def main(args) -> int:
             for t in out["advice"]:
                 print(f"- {t['area']}: {t['text']}")
         return 0
+    if cmd == "nightly":
+        return nightly(args)
     if cmd == "dashboard":
         from .evals_dashboard import render
         last, live = _latest("retrieval"), evals.live(30)
@@ -231,3 +255,54 @@ def _live_text(out: dict) -> str:
     if "opened_rate" in out:
         s += f" · agent opened an injected note in {out['opened_rate']:.0%} of {out['turns_checked']} turns"
     return s
+
+
+def nightly(args) -> int:
+    """The continuous eval: frozen probes plus the off-topic set, the real-use log, the dashboard.
+    Settings are whatever recall uses today, so a regression is caught the night it happens.
+    Exit 0 when the run is fine (or there is nothing to run yet), 3 on a regression, 1 if it failed."""
+    from datetime import datetime, timezone
+    from .evals_dashboard import render
+    evals.EVAL_DIR.mkdir(parents=True, exist_ok=True)
+    status = {"t": evals._now(), "ok": False}
+    try:
+        if not evals.PROBES.exists():
+            status.update(ok=True, skipped="no probe set yet: run `claude-note eval probes`")
+        else:
+            cases = evals.load_cases(evals.PROBES) + evals.load_cases(evals.FIXTURE.parent / "offtopic.jsonl")
+            settings = recall_mod.Settings.load()
+            if not recall_mod.qmd_executable(settings):
+                raise RuntimeError("qmd is not installed")
+            history = evals.load_runs()
+            run = evals.run_retrieval(cases, settings, label="nightly")
+            evals.save_run(run)
+            found = evals.regressions(run, history)
+            live = evals.live(30)
+            page = render(evals.load_runs(), run, live, _latest("answers"), evals.advice(run, live))
+            (evals.EVAL_DIR / "dashboard.html").write_text(page)
+            status.update(ok=not found, regressions=found, set=run["set"],
+                          metrics={k: run["metrics"][k] for k in ("test", "dev", "all") if k in run["metrics"]},
+                          compared_with=len(evals.comparable(run, history)),
+                          live={k: live.get(k) for k in ("prompts", "miss_rate", "opened_rate", "p95_ms")},
+                          advice=evals.advice(run, live))
+    except Exception as exc:  # noqa: BLE001 - recorded, not raised: the status file is the report
+        status.update(ok=False, error=f"{type(exc).__name__}: {exc}"[:300])
+        evals.NIGHTLY.write_text(json.dumps(status, indent=1))
+        print(status["error"], file=sys.stderr)
+        return 1
+    evals.NIGHTLY.write_text(json.dumps(status, indent=1))
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n"
+    for hb in filter(None, [evals.NIGHTLY_OK, Path(args.heartbeat).expanduser() if args.heartbeat else None]):
+        hb.parent.mkdir(parents=True, exist_ok=True)
+        hb.write_text(stamp)
+    if args.json:
+        print(json.dumps(status, indent=1))
+    elif status.get("skipped"):
+        print(f"nightly: {status['skipped']}")
+    else:
+        m = status["metrics"].get("test") or status["metrics"]["all"]
+        print(f"nightly: right note injected {m.get('hit_at_k', 0):.0%} (test) · "
+              f"off-topic {status['metrics']['all'].get('false_injection_rate', 0):.0%} · p95 {m.get('p95_ms')} ms"
+              + ("" if status["ok"] else " · REGRESSION: " + "; ".join(status["regressions"])))
+    return 0 if status["ok"] else 3
+

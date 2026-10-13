@@ -198,7 +198,9 @@ def run_retrieval(cases: list[Case], settings: Optional[recall_mod.Settings] = N
                          "single_term_fallback": settings.single_term_fallback,
                          "engine": settings.engine, "vector": settings.vector, "vector_weight": settings.vector_weight,
                          "vector_gate": settings.vector_gate, "rerank": settings.rerank,
-                         "rerank_command": bool(settings.rerank_command)},
+                         "rerank_command": bool(settings.rerank_command),
+                         **{k: getattr(settings, k) for k in ("rerank_top", "rerank_chars", "collections")
+                            if hasattr(settings, k)}},
             "metrics": groups, "rows": rows}
 
 
@@ -599,3 +601,41 @@ def advice(run: Optional[dict], live_: Optional[dict]) -> list[dict]:
     if live_ and live_.get("turns_checked", 0) >= 10 and live_.get("opened_rate", 1) < 0.15:
         tips.append({"area": "usefulness", "text": "Agents rarely open the notes recall injects. Check the never-opened list: those notes are being shown for the wrong questions."})
     return tips
+
+# --------------------------------------------------------------------------- #
+# Nightly: the same set, the same settings, every night; flag a regression
+# --------------------------------------------------------------------------- #
+
+NIGHTLY = EVAL_DIR / "nightly.json"
+NIGHTLY_OK = EVAL_DIR / "nightly.ok"
+DROP_HIT = 0.08        # right note injected (test) falls this much below the recent median
+RISE_JUNK = 0.10       # off-topic questions that get notes rise this much above it
+
+
+def comparable(run: dict, history: list[dict], n: int = 5) -> list[dict]:
+    """Earlier retrieval runs on the same question set with the same settings, newest last."""
+    same = [r for r in history if r.get("kind") == "retrieval" and r.get("set") == run.get("set")
+            and r.get("settings") == run.get("settings") and r.get("t") != run.get("t")]
+    return same[-n:]
+
+
+def regressions(run: dict, history: list[dict]) -> list[str]:
+    """Plain-language findings when tonight is clearly worse than the recent median."""
+    prev = comparable(run, history)
+    if not prev:
+        return []
+    def med(key, group="test"):
+        vals = sorted(r["metrics"].get(group, r["metrics"]["all"]).get(key) for r in prev
+                      if r["metrics"].get(group, r["metrics"]["all"]).get(key) is not None)
+        return vals[len(vals) // 2] if vals else None
+    now = run["metrics"].get("test") or run["metrics"]["all"]
+    out = []
+    hit, base = now.get("hit_at_k"), med("hit_at_k")
+    if hit is not None and base is not None and base - hit >= DROP_HIT:
+        out.append(f"right note injected fell to {hit:.0%} from a recent median of {base:.0%}")
+    allm = run["metrics"]["all"]
+    junk, jbase = allm.get("false_injection_rate"), med("false_injection_rate", "all")
+    if junk is not None and jbase is not None and junk - jbase >= RISE_JUNK:
+        out.append(f"off-topic questions that got notes rose to {junk:.0%} from {jbase:.0%}")
+    return out
+
