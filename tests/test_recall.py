@@ -359,3 +359,24 @@ class RealNodeTests(unittest.TestCase):
              mock.patch.object(setup_recall.subprocess, "run", side_effect=OSError("boom")):
             self.assertEqual(setup_recall.real_node(), "/usr/bin/node")
 
+
+class FuseScopeTests(unittest.TestCase):
+    """`collections = []` means every collection; the memory collections must not narrow it."""
+
+    def test_default_config_keeps_notes_from_every_collection(self):
+        s = recall.Settings()
+        s.collections, s.memory_collections = [], ["agentmem"]
+        hits = [{"file": "qmd://notes/a.md", "title": "A", "score": .7},
+                {"file": "qmd://agentmem/p/memory/b.md", "title": "B", "score": .6}]
+        fused, best = recall.fuse([], hits, s)
+        self.assertEqual({h["file"] for h in fused}, {h["file"] for h in hits})
+        self.assertEqual(best, .7)
+
+    def test_an_explicit_list_still_scopes_and_keeps_memory(self):
+        s = recall.Settings()
+        s.collections, s.memory_collections = ["notes"], ["agentmem"]
+        hits = [{"file": "qmd://notes/a.md", "title": "A"}, {"file": "qmd://other/c.md", "title": "C"},
+                {"file": "qmd://agentmem/p/memory/b.md", "title": "B"}]
+        fused, _ = recall.fuse([], hits, s)
+        self.assertEqual({h["file"] for h in fused}, {"qmd://notes/a.md", "qmd://agentmem/p/memory/b.md"})
+
