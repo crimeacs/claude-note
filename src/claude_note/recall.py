@@ -616,7 +616,10 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
 
     pool: dict[str, dict] = {}
     ran = False
-    if settings.engine in ("auto", "server") and not extra_rungs:
+    # The warm server searches the default index only. In auto mode a request for another index
+    # (doctor's throwaway canary, an eval fixture) goes to the CLI, which honours --index.
+    use_server = settings.engine == "server" or (settings.engine == "auto" and not settings.index)
+    if use_server and not extra_rungs:
         got = _server_pool(prompt, ladder, settings, started, result)
         if got is not None:
             pool, ran = got, True
