@@ -1,0 +1,10 @@
+{
+ "recorded": "2026-10-12",
+ "host": "Claude Code 2.1.296 (claude -p, --setting-sources project, --allowedTools Read)",
+ "recall": "claude-note 2.0 hook recall, engine=server (QMD 2.8.3 recall server over a sandbox index), same setup as docs/demo.md",
+ "vault": "docs/examples/recall-demo/vault plus the note below (sandbox only; not added to the demo vault)",
+ "prompt": "Our recall hook uses qmd search. Can I switch it to qmd query to get better results? Two short lines.",
+ "note": "---\ntitle: \"Never run qmd query inside an agent turn or a hook\"\ntype: gotcha\ncreated: 2026-08-02\ntags: [qmd, recall, hooks, outage]\n---\n# Never run qmd query inside an agent turn or a hook\n\n`qmd query` loads a 1.28 GB query-expansion model before it searches. On 2 August 2026 one `qmd query`\ninside an agent turn hung for 54 minutes holding about 1 GB of memory, and the server stopped\nanswering until it was killed. Recall hooks use `qmd search` (keywords) plus the warm recall server;\nnever switch a hook or an agent command to `qmd query`.\n",
+ "claude_code_without_recall": "Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.\nYes, `qmd query` (query expansion plus vector search plus LLM reranking) usually gives noticeably better recall than BM25-only `qmd search`. The cost is that it loads local models and can take seconds per call, so raise the hook's timeout or try `qmd vsearch` as a faster middle option.",
+ "claude_code_with_recall": "No. `qmd query` loads a 1.28 GB query-expansion model before every search, and a note from 2 August 2026 records one run hanging for 54 minutes inside an agent turn, so it's too slow for a hook.\nKeep `qmd search` and improve the queries instead: drop stopwords, since one rare word can zero out the results. If you need semantic matching, try the lighter `qmd vsearch`."
+}

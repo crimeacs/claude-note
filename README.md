@@ -6,6 +6,14 @@ Claude Note captures what Claude Code, Codex, Cursor and ChatGPT sessions learn,
 Markdown notes, and puts the right notes in front of the agent *before* it acts: on every prompt,
 and again the moment a command fails.
 
+![The same question with and without Claude Note recall: without it Claude Code says yes; with it the team's note comes back and the answer is no](docs/assets/claude-note-recall.gif)
+
+*Two recorded runs of Claude Code 2.1.296: same model, same question, one with recall
+([raw runs](docs/examples/recall-demo/runs/qmd-query-question.json)).*
+
+How we use it across a company of agents, and how well it works on our own 15,000 notes:
+**[Memory Engineering 101: our approach to building a company brain](https://getsweat.ai/blog/claude-note-recall/)**.
+
 [![Claude Note 2.0: recall before action](docs/assets/claude-note-2-poster.jpg)](docs/assets/claude-note-2.mp4)
 
 [Watch the 2½-minute walkthrough](docs/assets/claude-note-2.mp4) · [Captions](docs/assets/claude-note-2.vtt) ·
