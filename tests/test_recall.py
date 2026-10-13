@@ -380,3 +380,23 @@ class FuseScopeTests(unittest.TestCase):
         fused, _ = recall.fuse([], hits, s)
         self.assertEqual({h["file"] for h in fused}, {"qmd://notes/a.md", "qmd://agentmem/p/memory/b.md"})
 
+
+class ServerIndexTests(unittest.TestCase):
+    """The warm server only knows the default index; auto mode must not use it for another one."""
+
+    def _run(self, index, engine):
+        s = recall.Settings()
+        s.engine, s.index, s.qmd, s.log = engine, index, "/bin/echo", False
+        with mock.patch.object(recall, "_server_pool", return_value={}) as srv:
+            recall.recall("why are customers charged twice on a retried payment", s, runner=lambda c, t: [])
+        return srv.called
+
+    def test_auto_skips_the_server_for_a_named_index(self):
+        self.assertFalse(self._run("claude-note-doctor-1", "auto"))
+
+    def test_auto_uses_the_server_for_the_default_index(self):
+        self.assertTrue(self._run("", "auto"))
+
+    def test_explicit_server_engine_is_honoured(self):
+        self.assertTrue(self._run("cn-demo2", "server"))
+

@@ -1,3 +1,3 @@
 """Claude-note: Capture what AI agents learn; recall it before they act."""
 
-__version__ = "2.0.1"
+__version__ = "2.0.2"
