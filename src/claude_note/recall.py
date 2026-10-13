@@ -109,11 +109,13 @@ class Settings:
     engine: str = "auto"          # auto (server if it answers) | server | cli
     server_url: str = "http://127.0.0.1:8182"
     vector: bool = True           # search the whole question by meaning
-    vector_weight: float = 3.0    # weight of the meaning list against each keyword rung (RRF)
+    vector_weight: float = 2.0    # weight of the meaning list against each keyword rung (RRF)
     vector_gate: float = 0.40     # inject nothing unless the closest note by meaning scores this high
     rerank: bool = True           # rerank the fused top `rerank_top` with QMD's reranker
     rerank_top: int = 12
-    rerank_chars: int = 2000
+    rerank_chars: int = 1200      # the reranker reads this much of each note (title first when clean)
+    rerank_clean: bool = True     # give the reranker "title + body without frontmatter" instead of the raw file
+    rerank_blend: float = 0.0     # 0 = order by the reranker alone; >0 also keeps some of the fusion order
     rerank_command: str = ""      # optional external relevance judge
     rerank_timeout: float = 2.5
     log: bool = True
@@ -149,6 +151,10 @@ class Settings:
         for name in ("rerank_top", "rerank_chars"):
             if name in raw:
                 setattr(s, name, int(raw[name]))
+        if "rerank_clean" in raw:
+            s.rerank_clean = _as_bool(raw["rerank_clean"], False)
+        if "rerank_blend" in raw:
+            s.rerank_blend = float(raw["rerank_blend"])
         s.rerank_command = str(raw.get("rerank_command", "") or "")
         s.log = _as_bool(raw.get("log"), True) and os.environ.get("CLAUDE_NOTE_RECALL_LOG") != "0"
         s.qmd = str(raw.get("qmd", "") or "")
@@ -362,11 +368,16 @@ def _server_pool(prompt: str, ladder: list[list[str]], settings: "Settings", sta
         return {}
     top = fused[: max(settings.rerank_top, settings.inject)]
     if settings.rerank and len(top) > 1 and left() > 1.0:
-        rr = server_post(settings, "/rerank", {"question": prompt[:2000], "files": [h["file"] for h in top],
-                                               "chars": settings.rerank_chars}, left() - 0.5)
+        body = {"question": prompt[:2000], "files": [h["file"] for h in top], "chars": settings.rerank_chars}
+        if settings.rerank_clean:
+            body["clean"] = True
+        rr = server_post(settings, "/rerank", body, left() - 0.5)
         scores = (rr or {}).get("scores") or {}
         if scores:
-            top = sorted(top, key=lambda h: -scores.get(h["file"], 0.0))
+            fused_pos = {h["file"]: i for i, h in enumerate(top)}
+            b = settings.rerank_blend
+            # the reranker's 0..1 relevance, plus (optionally) a share of the fusion order
+            top = sorted(top, key=lambda h: -(scores.get(h["file"], 0.0) + b / (1 + fused_pos[h["file"]])))
             result.reranked = True
     pool: dict[str, dict] = {}
     for pos, h in enumerate(top):

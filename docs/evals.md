@@ -157,8 +157,42 @@ What changed, and how each choice was made:
 - **Gate.** On dev, the best meaning score of every answerable question was >= 0.455 and of every
   off-topic question <= 0.36. Any gate in 0.38-0.45 gave 0% junk with no answerable question lost;
   0.40 (the middle) is the default. On test it let 1 of 15 off-topic questions through.
-- **Reranker** (QMD's Qwen3-Reranker-0.6B, top 12, first 2000 characters of each note): on dev,
+- **Reranker** (QMD's Qwen3-Reranker-0.6B, top 12, first 2000 characters of each note; 1200 and title-first since 2.0.1): on dev,
   right note first 32% -> 59%. Costs ~2.7 s; `rerank = false` keeps the 0.36 s path.
+
+### Continuous: `claude-note eval nightly` (13 October 2026)
+
+`claude-note setup` now schedules `eval nightly` (04:30, capped at an hour). Each night it scores the
+frozen probes plus the 30 off-topic questions with whatever settings recall uses that day, reads the
+real-use log, rebuilds the dashboard and writes `evals/nightly.json`. It compares the run with the
+median of the last five runs on the same set and settings, and exits 3 (and `doctor` turns red) when
+"right note injected" on the test half falls 8 points or more, or off-topic injections rise 10. A
+wobble of a question or two does not trip it. Wire the exit code or `nightly.json` to your alerts.
+
+The first night found a real bug: with the default config (`collections = []`), the server path kept
+only the memory collection, so recall missed every vault note. Right note injected fell to 7%. The
+earlier 78% runs had passed explicit collections, so they never hit it. Fixed in 2.0.1.
+
+### Tuning, the same night
+
+15 settings on the dev half (44 questions), one at a time against the warm server:
+
+| Dev half | Right note in top 4 | First | MRR | p50 / p95 |
+|---|---|---|---|---|
+| 2.0 defaults (rerank top 12, raw file, 2000 chars, vector weight 3) | 75% | 30% | 0.49 | 3.5 s / 5.4 s |
+| No reranker | 70% | 27% | 0.43 | 0.5 s / 1.8 s |
+| Reranker reads title + body without frontmatter (`rerank_clean`), 1200 chars | 82% | 32% | 0.53 | 2.6 s / 4.7 s |
+| ...and vector weight 2 (chosen) | 82% | 36% | 0.55 | 2.3 s / 5.5 s |
+
+Checked once on the test half (36 questions): the right note in the top four for 29 of 36 with both
+the old and the new defaults (no question gained or lost); first place 16 versus 14, within noise at
+this size; median 3.7 s versus 2.3 s, slowest one in twenty 5.8 s versus 3.1 s. The dev gain in
+accuracy did not replicate; the speed did. The new defaults are those settings: same accuracy, about
+40% faster.
+
+Where first place goes is also clearer now: Claude Code memory files take it for about half the dev
+questions, often a real memory of the same incident. Probes are written only from vault notes, so a
+memory file can never count as the right answer, and "first" is a floor for that reason.
 
 ## What we tried and dropped
 

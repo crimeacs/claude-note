@@ -316,6 +316,42 @@ def install_refresh_agent(exe: str, dry_run: bool = False) -> str:
     return f"installed {plist.name} (hourly)"
 
 
+EVAL_LABEL = "com.claude-note.eval-nightly"
+
+
+def install_eval_agent(exe: str, dry_run: bool = False, hour: int = 4, minute: int = 30) -> str:
+    """Re-score recall every night (`claude-note eval nightly`): the frozen probes plus the
+    off-topic set, the real-use log and the dashboard, with a regression check. Local searches
+    only, no model calls; capped at an hour of wall clock."""
+    if sys.platform != "darwin":
+        return f"not macOS: run `{exe} eval nightly` daily from cron or a systemd timer"
+    plist = HOME / "Library" / "LaunchAgents" / f"{EVAL_LABEL}.plist"
+    timeout = shutil.which("timeout") or shutil.which("gtimeout")
+    cmd = ([timeout, "-k", "60", "3600"] if timeout else []) + [exe, "eval", "nightly"]
+    args = "".join(f"<string>{c}</string>" for c in cmd)
+    body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>{EVAL_LABEL}</string>
+  <key>ProgramArguments</key><array>{args}</array>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>{hour}</integer><key>Minute</key><integer>{minute}</integer></dict>
+  <key>LowPriorityIO</key><true/>
+  <key>Nice</key><integer>10</integer>
+  <key>WorkingDirectory</key><string>{SHARE}</string>
+  <key>StandardOutPath</key><string>{SHARE}/eval-nightly.log</string>
+  <key>StandardErrorPath</key><string>{SHARE}/eval-nightly.log</string>
+</dict></plist>
+"""
+    if dry_run:
+        return f"would install {plist.name} (daily {hour:02d}:{minute:02d})"
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    plist.write_text(body)
+    uid = os.getuid()
+    subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist)], capture_output=True, timeout=30)
+    subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist)], capture_output=True, timeout=30)
+    return f"installed {plist.name} (daily {hour:02d}:{minute:02d}; results in `claude-note eval dashboard`)"
+
+
 def qmd_major(exe: str) -> int:
     try:
         out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=20).stdout
@@ -455,6 +491,12 @@ def cmd_setup(args) -> int:
         print("   skipped (--no-schedule)")
     else:
         print(f"   {install_server_agent(qmd_exe() or '', dry_run=dry)}")
+
+    print("\n7. Nightly evals (is recall still finding the right notes?)")
+    if args.no_schedule:
+        print("   skipped (--no-schedule)")
+    else:
+        print(f"   {install_eval_agent(exe, dry)}")
 
     print("\nNext: `claude-note doctor` proves the loop end to end.")
     return 0
@@ -601,6 +643,15 @@ def cmd_doctor(args) -> int:
     else:
         rows.append(("in use", "eval: right note injected", False,
                      "never measured; `claude-note eval probes` then `eval run`"))
+    try:
+        night = json.loads(evals.NIGHTLY.read_text())
+        age = (time.time() - datetime.fromisoformat(night["t"].replace("Z", "+00:00")).timestamp()) / 86400
+        detail = (night.get("skipped") or night.get("error") or
+                  ("no regression" if night.get("ok") else "REGRESSION: " + "; ".join(night.get("regressions", []))))
+        rows.append(("in use", "nightly eval", age < 2 and night.get("ok", False),
+                     f"{detail}, {age:.0f} d ago" + ("" if age < 2 else "; is the nightly agent running?")))
+    except (OSError, ValueError, KeyError):
+        rows.append(("in use", "nightly eval", False, "not run yet; `claude-note setup` schedules it"))
 
     if args.json:
         print(json.dumps([{"stage": s, "check": n, "ok": ok, "detail": d} for s, n, ok, d in rows], indent=2))

@@ -247,5 +247,48 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn("https://", page)
 
 
+class NightlyTests(unittest.TestCase):
+    """The continuous eval: compare like with like, flag a clear regression, never a wobble."""
+
+    def run_(self, t, hit, junk=0.0, sett=None, set_id="probe+offtopic:110:x"):
+        return {"kind": "retrieval", "t": t, "set": set_id, "settings": sett or {"inject": 4},
+                "metrics": {"test": {"hit_at_k": hit}, "all": {"hit_at_k": hit, "false_injection_rate": junk}}}
+
+    def test_flags_a_clear_drop_against_the_recent_median(self):
+        hist = [self.run_(f"2026-10-0{i}T04:30:00Z", h) for i, h in enumerate([.78, .81, .78, .80, .79], 1)]
+        found = evals.regressions(self.run_("2026-10-09T04:30:00Z", .66), hist)
+        self.assertEqual(len(found), 1)
+        self.assertIn("66%", found[0])
+
+    def test_ignores_run_to_run_wobble(self):
+        hist = [self.run_(f"2026-10-0{i}T04:30:00Z", h) for i, h in enumerate([.78, .81, .78], 1)]
+        self.assertEqual(evals.regressions(self.run_("2026-10-09T04:30:00Z", .75), hist), [])
+
+    def test_only_compares_the_same_set_and_settings(self):
+        hist = [self.run_("2026-10-01T04:30:00Z", .95, sett={"inject": 8}),
+                self.run_("2026-10-02T04:30:00Z", .95, set_id="other:20:y")]
+        self.assertEqual(evals.regressions(self.run_("2026-10-09T04:30:00Z", .60), hist), [])
+
+    def test_flags_more_junk_injected(self):
+        hist = [self.run_(f"2026-10-0{i}T04:30:00Z", .78, junk=.03) for i in range(1, 4)]
+        found = evals.regressions(self.run_("2026-10-09T04:30:00Z", .78, junk=.20), hist)
+        self.assertTrue(any("off-topic" in f for f in found))
+
+    def test_nightly_without_probes_is_a_quiet_success_with_a_heartbeat(self):
+        from claude_note import evals_cli
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            with mock.patch.multiple(evals, EVAL_DIR=d, PROBES=d / "probes.jsonl", NIGHTLY=d / "nightly.json",
+                                     NIGHTLY_OK=d / "nightly.ok"):
+                args = mock.Mock(heartbeat=str(d / "hb" / "x.ok"), json=False)
+                with mock.patch("sys.stdout", new=io.StringIO()):
+                    self.assertEqual(evals_cli.nightly(args), 0)
+                status = json.loads((d / "nightly.json").read_text())
+                self.assertTrue(status["ok"])
+                self.assertIn("probe", status["skipped"])
+                self.assertTrue((d / "nightly.ok").exists() and (d / "hb" / "x.ok").exists())
+
+
+
 if __name__ == "__main__":
     unittest.main()
