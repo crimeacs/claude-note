@@ -94,5 +94,27 @@ class SynthesisRetryTests(unittest.TestCase):
         self.assertTrue(session_tracker.synthesis_retry_due(state))
 
 
+
+class PrivateCwdTests(unittest.TestCase):
+    """Issue #3: launchd starts the worker in /, and `claude -p` inherits that directory."""
+
+    def test_worker_moves_into_an_empty_dir_under_the_vault(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            before = os.getcwd()
+            self.addCleanup(os.chdir, before)
+            with mock.patch.object(config, "CLAUDE_NOTE_DIR", root / ".claude-note"):
+                work = worker.use_private_cwd()
+            self.assertEqual(work, root / ".claude-note" / "tmp")
+            self.assertEqual(Path(os.getcwd()).resolve(), work.resolve())
+
+    def test_a_failure_never_stops_the_worker(self):
+        before = os.getcwd()
+        self.addCleanup(os.chdir, before)
+        with mock.patch.object(config, "CLAUDE_NOTE_DIR", Path("/dev/null/nope")):
+            self.assertIsNone(worker.use_private_cwd(logging.getLogger("t")))
+        self.assertEqual(os.getcwd(), before)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -338,3 +338,24 @@ class ServerEngineTests(unittest.TestCase):
         with mock.patch.object(recall, "server_post", return_value=None):
             res = recall.recall("Can I just run npm run build on the 4 GB box?", settings(engine="server"))
         self.assertEqual(res.status, "unavailable")
+
+
+class RealNodeTests(unittest.TestCase):
+    """setup must record node itself, not a nodenv/nvm/asdf shim that fails under launchd."""
+
+    def test_resolves_a_shim_to_the_real_binary(self):
+        from claude_note import setup_recall
+        with tempfile.TemporaryDirectory() as tmp:
+            real = Path(tmp) / "node-real"
+            real.write_text("")
+            done = mock.Mock(returncode=0, stdout=str(real) + "\n")
+            with mock.patch.object(setup_recall.shutil, "which", return_value="/x/shims/node"), \
+                 mock.patch.object(setup_recall.subprocess, "run", return_value=done):
+                self.assertEqual(setup_recall.real_node(), str(real))
+
+    def test_falls_back_to_path_node_when_the_probe_fails(self):
+        from claude_note import setup_recall
+        with mock.patch.object(setup_recall.shutil, "which", return_value="/usr/bin/node"), \
+             mock.patch.object(setup_recall.subprocess, "run", side_effect=OSError("boom")):
+            self.assertEqual(setup_recall.real_node(), "/usr/bin/node")
+

@@ -270,6 +270,27 @@ def poll_once(logger: logging.Logger) -> int:
     return notes_written
 
 
+def use_private_cwd(logger=None):
+    """Run from an empty directory under the vault, never from `/` (issue #3).
+
+    launchd starts agents in `/`, and every `claude -p` the worker spawns inherits the working
+    directory, so relative paths would resolve from the root of the disk. This covers launchd,
+    systemd and old plists that were written before they set WorkingDirectory.
+    """
+    import os
+    work = config.CLAUDE_NOTE_DIR / "tmp"
+    try:
+        work.mkdir(parents=True, exist_ok=True)
+        os.chdir(work)
+    except OSError as exc:  # never let this stop the worker
+        if logger:
+            logger.warning(f"could not change to {work}: {exc}")
+        return None
+    if logger:
+        logger.info(f"Working directory: {work}")
+    return work
+
+
 def run_worker(foreground: bool = False, verbose: bool = False) -> int:
     """
     Run the worker daemon.
@@ -280,6 +301,7 @@ def run_worker(foreground: bool = False, verbose: bool = False) -> int:
     """
     logger = setup_logging(verbose=verbose or foreground)
     logger.info("Worker starting")
+    use_private_cwd(logger)
 
     # Check for updates (non-blocking)
     try:

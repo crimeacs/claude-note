@@ -147,6 +147,9 @@ class BundledInstallTests(unittest.TestCase):
             with (self.home / "Library/LaunchAgents/com.claude-note.worker.plist").open("rb") as f:
                 worker = plistlib.load(f)
             self.assertTrue(worker["StandardOutPath"].startswith(str(vault)))
+            # issue #3: the worker, and every `claude -p` it starts, never runs from /
+            self.assertEqual(worker["WorkingDirectory"], str(vault / ".claude-note/tmp"))
+            self.assertTrue((vault / ".claude-note/tmp").is_dir())
 
 
 if __name__ == "__main__":

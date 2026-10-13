@@ -21,6 +21,8 @@ After=network.target
 [Service]
 Type=simple
 ExecStart={{BIN_PATH}}/claude-note worker
+# The worker also moves here itself; set it so nothing it starts runs from /
+WorkingDirectory={{VAULT_PATH}}/.claude-note/tmp
 Restart=always
 RestartSec=10
 

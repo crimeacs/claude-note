@@ -338,6 +338,23 @@ def qmd_sdk(qmd: str) -> Optional[Path]:
     return None
 
 
+def real_node() -> str | None:
+    """The node executable itself. nodenv, nvm and asdf put shims on PATH that pick a version
+    from the login shell; under launchd that lookup fails and the agent exits 127. Ask node
+    where it really lives, and record that."""
+    node = shutil.which("node")
+    if not node:
+        return None
+    try:
+        out = subprocess.run([node, "-p", "process.execPath"], capture_output=True, text=True, timeout=15)
+        real = out.stdout.strip()
+        if out.returncode == 0 and real and Path(real).is_file():
+            return real
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return node
+
+
 def install_server_agent(qmd: str, port: int = 8182, dry_run: bool = False) -> str:
     """Keep the recall server warm: QMD's keyword and meaning search plus its reranker, models
     loaded, on 127.0.0.1. Recall falls back to the CLI ladder whenever it is not answering."""
@@ -346,7 +363,7 @@ def install_server_agent(qmd: str, port: int = 8182, dry_run: bool = False) -> s
     if qmd_major(qmd) < 2:
         return "skipped: QMD 2.x needed for search by meaning (`npm i -g @tobilu/qmd`); recall uses keywords only"
     sdk = qmd_sdk(qmd)
-    node = shutil.which("node")
+    node = real_node()
     if not sdk or not node:
         return "skipped: could not find QMD's SDK or node; recall uses keywords only"
     server = Path(__file__).with_name("recall_server.mjs")
