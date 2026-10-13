@@ -199,7 +199,7 @@ def run_retrieval(cases: list[Case], settings: Optional[recall_mod.Settings] = N
                          "engine": settings.engine, "vector": settings.vector, "vector_weight": settings.vector_weight,
                          "vector_gate": settings.vector_gate, "rerank": settings.rerank,
                          "rerank_command": bool(settings.rerank_command),
-                         **{k: getattr(settings, k) for k in ("rerank_top", "rerank_chars", "collections")
+                         **{k: getattr(settings, k) for k in ("rerank_top", "rerank_chars", "rerank_clean", "rerank_blend", "collections")
                             if hasattr(settings, k)}},
             "metrics": groups, "rows": rows}
 

@@ -53,7 +53,11 @@ async function rerank(body) {
   const docs = [];
   for (const f of (body.files || []).slice(0, 20)) {
     const d = await store.get(String(f), { includeBody: true }).catch(() => null);
-    if (d) docs.push({ file: String(f), title: d.title || '', text: String(d.body || '').slice(0, body.chars || 2000) });
+    if (!d) continue;
+    let text = String(d.body || '');
+    // clean: the reranker reads only `text`, so lead with the title and drop YAML frontmatter
+    if (body.clean) text = `${d.title || ''}\n\n` + text.replace(/^---\n[\s\S]*?\n---\n/, '').trimStart();
+    docs.push({ file: String(f), title: d.title || '', text: text.slice(0, body.chars || 2000) });
   }
   const r = docs.length ? await llm.rerank(String(body.question || ''), docs) : { results: [] };
   const scores = {};
