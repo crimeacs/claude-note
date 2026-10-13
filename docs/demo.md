@@ -13,6 +13,7 @@ claude-note hooks. Nothing on screen was typed by hand except the layout. The ra
 | Recall in Claude Code | `claude -p` (Claude Code 2.1.296), `--setting-sources project` with `hook recall` and `hook sentinel` | `recorded-runs.json` → `build-question.claude_code_with_recall` |
 | Without recall | The same prompt and model, no hooks | `build-question.claude_code_without_recall` |
 | Codex | `codex exec` (Codex CLI 0.162.1) with `hook recall` in `hooks.json` | `build-question.codex_with_recall` |
+| README GIF and blog example | The `qmd query` question, `claude -p` with and without `hook recall` (recall server over a sandbox index holding one extra note) | [`runs/qmd-query-question.json`](examples/recall-demo/runs/qmd-query-question.json) |
 | How recall finds the note | Ladder counts are real `qmd search` results on the demo index; the miss notice is the hook's real output | `recall.py` |
 | Sentinel | `claude -p` running [`calendar_sync.py`](examples/recall-demo/calendar_sync.py) against a token without the Calendar scope; the hook context is verbatim | `sentinel.claude_code`, `sentinel.hook_context` |
 | Remember, then recall | `claude-note remember …` then `claude-note recall …` | `runs/remember.txt`, `runs/recall-after-remember.txt` |

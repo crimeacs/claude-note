@@ -317,7 +317,11 @@ def fuse(lex: list[list[dict]], vec: list[dict], settings: "Settings") -> tuple[
     """Reciprocal-rank fusion of the keyword rungs and the meaning list (weight `vector_weight`),
     within the configured collections, skipping session logs; pushed copies of one note (same
     title) count once. Returns the fused list and the best meaning score among kept results."""
-    cols = set((settings.collections or []) + settings.memory_collections)
+    # `collections = []` means every collection. The memory collections only widen an explicit
+    # list; they must never narrow "everything" down to themselves.
+    cols = set(settings.collections or [])
+    if cols:
+        cols |= set(settings.memory_collections)
     skip = [re.compile(p) for p in settings.skip_paths]
 
     def keep(h: dict) -> bool:

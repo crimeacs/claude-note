@@ -338,3 +338,45 @@ class ServerEngineTests(unittest.TestCase):
         with mock.patch.object(recall, "server_post", return_value=None):
             res = recall.recall("Can I just run npm run build on the 4 GB box?", settings(engine="server"))
         self.assertEqual(res.status, "unavailable")
+
+
+class RealNodeTests(unittest.TestCase):
+    """setup must record node itself, not a nodenv/nvm/asdf shim that fails under launchd."""
+
+    def test_resolves_a_shim_to_the_real_binary(self):
+        from claude_note import setup_recall
+        with tempfile.TemporaryDirectory() as tmp:
+            real = Path(tmp) / "node-real"
+            real.write_text("")
+            done = mock.Mock(returncode=0, stdout=str(real) + "\n")
+            with mock.patch.object(setup_recall.shutil, "which", return_value="/x/shims/node"), \
+                 mock.patch.object(setup_recall.subprocess, "run", return_value=done):
+                self.assertEqual(setup_recall.real_node(), str(real))
+
+    def test_falls_back_to_path_node_when_the_probe_fails(self):
+        from claude_note import setup_recall
+        with mock.patch.object(setup_recall.shutil, "which", return_value="/usr/bin/node"), \
+             mock.patch.object(setup_recall.subprocess, "run", side_effect=OSError("boom")):
+            self.assertEqual(setup_recall.real_node(), "/usr/bin/node")
+
+
+class FuseScopeTests(unittest.TestCase):
+    """`collections = []` means every collection; the memory collections must not narrow it."""
+
+    def test_default_config_keeps_notes_from_every_collection(self):
+        s = recall.Settings()
+        s.collections, s.memory_collections = [], ["agentmem"]
+        hits = [{"file": "qmd://notes/a.md", "title": "A", "score": .7},
+                {"file": "qmd://agentmem/p/memory/b.md", "title": "B", "score": .6}]
+        fused, best = recall.fuse([], hits, s)
+        self.assertEqual({h["file"] for h in fused}, {h["file"] for h in hits})
+        self.assertEqual(best, .7)
+
+    def test_an_explicit_list_still_scopes_and_keeps_memory(self):
+        s = recall.Settings()
+        s.collections, s.memory_collections = ["notes"], ["agentmem"]
+        hits = [{"file": "qmd://notes/a.md", "title": "A"}, {"file": "qmd://other/c.md", "title": "C"},
+                {"file": "qmd://agentmem/p/memory/b.md", "title": "B"}]
+        fused, _ = recall.fuse([], hits, s)
+        self.assertEqual({h["file"] for h in fused}, {"qmd://notes/a.md", "qmd://agentmem/p/memory/b.md"})
+

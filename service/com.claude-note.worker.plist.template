@@ -38,7 +38,7 @@
 
     <!-- Working directory -->
     <key>WorkingDirectory</key>
-    <string>{{HOME}}</string>
+    <string>{{VAULT_PATH}}/.claude-note/tmp</string>
 
     <!-- Process limits -->
     <key>ProcessType</key>

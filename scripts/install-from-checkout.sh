@@ -234,6 +234,7 @@ if [[ $NON_INTERACTIVE -eq 1 ]]; then
 
     if [[ "$(uname -s)" == "Darwin" ]]; then
         PLIST="$HOME/Library/LaunchAgents/com.claude-note.worker.plist"
+        mkdir -p "$VAULT_ROOT/.claude-note/tmp"
         if [[ ! -f "$PLIST" ]]; then
             mkdir -p "$HOME/Library/LaunchAgents"
             cat > "$PLIST" <<EOF
@@ -246,6 +247,7 @@ if [[ $NON_INTERACTIVE -eq 1 ]]; then
     <array><string>$(xml_escape "$BIN")</string><string>worker</string></array>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
+    <key>WorkingDirectory</key><string>$(xml_escape "$VAULT_ROOT/.claude-note/tmp")</string>
     <key>StandardOutPath</key><string>$(xml_escape "$VAULT_ROOT/.claude-note/logs/worker-stdout.log")</string>
     <key>StandardErrorPath</key><string>$(xml_escape "$VAULT_ROOT/.claude-note/logs/worker-stderr.log")</string>
     <key>EnvironmentVariables</key>
