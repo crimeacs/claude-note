@@ -389,6 +389,29 @@ class ExportCursorImportIsolationTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 importers._cursor_bubble_message({'type': 2, 'text': 'answer', field: []})
 
+    def test_empty_supported_assistant_export_is_skipped_not_unchanged(self):
+        conversation=self.conversation('empty-assistant')
+        conversation['chat_messages'][1]['text']=''
+        path=self.archive([('conversations.json',[conversation])])
+        report={};seen={};problems=[]
+        self.assertEqual(importers.import_zip(path,seen,problems=problems,report=report),0)
+        self.assertEqual(report.get('skipped_noninteractive_conversations'),1)
+        self.assertEqual(report.get('unchanged_conversations',0),0)
+        self.assertEqual(report.get('valid_interactive_conversations',0),0)
+        self.assertEqual(seen,{})
+        self.assertEqual(problems,[])
+
+    def test_empty_supported_assistant_cursor_is_skipped_not_unchanged(self):
+        composer=self.composer('empty-assistant',bubbles=[{'type':1,'text':'Synthetic question'},
+                                                        {'type':2,'text':''}])
+        self.database([('composerData:empty-assistant',json.dumps(composer))])
+        report={};seen={};problems=[]
+        self.assertEqual(importers.sweep_cursor(seen,0,problems=problems,report=report),0)
+        self.assertEqual(report.get('skipped_noninteractive_composers'),1)
+        self.assertEqual(report.get('unchanged_composers',0),0)
+        self.assertEqual(seen,{})
+        self.assertEqual(problems,[])
+
 
 if __name__ == '__main__':
     unittest.main()

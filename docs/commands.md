@@ -38,7 +38,9 @@ Automatic sweeps run every 30 minutes. Supported export zips in
 `~/Documents/claude-note-imports/` or recognized download patterns are normalized.
 Original archives remain in place; version-aware backup copies go to `done/`,
 including a retry after a previous backup failure when no new sessions are queued.
-A backup is separate from import completion and does not certify that all archive
+Backup presence uses source size and modification time, without a cryptographic
+copy-integrity receipt. A backup is separate from import completion and does not
+certify that all archive
 members or conversations were captured. Backfills may queue model work.
 Automation/subagent runs are excluded from interactive-session recovery.
 

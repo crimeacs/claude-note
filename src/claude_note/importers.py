@@ -313,7 +313,8 @@ def _export_conversation(conv):
 
 def _interactive(messages):
     return (any(message['role'] == 'user' and (message.get('text') or '').strip() for message in messages)
-            and any(message['role'] == 'assistant' for message in messages))
+            and any(message['role'] == 'assistant' and ((message.get('text') or '').strip() or message.get('tools'))
+                    for message in messages))
 
 
 def import_zip(zip_path: Path, seen: dict, *, problems=None, report=None) -> Optional[int]:
