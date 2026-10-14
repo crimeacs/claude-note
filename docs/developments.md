@@ -1,5 +1,33 @@
 # Developments
 
+## 2.1.7 — verify import evidence when a session needs work (14 October 2026)
+
+Queue polling checks canonical receipts and exact delivery metadata for every
+visible import batch. Full snapshot reads are deferred until a session has an
+event to deliver or an ordinary journal cursor to acknowledge. At that point,
+all visible imported revisions for that session are verified, including older,
+already captured revisions. A corrupt revision still blocks newer imports and
+ordinary hooks for the same session; unrelated sessions can progress. The
+verification set lives only for that reader invocation. Actual capture and
+source reads continue to verify current canonical evidence independently; file
+size or timestamps never stand in for a digest check.
+
+Captured batches without further delivery or cursor work no longer rehash their
+snapshot bodies on every poll. Snapshot-only corruption in such idle history
+may therefore be reported later, when its session needs work or its evidence is
+used. This is a change in detection timing, not a historical corpus audit.
+Metadata inspection still scales with queue size, and a selected session with
+many visible revisions still requires all of their snapshot bytes. Rechecking
+metadata can make that busy path and old captured cleanup slower; the intended
+gain is fewer redundant reads during idle polls and unrelated-session backlogs.
+
+Cleanup checks canonical metadata, age and captured event IDs before reading
+snapshot bodies. Only an old, fully captured deletion candidate receives the
+full source check; corrupt candidates retain their delivery copy for recovery.
+The seven-day queue lifetime and retained canonical receipts, restrictions and
+snapshots are unchanged. These changes reduce redundant local reads; they do
+not establish agent productivity or exactly-once model and external effects.
+
 ## 2.1.6 — retain the installed Python on upgrades (14 October 2026)
 
 Both installers retain the existing tool's external Python by default. The
