@@ -4,7 +4,10 @@ import io
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
+import urllib.error
 from datetime import datetime
 from pathlib import Path
 from unittest import mock
@@ -355,6 +358,165 @@ class ServerEngineTests(unittest.TestCase):
         with mock.patch.object(recall, "server_post", return_value=None):
             res = recall.recall("Can I just run npm run build on the 4 GB box?", settings(engine="server"))
         self.assertEqual(res.status, "unavailable")
+
+
+class ServerTransportTests(unittest.TestCase):
+    def response(self, body, status=200):
+        response = io.BytesIO(body if isinstance(body, bytes) else json.dumps(body).encode())
+        response.status = status
+        return response
+
+    def test_structured_http_failure_preserves_identity_and_denies_score_shaped_body(self):
+        response = self.response({"error": "queue_full", "vec": [{"file": "private"}],
+                                  "passage_scores": {"p": .9}, "manifest": {"ok": True}}, 503)
+        error = urllib.error.HTTPError("http://private.invalid/secret", 503, "private text", {}, response)
+        with mock.patch("urllib.request.urlopen", side_effect=error) as open_url:
+            got = recall.server_post(settings(), "/rerank", {"question": "private question"}, 1)
+        self.assertEqual(set(got), {"error", "manifest", "client_transport"})
+        receipt = got["client_transport"]
+        self.assertEqual((receipt["route"], receipt["http_status"], receipt["outcome"]),
+                         ("/rerank", 503, "http_error"))
+        sent = json.loads(open_url.call_args.args[0].data)
+        self.assertEqual(receipt["request_id"], sent["request_id"])
+        self.assertNotIn("private", json.dumps(receipt))
+
+    def test_malformed_and_oversized_responses_are_distinct_failures(self):
+        for body, outcome in ((b"not JSON", "invalid_response_json"),
+                              (b"{\"a\":\"\xff\"}", "invalid_response_json"),
+                              (b"[]", "invalid_response_object"),
+                              (b"x" * 4_000_001, "response_too_large")):
+            with self.subTest(outcome=outcome), mock.patch("urllib.request.urlopen", return_value=self.response(body)):
+                got = recall.server_post(settings(), "/search", {}, 1)
+            self.assertEqual(got["error"], outcome)
+            self.assertEqual(got["client_transport"]["http_status"], 200)
+
+    def test_transport_error_and_socket_timeout_do_not_persist_exception_text(self):
+        for error, outcome in ((urllib.error.URLError("secret hostname"), "transport_error"),
+                               (urllib.error.URLError(TimeoutError("secret hostname")), "socket_timeout")):
+            with self.subTest(outcome=outcome), mock.patch("urllib.request.urlopen", side_effect=error):
+                got = recall.server_post(settings(), "/search", {}, 1)
+            self.assertEqual(got["error"], outcome)
+            self.assertNotIn("secret", json.dumps(got))
+
+    def test_unknown_or_empty_server_errors_never_admit_payload_or_persist_error_text(self):
+        for error in ("private URL and secret question", "", False, {"private": "text"}):
+            with self.subTest(error=error), mock.patch("urllib.request.urlopen", return_value=self.response({
+                    "error": error, "vec": [{"file": "secret"}], "passage_scores": {"p": .9}})):
+                got = recall.server_post(settings(), "/search", {"request_id": "private-caller-identifier"}, 1)
+            self.assertEqual(got["error"], "server_error")
+            self.assertEqual(got["client_transport"]["outcome"], "server_error")
+            self.assertNotIn("private", json.dumps(got))
+            self.assertNotIn("secret", json.dumps(got))
+
+    def test_absolute_http_deadline_is_retained_and_late_read_cannot_mutate_receipt(self):
+        release = threading.Event()
+        response = self.response({"lex": []})
+        original_read = response.read
+        response.read = lambda n: (release.wait(1), original_read(n))[1]
+        try:
+            with mock.patch("urllib.request.urlopen", return_value=response):
+                started = time.monotonic()
+                got = recall.server_post(settings(), "/search", {}, .03)
+            self.assertLess(time.monotonic() - started, .3)
+            self.assertEqual(got["error"], "client_deadline")
+            frozen = json.dumps(got, sort_keys=True)
+            release.set()
+            time.sleep(.03)
+            self.assertEqual(json.dumps(got, sort_keys=True), frozen)
+        finally:
+            release.set()
+
+    def test_read_slot_exhaustion_is_not_reported_as_a_socket_or_elapsed_deadline(self):
+        with mock.patch.object(recall, "_READ_SLOTS", threading.BoundedSemaphore(0)):
+            got = recall.server_post(settings(), "/search", {}, 1)
+        self.assertEqual(got["error"], "client_read_capacity")
+
+    def test_search_subdeadline_retains_remaining_recall_budget_for_auto_fallback(self):
+        for engine in ("server", "auto"):
+            release = threading.Event()
+            response = self.response({"lex": []})
+            original_read = response.read
+            response.read = lambda n: (release.wait(1), original_read(n))[1]
+            calls = []
+            try:
+                with self.subTest(engine=engine), mock.patch("urllib.request.urlopen", return_value=response):
+                    result = recall.recall("payment retry idempotency", settings(
+                        engine=engine, timeout=.03, budget=.5), runner=lambda *_: calls.append(True) or [])
+                self.assertEqual(result.server_calls[0]["outcome"], "client_deadline")
+                self.assertFalse(result.deadline_exhausted)
+                self.assertEqual(bool(calls), engine == "auto")
+                self.assertEqual(result.status, "miss" if engine == "auto" else "unavailable")
+            finally:
+                release.set()
+
+    def test_outer_read_capacity_failure_retains_attempt_without_starting_transport(self):
+        result = recall.Result(status="skipped", engine="server")
+        with mock.patch.object(recall, "_READ_SLOTS", threading.BoundedSemaphore(0)), mock.patch("urllib.request.urlopen") as open_url:
+            with self.assertRaises(TimeoutError):
+                recall._server_attempt(result, "/search", time.monotonic() + 1,
+                    lambda request_id: recall.server_post(settings(), "/search", {"request_id": request_id}, 1))
+        self.assertEqual(result.server_calls[0]["outcome"], "recall_read_capacity")
+        open_url.assert_not_called()
+
+    def test_independent_requests_have_distinct_call_ids_and_diagnostics(self):
+        from concurrent.futures import ThreadPoolExecutor
+        with mock.patch("urllib.request.urlopen", side_effect=lambda *_args, **_kwargs: self.response({"lex": [], "vec": []})):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(lambda _: recall.recall("payment retry idempotency", settings(engine="server")), range(2)))
+        self.assertTrue(all(result.status == "miss" for result in results))
+        self.assertNotEqual(results[0].server_calls[0]["request_id"], results[1].server_calls[0]["request_id"])
+        results[0].server_calls[0]["outcome"] = "changed locally"
+        self.assertEqual(results[1].server_calls[0]["outcome"], "response")
+
+    def test_strict_server_failure_and_auto_cli_fallback_report_actual_attempts(self):
+        for engine, expected in (("server", ["server"]), ("auto", ["server", "cli"])):
+            with self.subTest(engine=engine), mock.patch("urllib.request.urlopen", side_effect=OSError("secret")):
+                result = recall.recall("payment retry idempotency", settings(engine=engine), runner=lambda *_: [])
+            self.assertEqual(result.engine, expected[-1])
+            self.assertEqual(result.attempted_engines, expected)
+            self.assertEqual(result.server_calls[0]["outcome"], "transport_error")
+            self.assertEqual(result.to_dict()["server_calls"], result.server_calls)
+
+    def test_outer_deadline_retains_attempt_and_does_not_borrow_abandoned_result(self):
+        release = threading.Event()
+        def stuck_pool(prompt, ladder, s, started, private_result, request_id):
+            release.wait(1)
+            private_result.server_calls.append({"outcome": "late result"})
+            return {}
+        try:
+            with mock.patch.object(recall, "_server_pool", side_effect=stuck_pool):
+                result = recall.recall("payment retry idempotency", settings(engine="server", budget=.03))
+            self.assertEqual(result.engine, "server")
+            self.assertEqual(result.attempted_engines, ["server"])
+            self.assertEqual(result.server_calls[0]["outcome"], "recall_deadline")
+            frozen = json.dumps(result.to_dict(), sort_keys=True)
+            release.set()
+            time.sleep(.03)
+            self.assertEqual(json.dumps(result.to_dict(), sort_keys=True), frozen)
+        finally:
+            release.set()
+
+    def test_failed_rerank_cannot_admit_scores_and_keeps_call_receipt(self):
+        hits = [recall.Hit(uri=f"qmd://public/{i}.md", title=str(i), snippet="Public retry evidence", passage_id=f"p{i}") for i in range(2)]
+        result = recall.Result(status="hit", engine="server")
+        with mock.patch.object(recall, "server_post", return_value={"error": "deadline",
+                "passage_scores": {"p0": .1, "p1": .9}, "scored_passage_ids": ["p0", "p1"]}):
+            ranked = recall._rank_passages("retry", hits, settings(), result, time.monotonic() + 1)
+        self.assertFalse(result.reranked)
+        self.assertEqual([h.passage_id for h in ranked], ["p0", "p1"])
+        self.assertEqual(result.server_calls[0]["route"], "/rerank")
+
+    def test_hook_log_retains_failure_diagnostics_without_response_or_exception_payload(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(recall, "log_path", return_value=Path(tmp) / "recall.jsonl"):
+            with mock.patch("urllib.request.urlopen", side_effect=OSError("secret transport message")):
+                result = recall.recall("payment retry idempotency", settings(engine="server"))
+            recall.log_event("recall", result)
+            row = json.loads((Path(tmp) / "recall.jsonl").read_text())
+        self.assertEqual(row["engine"], "server")
+        self.assertEqual(row["attempted_engines"], ["server"])
+        self.assertEqual(row["server_calls"], result.server_calls)
+        self.assertFalse(row["deadline_exhausted"])
+        self.assertNotIn("secret", json.dumps(row))
 
 
 class RealNodeTests(unittest.TestCase):

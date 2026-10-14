@@ -17,6 +17,11 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const metadata = { corpus_digest: 'corpus', generation: 'generation', vector_rows: 1, vector_models: ['embed-id'] };
 const row = { filepath: 'qmd://public/a.md', title: 'A', body: 'The retry handler must preserve idempotency keys across failed payment attempts.', score: .5 };
 const lex = () => ({ request: async () => ({ rows: [row], metadata }), close() {} });
+const deferred = () => {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+};
 
 test('passage selection retains older matching evidence instead of an unrelated latest block', () => {
   const body = '# Earlier\n\nThe retry handler must preserve idempotency keys across failed payment attempts.\n\n# Latest\n\nBasil grows well beside a sunny window and needs occasional water during winter.\n';
@@ -252,3 +257,222 @@ test('real pinned SDK and production HTTP worker serve a wholly isolated public 
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+test('metadata ownership: pending refresh settles before a later scoped search starts', async () => {
+  const held = deferred(), started = deferred(), calls = [];
+  const service = createRecallService({ store: {}, llm: {}, modelAvailable: () => false,
+    lexical: { async request(message) {
+      calls.push(message.kind);
+      if (message.kind === 'metadata') { started.resolve(); await held.promise; }
+      return { rows: [row], metadata };
+    }, close() {} } });
+  let search, refresh;
+  try {
+    refresh = service.refresh(Date.now() + 1000);
+    await started.promise;
+    search = service.request('/search', { rungs: ['retry'], collections: ['public'] });
+    await new Promise(setImmediate);
+    assert.deepEqual(calls, ['metadata']);
+    held.resolve(); await refresh;
+    const result = await search;
+    assert.deepEqual(calls, ['metadata', 'search']);
+    assert.equal(result.coverage.lexical, 'complete_scoped_before_limit');
+    assert.equal(result.lex[0][0].file, row.filepath);
+  } finally { held.resolve(); await Promise.allSettled([refresh, search]); service.close(); }
+});
+
+test('metadata ownership: real lexical metadata timeout cannot interrupt a later longer search', async () => {
+  const workers = []; let fallback = 0;
+  class FixtureWorker extends EventEmitter {
+    sent = [];
+    constructor(held) { super(); this.held = held; }
+    postMessage(message) {
+      this.sent.push(message.kind);
+      if (!this.held) queueMicrotask(() => this.emit('message', { id: message.id, rows: [row], metadata }));
+    }
+    terminate() { queueMicrotask(() => this.emit('exit', 0)); return Promise.resolve(); }
+  }
+  const scoped = new ScopedLexicalWorker({});
+  const lexical = {
+    request(message, deadline) {
+      if (!scoped.worker) { const worker = new FixtureWorker(workers.length === 0); workers.push(worker); scoped.worker = worker; }
+      return scoped.request(message, deadline);
+    },
+    close() { scoped.close(); },
+  };
+  const service = createRecallService({ lexical, store: {}, llm: {}, modelAvailable: () => false,
+    fallbackLexical: async () => { fallback++; return [row]; } });
+  try {
+    const refresh = service.refresh(Date.now() + 20);
+    await new Promise(setImmediate);
+    const search = service.request('/search', { rungs: ['retry'], collections: ['public'], deadline_at_ms: Date.now() + 1000 });
+    await refresh;
+    const result = await search;
+    assert.equal(fallback, 0);
+    assert.equal(result.coverage.lexical, 'complete_scoped_before_limit');
+    assert.equal(result.lex[0][0].file, row.filepath);
+    assert.deepEqual(workers.map(worker => worker.sent), [['metadata'], ['search']]);
+    assert.ok(service.capabilities().degradation.includes('deadline'));
+    assert.equal(workers[0].listenerCount('message'), 0);
+    assert.equal(workers[0].listenerCount('exit'), 0);
+  } finally { service.close(); }
+});
+
+test('metadata ownership: a shorter coalesced waiter cannot cancel the shared refresh', async () => {
+  const held = deferred(), started = deferred(); let calls = 0, closed = 0;
+  const service = createRecallService({ store: {}, llm: {}, lexical: {
+    async request() { calls++; started.resolve(); await held.promise; return { rows: [], metadata }; },
+    close() { closed++; },
+  } });
+  let first, second;
+  try {
+    first = service.refresh(Date.now() + 1000); await started.promise;
+    second = service.refresh(Date.now() + 15);
+    await Promise.race([second, sleep(150).then(() => { throw new Error('Short metadata waiter did not finish'); })]);
+    assert.equal(calls, 1); assert.equal(closed, 0);
+    assert.equal(service.capabilities().lexical_ready, false);
+    held.resolve(); await first;
+    assert.equal(service.capabilities().lexical_ready, true);
+  } finally { held.resolve(); await Promise.allSettled([first, second]); service.close(); }
+});
+
+test('metadata ownership: an unresolved adapter is bounded and late success is ignored', async () => {
+  const held = deferred(); let closed = 0;
+  const service = createRecallService({ store: {}, llm: {}, lexical: {
+    request() { return held.promise; }, close() { closed++; },
+  } });
+  try {
+    const result = await Promise.race([service.refresh(Date.now() + 15), sleep(200).then(() => { throw new Error('Unbounded refresh'); })]);
+    assert.equal(result.lexical_ready, false); assert.equal(closed, 1);
+    assert.ok(result.degradation.includes('deadline'));
+    held.resolve({ rows: [], metadata }); await new Promise(setImmediate);
+    assert.equal(service.capabilities().lexical_ready, false);
+  } finally { held.resolve({ rows: [], metadata }); service.close(); }
+});
+
+test('metadata ownership: synchronous and rejected adapters release the refresh boundary', async () => {
+  for (const reject of [false, true]) {
+    let calls = 0;
+    const service = createRecallService({ store: {}, llm: {}, modelAvailable: () => false,
+      lexical: { request(message) {
+        calls++;
+        if (message.kind === 'metadata') {
+          const error = Object.assign(new Error('Synthetic metadata failure'), { code: 'fixture_failure' });
+          if (reject) return Promise.reject(error);
+          throw error;
+        }
+        return Promise.resolve({ rows: [row], metadata });
+      }, close() {} } });
+    try {
+      const health = await service.refresh(Date.now() + 1000);
+      assert.ok(health.degradation.includes('fixture_failure'));
+      const result = await service.request('/search', { rungs: ['retry'] });
+      assert.equal(result.lex[0][0].file, row.filepath); assert.equal(calls, 2);
+    } finally { service.close(); }
+  }
+});
+
+test('metadata ownership: malformed response and throwing cleanup cannot strand waiters', async () => {
+  for (const malformed of [true, false]) {
+    const service = createRecallService({ store: {}, llm: {}, lexical: {
+      request() { return malformed ? Promise.resolve(undefined) : new Promise(() => {}); },
+      close() { throw Object.assign(new Error('Synthetic close failure'), { code: 'fixture_close_failure' }); },
+    } });
+    try {
+      const health = await Promise.race([service.refresh(Date.now() + 15), sleep(100).then(() => { throw new Error('Stranded metadata waiter'); })]);
+      assert.equal(health.lexical_ready, false);
+      assert.ok(health.degradation.includes(malformed ? 'index_metadata_unavailable' : 'deadline'));
+      service.close();
+      assert.equal(service.capabilities().ok, false);
+      assert.ok(service.capabilities().degradation.includes('fixture_close_failure'));
+    } finally { service.close(); }
+  }
+});
+
+test('metadata ownership: queued deadline and cancellation are rechecked after waiting', async () => {
+  for (const cancel of [false, true]) {
+    const held = deferred(), started = deferred(); let searched = 0, cancelled = false;
+    const service = createRecallService({ store: {}, llm: {}, modelAvailable: () => false,
+      lexical: { async request(message) {
+        if (message.kind === 'metadata') { started.resolve(); await held.promise; }
+        else searched++;
+        return { rows: [row], metadata };
+      }, close() {} } });
+    let refresh, query;
+    try {
+      refresh = service.refresh(Date.now() + 1000); await started.promise;
+      query = service.request('/search', { rungs: ['retry'], deadline_at_ms: Date.now() + (cancel ? 1000 : 15) }, () => cancelled);
+      const outcome = query.then(() => 'unexpected success', error => error.code);
+      if (cancel) { cancelled = true; held.resolve(); }
+      assert.equal(await outcome, 'deadline');
+      held.resolve(); await refresh;
+      await new Promise(setImmediate);
+      assert.equal(searched, 0);
+    } finally { held.resolve(); await Promise.allSettled([refresh, query]); service.close(); }
+  }
+});
+
+test('metadata ownership: close settles refresh and queued callers and rejects new work', async () => {
+  const held = deferred(), started = deferred(); let searched = 0;
+  const service = createRecallService({ store: {}, llm: {}, modelAvailable: () => false,
+    lexical: { async request(message) {
+      if (message.kind === 'metadata') { started.resolve(); await held.promise; }
+      else searched++;
+      return { rows: [row], metadata };
+    }, close() {} } });
+  let refresh, query;
+  try {
+    refresh = service.refresh(Date.now() + 1000); await started.promise;
+    query = service.request('/search', { rungs: ['retry'] });
+    const outcome = query.then(() => 'unexpected success', error => error.code);
+    service.close(); service.close();
+    const health = await Promise.race([refresh, sleep(100).then(() => { throw new Error('Close did not settle refresh'); })]);
+    assert.equal(health.ok, false); assert.equal(await outcome, 'closed');
+    assert.equal(searched, 0);
+    await assert.rejects(service.request('/search', { rungs: ['retry'] }), error => error.code === 'closed');
+    held.resolve(); await new Promise(setImmediate);
+    assert.equal(service.capabilities().lexical_ready, false);
+  } finally { held.resolve(); await Promise.allSettled([refresh, query]); service.close(); }
+});
+
+test('metadata ownership: close rejects active caller without admitting another model', async () => {
+  const held = deferred(), started = deferred(); let models = 0;
+  const service = createRecallService({ lexical: lex(), llm: {}, store: {
+    async searchVector() { models++; started.resolve(); await held.promise; return [row]; },
+  } });
+  let active;
+  try {
+    active = service.request('/search', { question: 'owned model', deadline_at_ms: Date.now() + 1000 });
+    const outcome = active.then(() => 'unexpected success', error => error.code);
+    await started.promise; service.close();
+    const result = await Promise.race([outcome, sleep(100).then(() => 'close did not settle caller')]);
+    assert.equal(result, 'closed');
+    await assert.rejects(service.request('/search', { question: 'new' }), error => error.code === 'closed');
+    assert.equal(models, 1);
+    held.resolve(); await new Promise(setImmediate);
+    assert.equal(service.capabilities().ok, false);
+  } finally { held.resolve(); await Promise.allSettled([active]); service.close(); }
+});
+
+test('metadata ownership: close during lexical work starts no fallback, next rung or vector', async () => {
+  for (const failed of [false, true]) {
+    const held = deferred(), started = deferred(); let lexicalCalls = 0, fallback = 0, models = 0;
+    const service = createRecallService({ llm: {},
+      lexical: { request() { lexicalCalls++; started.resolve(); return held.promise; },
+        close() {
+          if (failed) held.reject(Object.assign(new Error('Closed fixture'), { code: 'adapter_unavailable' }));
+          else held.resolve({ rows: [row], metadata });
+        } },
+      fallbackLexical: async () => { fallback++; return [row]; },
+      store: { async searchVector() { models++; return [row]; } },
+    });
+    try {
+      const query = service.request('/search', { rungs: ['retry', 'payment'], question: 'retry payment' });
+      const outcome = query.then(() => 'unexpected success', error => error.code);
+      await started.promise; service.close();
+      assert.equal(await outcome, 'closed');
+      await new Promise(setImmediate);
+      assert.equal(lexicalCalls, 1); assert.equal(fallback, 0); assert.equal(models, 0);
+    } finally { service.close(); }
+  }
+});

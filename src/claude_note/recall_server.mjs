@@ -184,8 +184,8 @@ export class ScopedLexicalWorker {
     return new Promise((accept, reject) => {
       const cleanup = () => { clearTimeout(timer); worker.off('message', onMessage); worker.off('error', onError); worker.off('exit', onExit); };
       const fail = e => { cleanup(); reject(e); };
-      const onError = e => { this.worker = null; fail(e); };
-      const onExit = () => { this.worker = null; fail(err('adapter_unavailable', 'Lexical worker exited')); };
+      const onError = e => { if (this.worker === worker) this.worker = null; fail(e); };
+      const onExit = () => { if (this.worker === worker) this.worker = null; fail(err('adapter_unavailable', 'Lexical worker exited')); };
       const onMessage = response => {
         if (response.id !== id && !response.error) return;
         cleanup();
@@ -203,25 +203,75 @@ export class ScopedLexicalWorker {
 export function createRecallService({ store, llm, lexical, manifest = {}, queueLimit = 8, maxRequestMs = 8000,
   modelAvailable = () => true, fallbackLexical, onFatal = () => {}, onJobStart = () => {}, now = Date.now }) {
   const started = now(), waiting = [];
-  let active = false, poisoned = false, expired = 0, rejected = 0;
+  let active = false, poisoned = false, closed = false, expired = 0, rejected = 0;
+  let metadataRefresh = null, activeJob = null;
   let metadata = {}, lexicalReady = false, vectorObserved = false, rerankObserved = false;
   const degradation = new Set();
-  const capabilities = () => ({ ...manifest, protocol_version: 2, engine: 'qmd-sdk', ok: !poisoned,
+  const capabilities = () => ({ ...manifest, protocol_version: 2, engine: 'qmd-sdk', ok: !poisoned && !closed,
     index: { ...manifest.index, ...metadata,
       generation: metadata.generation ? digest(JSON.stringify([metadata.generation, manifest.index?.config_revision,
-        manifest.models?.embed?.id, manifest.models?.embed?.revision, manifest.models?.rerank?.id, manifest.models?.rerank?.revision])) : undefined }, lexical_ready: lexicalReady && !poisoned,
-    vector_ready: vectorObserved && !poisoned, rerank_ready: rerankObserved && !poisoned,
-    models: { ...manifest.models, embed: { ...manifest.models?.embed, ready: vectorObserved && !poisoned },
-      rerank: { ...manifest.models?.rerank, ready: rerankObserved && !poisoned } },
+        manifest.models?.embed?.id, manifest.models?.embed?.revision, manifest.models?.rerank?.id, manifest.models?.rerank?.revision])) : undefined }, lexical_ready: lexicalReady && !poisoned && !closed,
+    vector_ready: vectorObserved && !poisoned && !closed, rerank_ready: rerankObserved && !poisoned && !closed,
+    models: { ...manifest.models, embed: { ...manifest.models?.embed, ready: vectorObserved && !poisoned && !closed },
+      rerank: { ...manifest.models?.rerank, ready: rerankObserved && !poisoned && !closed } },
     degradation: [...degradation], queue: { active, pending: waiting.length, limit: queueLimit, expired, rejected },
     uptime_s: Math.floor((now() - started) / 1000), loaded_ms: 0, asof_ms: now() });
-  function remaining(deadline) { if (now() >= deadline) throw err('deadline', 'Request deadline expired'); }
+  function remaining(deadline) {
+    if (closed) throw err('closed', 'Server closed');
+    if (now() >= deadline) throw err('deadline', 'Request deadline expired');
+  }
+  function beginMetadataRefresh(deadline) {
+    const operation = { done: false, timer: null, deadline };
+    operation.promise = new Promise(resolve => { operation.resolve = resolve; });
+    operation.finish = (error, response, closeWorker = false) => {
+      if (operation.done) return;
+      operation.done = true; clearTimeout(operation.timer);
+      if (closeWorker) {
+        try { lexical.close?.(); } catch (failure) { error ||= failure; }
+      }
+      let nextMetadata;
+      try {
+        nextMetadata = response?.metadata;
+        if (!error && (!nextMetadata || typeof nextMetadata !== 'object' || Array.isArray(nextMetadata)))
+          error = err('index_metadata_unavailable', 'Invalid metadata response');
+      } catch (failure) { error ||= failure; }
+      if (!closed) {
+        if (error) degradation.add(error.code || 'index_metadata_unavailable');
+        else { metadata = nextMetadata; lexicalReady = true; }
+      }
+      if (metadataRefresh === operation) metadataRefresh = null;
+      operation.resolve();
+    };
+    metadataRefresh = operation;
+    // Assign shared ownership before invoking an adapter, including one that
+    // throws synchronously. Its timer is installed first if it has its own.
+    void Promise.resolve().then(() => {
+      if (operation.done) return;
+      remaining(deadline);
+      const pending = lexical.request({ kind: 'metadata' }, deadline);
+      operation.timer = setTimeout(() => operation.finish(err('deadline', 'Metadata deadline expired'), null, true),
+        Math.max(1, deadline - now()));
+      Promise.resolve(pending).then(response => {
+        if (now() >= deadline) operation.finish(err('deadline', 'Metadata deadline expired'), null, true);
+        else operation.finish(null, response);
+      }, error => operation.finish(error));
+    }).catch(error => operation.finish(error));
+    return operation;
+  }
+  function waitForMetadata(operation, deadline) {
+    if (deadline >= operation.deadline) return operation.promise.then(() => capabilities());
+    // A short /health waiter may leave without cancelling the shared borrow.
+    return new Promise(resolve => {
+      const timer = setTimeout(() => resolve(capabilities()), Math.max(1, deadline - now()));
+      void operation.promise.then(() => { clearTimeout(timer); resolve(capabilities()); });
+    });
+  }
   async function modelCall(fn, deadline) {
     remaining(deadline);
     if (poisoned) throw err('poisoned', 'Model worker requires restart');
     let timer;
     try {
-      return await Promise.race([Promise.resolve().then(fn), new Promise((_, reject) => {
+      return await Promise.race([Promise.resolve().then(() => { remaining(deadline); return fn(); }), new Promise((_, reject) => {
         timer = setTimeout(() => {
           poisoned = true; degradation.add('model_deadline_requires_restart');
           lexical.close?.(); reject(err('deadline', 'Model deadline expired; restart required'));
@@ -232,11 +282,13 @@ export function createRecallService({ store, llm, lexical, manifest = {}, queueL
   }
   async function lexicalSearch(query, collections, limit, deadline) {
     try {
+      remaining(deadline);
       const response = await lexical.request({ kind: 'search', query, collections, limit }, deadline);
+      remaining(deadline);
       metadata = response.metadata; lexicalReady = true;
       return { rows: response.rows, coverage: 'complete_scoped_before_limit' };
     } catch (e) {
-      if (e.code === 'deadline') throw e;
+      if (e.code === 'deadline' || e.code === 'closed') throw e;
       degradation.add(e.code || 'scoped_adapter_unavailable');
       // Compatibility path is explicitly partial. Widening is bounded and can
       // never prove that the SDK's global prefilter found every scoped match.
@@ -317,28 +369,35 @@ export function createRecallService({ store, llm, lexical, manifest = {}, queueL
       manifest: capabilities(), ms: Math.round(performance.now() - t) };
   }
   async function drain() {
-    if (active) return;
+    if (active || closed) return;
     active = true;
-    while (waiting.length) {
-      const job = waiting.shift();
-      if (job.cancelled() || now() >= job.deadline) { expired++; job.reject(err('deadline', 'Queued request expired')); continue; }
-      if (poisoned) { job.reject(err('poisoned', 'Model worker requires restart')); continue; }
-      onJobStart(job.body.request_id);
-      try { job.resolve(await (job.route === '/search' ? search(job.body, job.deadline) : rerank(job.body, job.deadline))); }
-      catch (e) { job.reject(e); }
-    }
-    active = false;
+    try {
+      // Claim query ownership before waiting. New metadata reads use cached
+      // capabilities until this query drain releases the lexical worker.
+      if (metadataRefresh) await metadataRefresh.promise;
+      while (waiting.length && !closed) {
+        const job = waiting.shift();
+        if (job.cancelled() || now() >= job.deadline) { expired++; job.reject(err('deadline', 'Queued request expired')); continue; }
+        if (poisoned) { job.reject(err('poisoned', 'Model worker requires restart')); continue; }
+        activeJob = job;
+        try {
+          onJobStart(job.body.request_id);
+          job.resolve(await (job.route === '/search' ? search(job.body, job.deadline) : rerank(job.body, job.deadline)));
+        } catch (e) { job.reject(e); }
+        finally { activeJob = null; }
+      }
+    } finally { active = false; }
   }
   return {
     capabilities,
-    async refresh(deadline = now() + 300) {
-      // Do not send parallel commands into a lexical worker during a search.
-      if (active) return capabilities();
-      try { const response = await lexical.request({ kind: 'metadata' }, deadline); metadata = response.metadata; lexicalReady = true; }
-      catch (e) { degradation.add(e.code || 'index_metadata_unavailable'); }
-      return capabilities();
+    refresh(deadline = now() + 300) {
+      if (active || closed || poisoned) return Promise.resolve(capabilities());
+      const requested = Number.isFinite(deadline) ? deadline : now();
+      const operation = metadataRefresh || beginMetadataRefresh(Math.min(requested, now() + 3000));
+      return waitForMetadata(operation, requested);
     },
     request(route, body, cancelled = () => false) {
+      if (closed) return Promise.reject(err('closed', 'Server closed'));
       if (!['/search', '/rerank'].includes(route)) return Promise.reject(err('not_found', 'Unknown route'));
       if (body.index_id && body.index_id !== (manifest.index?.id || 'default')) return Promise.reject(err('index_mismatch', 'Index identity mismatch'));
       if (poisoned) return Promise.reject(err('poisoned', 'Model worker requires restart'));
@@ -356,7 +415,16 @@ export function createRecallService({ store, llm, lexical, manifest = {}, queueL
         void drain();
       });
     },
-    close() { lexical.close?.(); for (const job of waiting.splice(0)) job.reject(err('closed', 'Server closed')); },
+    close() {
+      if (closed) return;
+      closed = true;
+      try { lexical.close?.(); } catch (error) { degradation.add(error?.code || 'adapter_close_failed'); }
+      metadataRefresh?.finish(err('closed', 'Server closed'));
+      // Settle callers, but never claim to cancel an active native model. It
+      // retains ownership until completion/deadline and no new work is admitted.
+      activeJob?.reject(err('closed', 'Server closed'));
+      for (const job of waiting.splice(0)) job.reject(err('closed', 'Server closed'));
+    },
   };
 }
 

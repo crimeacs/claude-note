@@ -81,6 +81,32 @@ on stdin and returns `{"keep": ["c3", "c0"]}`, best first. An empty list means "
 (recall reports a miss); any failure or timeout keeps the pool order. Fit any threshold your judge
 uses on labelled examples, not by eye.
 
+## Server failure diagnostics
+
+JSON results and the local recall log retain `attempted_engines` and
+`server_calls`. Each call records its route, random client request ID, observed
+HTTP status, elapsed time and a bounded outcome such as `socket_timeout`,
+`client_deadline`, `client_read_capacity`, `http_error` or `response`.
+Transport diagnostics contain no prompt, URL, response body or exception message.
+The existing local log still contains query terms and note URIs.
+
+After a search attempt, `engine` identifies its last attempted route: a strict server failure is
+labelled `server`; automatic fallback records both attempts and switches to
+`cli` when a CLI search is scheduled. An empty `attempted_engines` means no
+search was attempted; `engine` then retains its legacy `cli` default.
+The client ID correlates the HTTP request
+and its receipt; the runtime proxy uses a separate internal job ID. These fields
+do not expose queue wait versus native execution time or prove a timeout cause.
+A search's six-second subdeadline can expire before the whole eight-second
+recall budget. Read-capacity exhaustion is distinguished in the call outcome;
+the legacy overall `deadline_exhausted` flag also covers that bounded-read failure.
+
+Health metadata and search operations now share one lexical-worker lifetime.
+An already pending health refresh settles before a search starts; it cannot
+close the worker while that later search is using it. This preserves deadlines
+and may consume part of a queued search's budget. It is separate from the index
+writer's update/embedding refresh.
+
 ## The sentinel
 
 The sentinel reads the **output** of a failed command, never the command text. An earlier version
