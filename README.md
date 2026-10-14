@@ -6,6 +6,17 @@ Claude Note captures what Claude Code, Codex, Cursor and ChatGPT sessions learn,
 Markdown notes, and puts the right notes in front of the agent *before* it acts: on every prompt,
 and again the moment a command fails.
 
+Version 2.1 preserves source evidence, scopes retrieval before truncation, and stages changes
+that would replace human edits. Structured claims carry applicability and separate local
+attestations; authored approval text never grants authority. See the
+[implementation and rollout record](docs/VERIFIED_MEMORY_IMPLEMENTATION.md).
+
+**Upgrade:** external model and staging calls require an explicit source policy. The default
+permits local capture and host recall. Configure only the sources you authorize in
+[the egress reference](docs/configuration.md#source-egress-policy). Existing notes remain
+unverified leads, and staged changes require review. No productivity gain is claimed from
+the deterministic regression suite.
+
 ![The same question with and without Claude Note recall: without it Claude Code says yes; with it the team's note comes back and the answer is no](docs/assets/claude-note-recall.gif)
 
 *Two recorded runs of Claude Code 2.1.296: same model, same question, one with recall
@@ -30,8 +41,8 @@ How we use it across a company of agents, and how well it works on our own 15,00
 | **Capture** | Hooks queue every session; a background worker extracts decisions, gotchas and patterns into typed notes. | automatic |
 | **Recall** | Before the model sees a prompt, a hook searches your notes and injects a short, source-linked shortlist. A miss is announced, never silent. | automatic, or `claude-note recall "…"` |
 | **Sentinel** | When a shell command fails, the known fix for that error is surfaced before the agent retries. Auth, quota and disk-full errors are flagged as "do not retry". | automatic |
-| **Remember** | Write a lesson the moment you learn it; it is indexed in under a second and the next prompt can recall it. | `claude-note remember` |
-| **Prove it** | Separate *configured* from *working*: a canary note is planted in a throwaway index and the real hooks are run against it. | `claude-note doctor` |
+| **Remember** | Write a lesson immediately; lexical indexing and vector freshness are tracked separately. | `claude-note remember` |
+| **Prove it** | Check configuration, isolated hooks, the actual default server and recorded host delivery separately. | `claude-note doctor` |
 
 ## What it looks like
 
