@@ -161,14 +161,22 @@ def _format_vault_summary(vault_index: vault_indexer.VaultIndex, query: str = ""
     if not vault_index or not vault_index.notes:
         return "(No vault notes indexed)"
 
-    lines = [f"Vault has {len(vault_index.notes)} notes."]
-
     visible = [n for n in vault_index.notes.values() if "model" in egress.audiences(str(config.VAULT_ROOT / n.path))]
     terms = set(re.findall(r"\w+", query.casefold()))
     def priority(note):
         words = set(re.findall(r"\w+", f"{note.path} {note.title} {' '.join(note.tags)}".casefold()))
         return (-len(terms & words), note.path)
-    selected = sorted(visible, key=priority)[:100]
+    selected = []
+    # A path grant alone does not authorize its authored controls or lineage.
+    # Inspect a bounded candidate set before including any metadata, so one
+    # host-only note cannot deny an otherwise public synthesis prompt.
+    for note in sorted(visible, key=priority)[:100]:
+        try:
+            egress.prepare("", audience="model", sources=[str(config.VAULT_ROOT / note.path)])
+        except egress.EgressDenied:
+            continue
+        selected.append(note)
+    lines = [f"Eligible notes in this bounded catalog: {len(selected)}."]
     all_tags = {tag for note in selected for tag in note.tags}
     if all_tags:
         lines.append(f"Available tags: {', '.join(sorted(all_tags)[:100])[:2000]}")

@@ -6,17 +6,23 @@ A derivation may go only to audiences allowed by every source. Redaction is a
 second boundary, never a substitute for confidentiality authorization.
 """
 
+import fcntl
 import fnmatch
-import os
-import json
-import re
 import hashlib
+import json
+import os
+import re
 import stat
+import time
+from itertools import chain
 from pathlib import Path
 
 
 class EgressDenied(ValueError):
     pass
+
+
+LINEAGE_LOCK_TIMEOUT = 5.0
 
 
 def external_allowed(text):
@@ -70,6 +76,60 @@ def audiences(source, *, rules=None):
     for restriction in restrictions:
         allowed &= restriction
     return allowed
+
+
+def _audience_set(value):
+    if (not isinstance(value, list) or len(value) > 200
+            or any(not isinstance(item, str) or not item or item != item.strip()
+                   or len(item) > 200 for item in value)):
+        raise EgressDenied('Malformed artifact audiences')
+    return set(value)
+
+
+def _claim_records(text):
+    """One strict bounded claim parser for audience and origin restrictions."""
+    from .mutation import MAX_NOTE_BYTES
+    inspected_bytes = 0
+    for number, match in enumerate(re.finditer(r'<!--\s*claude-note:claim\b', text), 1):
+        if number > 2000:
+            raise EgressDenied('Artifact claim controls exceed inspection bound')
+        end = text.find('-->', match.end())
+        if end < 0 or end - match.end() > MAX_NOTE_BYTES:
+            raise EgressDenied('Malformed or oversized artifact claim control')
+        body = text[match.end():end].strip()
+        inspected_bytes += len(body.encode())
+        if inspected_bytes > MAX_NOTE_BYTES:
+            raise EgressDenied('Artifact claim control exceeds inspection bound')
+        try:
+            # Duplicate keys must not let a second audience field override the
+            # narrower first one. This applies to every object in the marker.
+            def unique(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError('Duplicate claim key')
+                    result[key] = value
+                return result
+            record = json.loads(body, object_pairs_hook=unique)
+            if not isinstance(record, dict):
+                raise ValueError('Claim must be an object')
+        except (ValueError, TypeError, RecursionError) as exc:
+            raise EgressDenied('Malformed artifact claim control') from exc
+        yield record
+
+
+def _artifact_audiences(text):
+    """Authored controls restrict source grants, even before verification."""
+    allowed = None if external_allowed(text) else {'local', 'host'}
+    for record in _claim_records(text):
+        constraint = _audience_set(record.get('audiences', ['host']))
+        allowed = constraint if allowed is None else allowed & constraint
+    return allowed
+
+
+def _check_artifact_audience(allowed, audience):
+    if allowed is not None and audience not in allowed:
+        raise EgressDenied('Artifact audience does not permit this destination')
 
 
 def _source_restrictions(path, parent):
@@ -166,9 +226,8 @@ def prepare(text, *, audience, sources, explicit=False, rules=None):
         raise EgressDenied("Missing derivation sources")
     if not explicit and any(audience not in audiences(source, rules=rules) for source in sources):
         raise EgressDenied(f"Source policy does not allow {audience} egress")
-    if audience not in {"local", "host"} and not external_allowed(text):
-        raise EgressDenied("Source is explicitly private")
     if audience not in {"local", "host"}:
+        _check_artifact_audience(_artifact_audiences(text), audience)
         visited = set()
         while sources:
             source = sources.pop()
@@ -193,7 +252,8 @@ def prepare(text, *, audience, sources, explicit=False, rules=None):
                 canonical = str(path)
                 if not explicit and audience not in audiences(canonical, rules=rules):
                     raise EgressDenied("Resolved source policy does not permit this audience")
-                recorded = recorded_derivations(path)
+                recorded, artifact_audiences = _recorded_lineage(path)
+                _check_artifact_audience(artifact_audiences, audience)
                 if path.parent.name in {'claude-ai', 'chatgpt', 'cursor'} and path.parent.parent.name == 'transcripts' and not recorded:
                     raise EgressDenied('Imported transcript origin is unknown; reimport original source')
                 sources.extend(recorded)
@@ -202,8 +262,7 @@ def prepare(text, *, audience, sources, explicit=False, rules=None):
                 # Frontmatter is a source-level restriction, not a property of
                 # the assembled JSON/model prompt. Bound the inspection.
                 source_text = _source_restrictions(path, parent)
-                if not external_allowed(source_text):
-                    raise EgressDenied("Derivation includes an explicitly private source")
+                _check_artifact_audience(_artifact_audiences(source_text), audience)
                 sources.extend(derivations(source_text))
             except (OSError, ValueError) as exc:
                 if isinstance(exc, EgressDenied):
@@ -222,28 +281,58 @@ def _lineage_path(path, vault_root):
 
 def record_derivation(path, content, *, vault_root):
     """Restrictive local lineage survives removal of authored Markdown metadata."""
-    from .state_io import atomic_json, read_json
+    from .state_io import open_lock
     target = _lineage_path(path, vault_root)
+    # Direct importers also call this boundary without a mutation note lock.
+    # Use a separate stable ledger lock so the complete intersection is atomic
+    # across threads/processes, including when a caller already holds note_lock.
+    descriptor = open_lock(target.with_suffix('.lock'))
+    deadline = time.monotonic() + LINEAGE_LOCK_TIMEOUT
+    try:
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('Source lineage publication lock deadline')
+                time.sleep(.01)
+        _record_derivation(target, content)
+    finally:
+        os.close(descriptor)
+
+
+def _record_derivation(target, content):
+    from .state_io import atomic_json, read_json
     try:
         previous = read_json(target)
     except FileNotFoundError:
         previous = {}
+    if not isinstance(previous, dict):
+        raise EgressDenied('Invalid source lineage')
     unknown = bool(previous.get("unknown"))
+    allowed = _audience_set(previous['artifact_audiences']) if 'artifact_audiences' in previous else None
     try:
         origins = derivations(content)
+        current = _artifact_audiences(content)
+        if current is not None:
+            allowed = current if allowed is None else allowed & current
     except EgressDenied:
         origins, unknown = [], True
     origins = sorted(set(origins) | set(previous.get("origins", [])))
-    if origins or unknown:
-        atomic_json(target, {"version": 1, "origins": origins, "unknown": unknown,
-                            "revision": hashlib.sha256(content.encode()).hexdigest()})
+    if origins or unknown or allowed is not None:
+        record = {"version": 1, "origins": origins, "unknown": unknown,
+                  "revision": hashlib.sha256(content.encode()).hexdigest()}
+        if allowed is not None:
+            record['artifact_audiences'] = sorted(allowed)
+        atomic_json(target, record)
 
 
-def recorded_derivations(path):
+def _recorded_lineage(path):
     from .state_io import read_json
     # No config import: health/recall remain usable before a vault is set up.
     current = Path(path).resolve().parent
-    found = []
+    found, allowed = [], None
     for root in (current, *current.parents):
         state = root / ".claude-note"
         if state.is_symlink():
@@ -255,15 +344,25 @@ def recorded_derivations(path):
                 continue
             except (OSError, ValueError):
                 raise EgressDenied("Cannot inspect source lineage")
+            if not isinstance(record, dict):
+                raise EgressDenied('Invalid source lineage')
             if record.get("unknown"):
                 raise EgressDenied("Source lineage needs owner reconciliation")
+            if 'artifact_audiences' in record:
+                constraint = _audience_set(record['artifact_audiences'])
+                allowed = constraint if allowed is None else allowed & constraint
             origins = record.get("origins", [])
             if not isinstance(origins, list) or any(not isinstance(item, str) for item in origins):
                 raise EgressDenied("Invalid source lineage")
             found.extend(origins)
             if len(found) > 2000:
                 raise EgressDenied("Recorded source lineage exceeds inspection bound")
-    return list(dict.fromkeys(found))
+    return list(dict.fromkeys(found)), allowed
+
+
+def recorded_derivations(path):
+    """Backward-compatible origin list; protected controls stay internal."""
+    return _recorded_lineage(path)[0]
 
 
 def derivations(text):
@@ -295,15 +394,19 @@ def derivations(text):
                 if not isinstance(items, list) or any(not isinstance(v, str) for v in items):
                     raise EgressDenied("Malformed source provenance")
                 found.extend(items)
-    for match in re.finditer(r"(?m)^<!-- claude-note:(?:provenance|claim) (\{[^\n]*\}) -->\s*$", text):
-        try:
-            payload = json.loads(match[1])
-            items = payload.get("derivation_sources", [])
-            if not isinstance(items, list) or any(not isinstance(v, str) for v in items):
-                raise ValueError("Invalid sources")
-            found.extend(items)
-        except (ValueError, TypeError) as exc:
-            raise EgressDenied("Malformed source provenance") from exc
+    def provenance_records():
+        for match in re.finditer(r"(?m)^<!-- claude-note:provenance (\{[^\n]*\}) -->\s*$", text):
+            try:
+                yield json.loads(match[1])
+            except (ValueError, TypeError) as exc:
+                raise EgressDenied("Malformed source provenance") from exc
+    for payload in chain(provenance_records(), _claim_records(text)):
+        if not isinstance(payload, dict):
+            raise EgressDenied('Malformed source provenance')
+        items = payload.get('derivation_sources', [])
+        if not isinstance(items, list) or any(not isinstance(value, str) for value in items):
+            raise EgressDenied('Malformed source provenance')
+        found.extend(items)
     if len(found) > 2000:
         raise EgressDenied("Derivation sources exceed policy inspection bound")
     return list(dict.fromkeys(found))

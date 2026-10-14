@@ -408,6 +408,12 @@ def mutate(path: str | Path, transform: Callable[[str | None], str | None | Muta
             intent = _metadata(root, 'intents', receipt_key)
             _recover_created_link(parent, name, intent)
             before, info = _read_at(parent, name)
+            if before is not None:
+                # Older ledgers may predate artifact audience persistence.
+                # Record existing controls before any unattended replacement
+                # can remove them; later authored content cannot broaden them.
+                from . import egress
+                egress.record_derivation(target, before, vault_root=root)
             base = revision(before) if before is not None else None
             if receipt and receipt.get('status') == 'applied':
                 return MutationResult(target, 'unchanged', op_id, base, reason='Operation already applied')
