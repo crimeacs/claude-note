@@ -344,11 +344,17 @@ class NightlyTests(unittest.TestCase):
         self.assertTrue(any("off-topic" in f for f in found))
 
     def test_nightly_without_probes_is_a_quiet_success_with_a_heartbeat(self):
-        from claude_note import evals_cli
+        from claude_note import evals_cli, setup_recall
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
             with mock.patch.multiple(evals, EVAL_DIR=d, PROBES=d / "probes.jsonl", NIGHTLY=d / "nightly.json",
-                                     NIGHTLY_OK=d / "nightly.ok"):
+                                     NIGHTLY_OK=d / "nightly.ok"), \
+                 mock.patch.object(recall, "_load_toml", return_value={}), \
+                 mock.patch.object(recall.Settings, "load", return_value=settings()), \
+                 mock.patch.object(recall, "_collection_dirs", return_value={}), \
+                 mock.patch.object(setup_recall, "probe_default_server") as public_probe, \
+                 mock.patch.object(evals, "run_retrieval") as retrieval, \
+                 mock.patch("urllib.request.urlopen") as network:
                 args = mock.Mock(heartbeat=str(d / "hb" / "x.ok"), json=False)
                 with mock.patch("sys.stdout", new=io.StringIO()):
                     self.assertEqual(evals_cli.nightly(args), 0)
@@ -356,6 +362,9 @@ class NightlyTests(unittest.TestCase):
                 self.assertTrue(status["ok"])
                 self.assertIn("probe", status["skipped"])
                 self.assertTrue((d / "nightly.ok").exists() and (d / "hb" / "x.ok").exists())
+                public_probe.assert_not_called()
+                retrieval.assert_not_called()
+                network.assert_not_called()
 
 
 
