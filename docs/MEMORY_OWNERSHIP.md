@@ -78,6 +78,22 @@ comparisons remain explicit recovery failures. New state fields load older recor
 older releases cannot safely read the new fields. Rollback requires preserving
 and reconciling state, rather than resetting capture history.
 
+## Retrieval workers have one operation owner
+
+A pending health metadata refresh owns the lexical worker until completion or
+its original deadline. Later searches wait for that operation to settle before
+borrowing the worker; simultaneous refresh callers share it. A shorter waiting
+caller cannot extend or cancel the shared operation. Searches still use their
+original deadlines, so waiting can leave too little time to run. Refresh failure
+remains visible as historical degradation even when a later search succeeds.
+
+Native model operations remain serialized. Cancelling queued work prevents its
+admission; cancelling an active caller does not prove that native execution
+stopped. An active native deadline poisons the owned runtime rather than admitting
+another model operation beside it. Search and reranking are separate queue jobs,
+so another search can consume the remaining rerank budget. These boundaries do
+not establish cold-process or concurrent-request latency.
+
 ## Index refreshes borrow a captured generation
 
 `IndexRefreshLease` is a frozen, validated metadata object for an existing index

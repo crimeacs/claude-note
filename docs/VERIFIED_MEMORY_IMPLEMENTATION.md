@@ -24,13 +24,13 @@ refresh leases. Historical retention remains separate from current applicability
 | Sentinel | Structured codes, conservative auth/quota distinction, pre-search bounded dedup; misleading log and transient rate-limit fixtures | Implemented; rollout checks below |
 | Privacy | Source audience intersection before every external call, redaction, minimal subprocess environment, bound staging intents and revocations | Implemented; rollout checks below |
 | Health | Public indexed default-server canary distinct from isolated index and actual host delivery; break-one-stage fixtures | Implemented; rollout checks below |
-| Evaluation | Exact revision oracle, full fingerprints, all-attempt denominators, executable longitudinal traces, paired strong baselines, frozen holdouts, scheduled reconciliation | Implemented; Claude outcome run quota-blocked |
+| Evaluation | Exact revision oracle, full fingerprints, all-attempt denominators, executable phase fixtures, selection fixtures and scheduled reconciliation | Harness implemented; learned-memory longitudinal study, dense-only arm and full paired outcomes remain open |
 
 ## Rollout gates
 
 1. Synthetic temporary fixtures only; never use personal transcripts as test data.
 2. Run the full Python regression suite, Node syntax/server tests, concurrency and crash fixtures.
-3. Run actual isolated agent tasks with executable checks and no-memory/static/scoped lexical/hybrid baselines. Report failures and missing attempts. Holdout scores remain separate from development fixtures.
+3. Run actual isolated agent tasks with executable checks and no-memory/static/scoped lexical/dense-only/hybrid/bounded-history baselines, including each arm's own captured and learned memory across phases. Dense-only and that learned-memory carry-forward still require implementation. Report failures and missing attempts. Holdout scores remain separate from development fixtures.
 4. Independent review, fix findings, merge through a PR. Main is the sole release source.
 5. Build signed/checksummed release artifacts; preserve installed bundle provenance. Bump the Sweat Assistant pin on reviewed main, build/deploy through its documented release path.
 6. Exercise installed hooks/server/worker on the public fixture. Do not infer host delivery from process existence or an isolated named-index probe.
@@ -62,7 +62,22 @@ Secret redaction is an additional boundary and cannot identify ordinary business
 
 A graph database, hosted memory framework, learned utility policy, general OCR/layout model and distributed queue are not prerequisites. Adopt them only after the controlled experiments demonstrate a benefit against these corrected baselines. The local journal does not use SQLite WAL.
 
-## Exercised evidence and limits (October 13, 2026)
+## Exercised evidence and limits
+
+The 2.1.8 reliability patch serializes health metadata and search borrows of the
+lexical worker, including metadata timeout, malformed response and shutdown
+paths. Bounded client receipts distinguish attempted server/CLI routes, HTTP
+errors, transport failures and caller deadlines without recording transport
+payloads. Controlled regressions establish these mechanisms; they do not explain
+the earlier observed six- and eight-second failures or establish deployed cold
+and concurrent latency. Isolated model experiments must retain setup and query
+failures separately from successful calls.
+
+The original 15-workstream research and A–F deliverables remain broader than
+these implementation contracts. Full task outcomes, each baseline's own learned
+memory across phases, dense-only comparison, evidence × extraction and
+consolidation-quality experiments are still open. Authored phase memories and
+selection fixtures are not a longitudinal learning result.
 
 The settled source passed 341 isolated Python 3.11 regressions and all 12 Node server contracts using the installed QMD SDK. The Sweat Assistant release checkout passed both TypeScript checks, 8,625 frontend tests and 714 Swift tests. Independent review fixes include source-origin privacy, claim dependency/conflict propagation, canonical passage anchors, index-generation acknowledgement and failed-answer denominators.
 

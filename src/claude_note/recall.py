@@ -404,16 +404,23 @@ def _run_qmd(cmd: list[str], timeout: float) -> Optional[list]:
 
 
 def server_post(settings: "Settings", path: str, body: dict, deadline: float) -> Optional[dict]:
-    """POST to the warm recall server. None = not running / failed / too slow.
+    """POST with bounded, payload-free client diagnostics, including on failure.
 
     The bound is wall clock: the request runs on a daemon thread and is abandoned at the
     deadline (a socket timeout bounds inactivity, not elapsed time)."""
     import urllib.request
     import urllib.error
-    expires = time.monotonic() + max(0, deadline)
+    started = time.monotonic()
+    expires = started + max(0, deadline)
     payload = dict(body)
     payload["deadline_at_ms"] = min(payload.get("deadline_at_ms", float("inf")), int((time.time() + max(0, deadline)) * 1000))
-    payload.setdefault("request_id", hashlib.sha256(os.urandom(16)).hexdigest()[:24])
+    if not isinstance(payload.get("request_id"), str) or not re.fullmatch(r"[0-9a-f]{24}", payload["request_id"]):
+        payload["request_id"] = hashlib.sha256(os.urandom(16)).hexdigest()[:24]
+    def receipt(data, outcome, http_status=None):
+        return {**data, "client_transport": {
+            "route": path if path in ("/search", "/rerank") else "unknown",
+            "request_id": payload["request_id"], "outcome": outcome,
+            "http_status": http_status, "elapsed_ms": int((time.monotonic() - started) * 1000)}}
     def call():
         req = urllib.request.Request(settings.server_url + path, data=json.dumps(payload).encode(),
                                      headers={"content-type": "application/json"})
@@ -421,16 +428,45 @@ def server_post(settings: "Settings", path: str, body: dict, deadline: float) ->
             response = urllib.request.urlopen(req, timeout=max(0.001, expires - time.monotonic()))
         except urllib.error.HTTPError as exc:
             response = exc  # preserve structured queue/deadline/index errors
+        except Exception as exc:
+            timeout = isinstance(exc, TimeoutError) or isinstance(getattr(exc, "reason", None), TimeoutError)
+            code = "socket_timeout" if timeout else "transport_error"
+            return receipt({"error": code}, code)
         with response:
-            raw = response.read(4_000_001)
+            status = response.status
+            try:
+                raw = response.read(4_000_001)
+            except Exception as exc:
+                code = "socket_timeout" if isinstance(exc, TimeoutError) else "response_read_error"
+                return receipt({"error": code}, code, status)
             if len(raw) > 4_000_000:
-                raise ValueError("server response exceeds bound")
-            return json.loads(raw.decode("utf-8", "ignore"))
+                return receipt({"error": "response_too_large"}, "response_too_large", status)
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except (ValueError, UnicodeError, RecursionError):
+                return receipt({"error": "invalid_response_json"}, "invalid_response_json", status)
+            if not isinstance(data, dict):
+                return receipt({"error": "invalid_response_object"}, "invalid_response_object", status)
+            if not 200 <= status < 300:
+                # An HTTP failure cannot supply an apparently successful pool.
+                data = {**data, "error": data.get("error") or "http_error"}
+            failed = "error" in data
+            if failed:
+                known = {"adapter_unavailable", "closed", "deadline", "index_mismatch", "invalid_passage",
+                         "model_cache_unavailable", "not_found", "poisoned", "queue_full", "startup",
+                         "unsupported_schema", "loopback_host_required", "loopback_origin_required", "http_error"}
+                error = data["error"]
+                error = error if isinstance(error, str) and error in known else "server_error"
+                data = {"error": error, "manifest": data.get("manifest") or {}}
+            outcome = "http_error" if not 200 <= status < 300 else "server_error" if failed else "response"
+            return receipt(data, outcome, status)
     try:
-        data = _bounded(call, expires)
-        return data if isinstance(data, dict) else None
+        return _bounded(call, expires)
+    except TimeoutError:
+        code = "client_deadline" if time.monotonic() >= expires else "client_read_capacity"
+        return receipt({"error": code}, code)
     except Exception:
-        return None
+        return receipt({"error": "transport_error"}, "transport_error")
 
 
 def server_alive(settings: "Settings", timeout: float = 0.4) -> bool:
@@ -491,17 +527,19 @@ def fuse(lex: list[list[dict]], vec: list[dict], settings: "Settings") -> tuple[
 
 
 def _server_pool(prompt: str, ladder: list[list[str]], settings: "Settings", started: float,
-                 result: "Result") -> Optional[dict]:
+                 result: "Result", request_id: str = "") -> Optional[dict]:
     left = lambda: settings.budget - (time.monotonic() - started)
     question, query_partial = semantic_intent(prompt)
     cols = list(dict.fromkeys(settings.collections + settings.memory_collections)) if settings.collections else []
-    got = server_post(settings, "/search", {"rungs": [" ".join(r) for r in ladder],
+    got = server_post(settings, "/search", {"request_id": request_id, "rungs": [" ".join(r) for r in ladder],
                       "question": question if settings.vector else "", "collections": cols,
                       "index_id": settings.index or "default", "passage_chars": settings.snippet_chars,
                       "lex_limit": settings.search_n, "vec_limit": max(settings.search_n, settings.rerank_top)},
                       min(left(), settings.timeout))
     if got is None:
         return None
+    if isinstance(got.get("client_transport"), dict):
+        result.server_calls.append(got["client_transport"])
     result.manifest = got.get("manifest") or {}
     if got.get("error"):
         result.coverage = {"search": str(got["error"])[:80]}
@@ -766,6 +804,8 @@ class Result:
     pool: int = 0
     candidates: list[str] = field(default_factory=list)   # usable matches before the inject cut (evals)
     engine: str = "cli"
+    attempted_engines: list[str] = field(default_factory=list)
+    server_calls: list[dict] = field(default_factory=list)
     reranked: bool = False
     coverage: dict = field(default_factory=dict)
     manifest: dict = field(default_factory=dict)
@@ -778,6 +818,7 @@ class Result:
         return {"status": self.status, "reason": self.reason, "query": " ".join(self.query),
                 "narrowed": " ".join(self.narrowed), "pool": self.pool, "ms": self.ms,
                 "hits": [h.to_dict() for h in self.hits], "engine": self.engine,
+                "attempted_engines": self.attempted_engines, "server_calls": self.server_calls,
                 "candidates": self.candidates, "reranked": self.reranked,
                 "coverage": self.coverage, "manifest": self.manifest,
                 "deadline_exhausted": self.deadline_exhausted,
@@ -1017,10 +1058,13 @@ def _rank_passages(prompt: str, candidates: list[Hit], settings: Settings, resul
             "passages": [{"file": h.uri, "source_id": h.source_id, "revision": h.revision,
                           "passage_id": h.passage_id, "anchor": h.anchor, "title": h.title,
                           "text": h.scored_text} for h in top]}
-    rr = _bounded(lambda: server_post(settings, "/rerank", body, max(0, deadline - time.monotonic())), deadline)
+    rr = _server_attempt(result, "/rerank", deadline, lambda request_id: server_post(
+        settings, "/rerank", {**body, "request_id": request_id}, max(0, deadline - time.monotonic())))
+    if isinstance((rr or {}).get("client_transport"), dict):
+        result.server_calls[-1] = rr["client_transport"]
     scores = (rr or {}).get("passage_scores") or {}
     confirmed = set((rr or {}).get("scored_passage_ids") or [])
-    if scores and all(h.passage_id in confirmed for h in top):
+    if not (rr or {}).get("error") and scores and all(h.passage_id in confirmed for h in top):
         positions = {h.passage_id: i for i, h in enumerate(top)}
         top.sort(key=lambda h: -(float(scores.get(h.passage_id, 0)) + settings.rerank_blend / (1 + positions[h.passage_id])))
         result.reranked = True
@@ -1028,6 +1072,25 @@ def _rank_passages(prompt: str, candidates: list[Hit], settings: Settings, resul
     else:
         result.coverage["rerank"] = "unavailable_or_unverified_passage"
     return top + tail
+
+
+def _server_attempt(result: Result, route: str, deadline: float, call):
+    """The caller owns this receipt; an abandoned adapter cannot mutate it."""
+    started = time.monotonic()
+    request_id = hashlib.sha256(os.urandom(16)).hexdigest()[:24]
+    entry = {"route": route, "request_id": request_id, "outcome": "adapter_returned_without_receipt",
+             "http_status": None, "elapsed_ms": 0}
+    result.server_calls.append(entry)
+    try:
+        return _bounded(lambda: call(request_id), deadline)
+    except TimeoutError:
+        entry["outcome"] = "recall_deadline" if time.monotonic() >= deadline else "recall_read_capacity"
+        raise
+    except Exception:
+        entry["outcome"] = "adapter_error"
+        raise
+    finally:
+        entry["elapsed_ms"] = int((time.monotonic() - started) * 1000)
 
 
 def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs):
@@ -1066,9 +1129,14 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
     pool, ran = {}, False
     use_server = settings.engine == "server" or (settings.engine == "auto" and not settings.index)
     if use_server and not extra_rungs:
+        result.engine = "server"
+        result.attempted_engines.append("server")
         server_result = Result(status="skipped")
-        got = _bounded(lambda: _server_pool(prompt, ladder, settings, started, server_result), deadline)
+        got = _server_attempt(result, "/search", deadline, lambda request_id: _server_pool(
+            prompt, ladder, settings, started, server_result, request_id))
         result.manifest, result.coverage = server_result.manifest, server_result.coverage or result.coverage
+        if server_result.server_calls:
+            result.server_calls[-1] = server_result.server_calls[0]
         if raw_partial:
             result.coverage["raw_prompt"] = "sampled_head_tail"
         result.reason = server_result.reason
@@ -1098,6 +1166,9 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
                 cmd = base + ["search", " ".join(rung), "-n", str(settings.search_n), "--json"]
                 if scope:
                     cmd += ["-c", scope]
+                result.engine = "cli"
+                if "cli" not in result.attempted_engines:
+                    result.attempted_engines.append("cli")
                 got = _bounded(lambda cmd=cmd, left=left: runner(cmd, min(settings.timeout, left)), deadline)
                 if got is None:
                     continue
@@ -1244,6 +1315,9 @@ def log_event(kind: str, result: Result, extra: Optional[dict] = None) -> None:
         row = {"t": time.strftime("%Y-%m-%dT%H:%M:%S"), "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                "kind": kind, "status": result.status, "q": " ".join(result.query),
                "reason": result.reason, "ms": result.ms, "pool": result.pool,
+               "engine": result.engine, "attempted_engines": result.attempted_engines,
+               "server_calls": result.server_calls, "reranked": result.reranked,
+               "deadline_exhausted": result.deadline_exhausted,
                "query_sha": hashlib.sha1(" ".join(result.query).encode()).hexdigest()[:10],
                "hits": [h.uri for h in result.hits]}
         row.update(extra or {})
