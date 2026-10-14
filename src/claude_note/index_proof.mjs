@@ -11,6 +11,7 @@ const INPUT_LIMIT = 1024 * 1024;
 const MAX_BODY = 1024 * 1024;
 const MAX_TOTAL = 8 * 1024 * 1024;
 const MAX_CHUNKS = 16384;
+const SQLITE_HEAP_BYTES = 16 * 1024 * 1024;
 const fail = message => { throw new Error(message); };
 const result = (lexical = false, vector = false, reason = '') => ({lexical, vector, reason});
 
@@ -35,6 +36,12 @@ function columns(db, table, required) {
   return definition.sql || '';
 }
 
+export function capSqliteAllocator(db) {
+  const heap = db.pragma(`hard_heap_limit=${SQLITE_HEAP_BYTES}`, {simple: true});
+  if (!Number.isSafeInteger(heap) || heap <= 0 || heap > SQLITE_HEAP_BYTES)
+    fail('Read-only SQLite allocator cap is unavailable');
+}
+
 export async function prove(input) {
   let db, lexical = false;
   try {
@@ -51,19 +58,39 @@ export async function prove(input) {
     const {getEmbeddingFingerprint, normalizeCjkForFTS} = await import(pathToFileURL(join(dirname(input.sdk), 'store.js')).href);
     const {resolveEmbedModel} = await import(pathToFileURL(join(dirname(input.sdk), 'llm.js')).href);
     db = new Database(input.database, {readonly: true, fileMustExist: true, timeout: 100});
+    // Process-global SQLite allocation limit is safe here: production uses a
+    // fresh disposable observer, never the recall server/indexing process.
+    capSqliteAllocator(db);
     db.pragma('query_only = ON');
     db.exec('BEGIN');
-    columns(db, 'documents', ['id', 'collection', 'path', 'title', 'hash', 'active']);
-    columns(db, 'content', ['hash', 'doc']);
+    // better-sqlite3 can be built with SQLITE_DEFAULT_MEMSTATUS=0, which
+    // weakens hard_heap_limit. octet_length on ordinary stored columns reads
+    // their encoded size without materializing TEXT; an unsupported SQLite
+    // build must fail before any content reads.
+    if (db.prepare("SELECT octet_length('') AS n").get()?.n !== 0)
+      fail('Nonmaterializing SQLite length checks are unavailable');
+    const documentSchema = columns(db, 'documents', ['id', 'collection', 'path', 'title', 'hash', 'active']);
+    const contentSchema = columns(db, 'content', ['hash', 'doc']);
+    if (/\bUSING\b/i.test(documentSchema) || /\bUSING\b/i.test(contentSchema))
+      fail('Nonmaterializing size checks require ordinary document storage');
     const fts = columns(db, 'documents_fts', ['filepath', 'title', 'body']);
     if (!/\bUSING\s+fts5\s*\(/i.test(fts) || /\bcontent\s*=/i.test(fts)) fail('Unsupported read-only FTS schema');
-    const documents = db.prepare('SELECT id,hash,length(CAST(title AS BLOB)) AS title_length,active FROM documents WHERE collection=? AND path=? LIMIT 2');
+    const shadow = columns(db, 'documents_fts_content', ['id', 'c0', 'c1', 'c2']);
+    const layout = db.pragma('table_info(documents_fts_content)');
+    if (/\bUSING\b/i.test(shadow) || layout.length !== 4 || layout[0].name !== 'id'
+        || layout[0].type.toUpperCase() !== 'INTEGER' || layout[0].pk !== 1
+        || !['c0', 'c1', 'c2'].every((name, i) => layout[i + 1].name === name
+          && layout[i + 1].type === '' && layout[i + 1].pk === 0))
+      fail('Unsupported standalone FTS content layout');
+    const documents = db.prepare('SELECT id,hash,octet_length(title) AS title_length,active FROM documents WHERE collection=? AND path=? LIMIT 2');
     const titles = db.prepare('SELECT title FROM documents WHERE id=?');
-    const lengths = db.prepare('SELECT length(CAST(doc AS BLOB)) AS n FROM content WHERE hash=? LIMIT 2');
+    const lengths = db.prepare('SELECT octet_length(doc) AS n FROM content WHERE hash=? LIMIT 2');
     const contents = db.prepare('SELECT doc FROM content WHERE hash=?');
     const ftsRows = db.prepare('SELECT filepath,title,body FROM documents_fts WHERE rowid=? LIMIT 2');
-    const ftsLengths = db.prepare('SELECT length(CAST(filepath AS BLOB)) AS path_length,length(CAST(title AS BLOB)) AS title_length,'
-      + 'length(CAST(body AS BLOB)) AS body_length FROM documents_fts WHERE rowid=? LIMIT 2');
+    // A virtual FTS xColumn would materialize its value before octet_length.
+    // The pinned standalone FTS5 shadow content table is ordinary storage.
+    const ftsLengths = db.prepare('SELECT octet_length(c0) AS path_length,octet_length(c1) AS title_length,'
+      + 'octet_length(c2) AS body_length FROM documents_fts_content WHERE id=? LIMIT 2');
     const hashes = new Set(), names = new Set();
     let bytes = 0;
     for (const ref of input.references) {

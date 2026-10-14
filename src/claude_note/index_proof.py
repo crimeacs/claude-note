@@ -26,6 +26,8 @@ MAX_BODY_BYTES = 1024 * 1024
 MAX_TOTAL_BYTES = 8 * 1024 * 1024
 MAX_INPUT_BYTES = 1024 * 1024
 MAX_OUTPUT_BYTES = 16 * 1024
+SQLITE_HEAP_BYTES = 16 * 1024 * 1024
+SQLITE_VALUE_BYTES = MAX_BODY_BYTES + 64 * 1024
 
 
 def _result(lexical=False, vector=False, reason=''):
@@ -66,6 +68,15 @@ def _lexical(database, references, deadline):
         raise ValueError('Bound index database is unavailable')
     db = sqlite3.connect(database.as_uri() + '?mode=ro', uri=True, timeout=.1)
     try:
+        # SQLite length(CAST(TEXT AS BLOB)) can materialize the whole value.
+        # These limits precede schema/body reads and apply only in this
+        # disposable reader, never the long-lived index/recall process.
+        heap = db.execute(f'PRAGMA hard_heap_limit={SQLITE_HEAP_BYTES}').fetchone()
+        if not heap or type(heap[0]) is not int or not 0 < heap[0] <= SQLITE_HEAP_BYTES:
+            raise ValueError('Read-only SQLite allocator cap is unavailable')
+        db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, SQLITE_VALUE_BYTES)
+        if not 0 < db.getlimit(sqlite3.SQLITE_LIMIT_LENGTH) <= SQLITE_VALUE_BYTES:
+            raise ValueError('Read-only SQLite value cap is unavailable')
         db.execute('PRAGMA query_only=ON')
         db.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
         db.execute('BEGIN')
@@ -201,7 +212,7 @@ def _lexical_main():
             raise ValueError('Lexical proof deadline bound')
         _lexical(Path(payload['database']), _references(payload['references']), time.monotonic() + remaining)
         answer = _result(True)
-    except (OSError, ValueError, TypeError, KeyError, sqlite3.Error, TimeoutError):
+    except (OSError, ValueError, TypeError, KeyError, MemoryError, sqlite3.Error, TimeoutError):
         answer = _result(reason='Captured lexical revision proof failed')
     print(json.dumps(answer))
 

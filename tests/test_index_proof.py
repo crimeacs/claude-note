@@ -106,6 +106,88 @@ class IndexProofTests(unittest.TestCase):
         self.assertFalse(self.verify()['lexical'])
         self.assertEqual(self.database.read_bytes(), before)
 
+    def test_sqlite_allocator_cap_is_required_before_schema_reads(self):
+        for value in (None, (0,), (-1,), (True,), (index_proof.SQLITE_HEAP_BYTES + 1,)):
+            database = mock.Mock()
+            database.execute.return_value.fetchone.return_value = value
+            with self.subTest(value=value), mock.patch.object(index_proof.sqlite3, 'connect', return_value=database):
+                with self.assertRaisesRegex(ValueError, 'allocator cap'):
+                    index_proof._lexical(self.database, self.references, time.monotonic() + 2)
+                self.assertEqual(database.execute.call_count, 1)
+                self.assertTrue(database.execute.call_args.args[0].startswith('PRAGMA hard_heap_limit='))
+
+    def test_large_text_rows_fail_closed_with_bounded_python_and_native_rss(self):
+        self.mutate('UPDATE content SET doc=CAST(zeroblob(?) AS TEXT)', (64 * 1024 * 1024,))
+        reader = '''
+import json,resource,sys,time
+sys.path.insert(0,sys.argv[1])
+from claude_note.index_proof import _lexical
+from pathlib import Path
+scale=1 if sys.platform=='darwin' else 1024
+before=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*scale
+status='unexpected_success'
+try:
+ _lexical(Path(sys.argv[2]), tuple(json.loads(sys.argv[3])), time.monotonic()+8)
+except Exception as exc:
+ status=type(exc).__name__
+after=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*scale
+print(json.dumps({'growth':after-before,'status':status}))
+'''
+        source = str(Path(index_proof.__file__).resolve().parents[1])
+        child = subprocess.run([sys_executable(), '-B', '-I', '-c', reader, source,
+            str(self.database), json.dumps(self.references)], capture_output=True, text=True, timeout=10)
+        self.assertEqual(child.returncode, 0, child.stderr)
+        python_result = json.loads(child.stdout)
+        self.assertNotEqual(python_result['status'], 'unexpected_success')
+        self.assertLess(python_result['growth'], 24 * 1024 * 1024)
+        self.assertFalse(self.verify()['lexical'])
+        node, qmd = shutil.which('node'), shutil.which('qmd')
+        sdk = setup_recall.qmd_sdk(qmd) if qmd else None
+        if node and sdk:
+            script = '''
+import {pathToFileURL} from 'node:url';
+import {createRequire} from 'node:module';
+import {dirname,join} from 'node:path';
+const [sdk,observer,database,references]=process.argv.slice(1);
+const requireSDK=createRequire(pathToFileURL(sdk));
+const Database=requireSDK('better-sqlite3');
+await import(pathToFileURL(join(dirname(sdk),'store.js')).href);
+await import(pathToFileURL(join(dirname(sdk),'llm.js')).href);
+const {prove}=await import(pathToFileURL(observer).href);
+const before=process.resourceUsage().maxRSS*1024;
+const result=await prove({sdk,database,references:JSON.parse(references),vector:false});
+const after=process.resourceUsage().maxRSS*1024;
+const db=new Database(':memory:');
+const heap=db.pragma('hard_heap_limit',{simple:true}); db.close();
+console.log(JSON.stringify({result,growth:after-before,heap}));
+'''
+            child = subprocess.run([node, '--input-type=module', '-e', script,
+                str(sdk), str(Path(index_proof.__file__).with_suffix('.mjs')), str(self.database),
+                json.dumps(self.references)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(child.returncode, 0, child.stderr)
+            native = json.loads(child.stdout)
+            self.assertFalse(native['result']['lexical'] or native['result']['vector'])
+            self.assertTrue(0 < native['heap'] <= index_proof.SQLITE_HEAP_BYTES)
+            self.assertLess(native['growth'], 24 * 1024 * 1024)
+            # FTS xColumn materializes its value even for a length query.
+            # Corrupt a standalone shadow row while leaving ordinary content
+            # small, then require the metadata-only shadow check to reject it.
+            self.mutate('UPDATE content SET doc=?', (self.body,))
+            for column in ('c0', 'c1', 'c2'):
+                with self.subTest(fts_shadow_column=column):
+                    self.mutate('UPDATE documents_fts_content SET c0=?,c1=?,c2=? WHERE id=1',
+                                ('synthetic/first.md', 'Synthetic', self.body))
+                    self.mutate('UPDATE documents_fts_content SET ' + column + '=CAST(zeroblob(?) AS TEXT) WHERE id=1',
+                                (64 * 1024 * 1024,))
+                    child = subprocess.run([node, '--input-type=module', '-e', script,
+                        str(sdk), str(Path(index_proof.__file__).with_suffix('.mjs')), str(self.database),
+                        json.dumps(self.references)], capture_output=True, text=True, timeout=10)
+                    self.assertEqual(child.returncode, 0, child.stderr)
+                    native = json.loads(child.stdout)
+                    self.assertFalse(native['result']['lexical'] or native['result']['vector'])
+                    self.assertLess(native['growth'], 24 * 1024 * 1024)
+                    self.assertFalse(self.verify()['lexical'])
+
     def test_native_observer_deadline_and_output_bound(self):
         deadline = time.monotonic() + .1
         with self.assertRaises(TimeoutError):

@@ -8,7 +8,7 @@ import {join, dirname} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {createRequire} from 'node:module';
 import {createHash} from 'node:crypto';
-import {prove} from '../src/claude_note/index_proof.mjs';
+import {prove, capSqliteAllocator} from '../src/claude_note/index_proof.mjs';
 
 const sdk = process.env.CLAUDE_NOTE_TEST_QMD_SDK;
 const requireSDK = sdk && createRequire(pathToFileURL(sdk));
@@ -46,6 +46,13 @@ function fixture(t, {body = '# Synthetic\n\nExact synthetic indexed revision.\n'
 }
 
 const native = (name, fn) => test(name, {skip: !sdk}, fn);
+
+test('unsupported or invalid SQLite allocator caps fail closed', () => {
+  for (const value of [undefined, null, 0, -1, true, '16777216', 16777217, NaN, Infinity]) {
+    assert.throws(() => capSqliteAllocator({pragma: () => value}), /allocator cap/);
+  }
+  assert.doesNotThrow(() => capSqliteAllocator({pragma: () => 16777216}));
+});
 
 native('complete vectors prove only captured revisions and leave DB/config bytes unchanged', async t => {
   const {db, input, root} = fixture(t);
@@ -135,6 +142,21 @@ native('ordinary vector tables and unsupported SDK pins cannot prove completion'
   mkdirSync(join(wrong, 'dist'), {recursive: true});
   writeFileSync(join(wrong, 'package.json'), JSON.stringify({name: '@tobilu/qmd', version: '2.8.4'}));
   assert.equal((await prove({...input, sdk: join(wrong, 'dist/index.js')})).lexical, false);
+});
+
+native('virtual document storage cannot bypass ordinary-column size admission', async t => {
+  for (const table of ['documents', 'content']) {
+    const {db, input} = fixture(t);
+    db.exec(`DROP TABLE ${table}`);
+    if (table === 'documents') {
+      db.exec('CREATE VIRTUAL TABLE documents USING fts5(id UNINDEXED,collection,path,title,hash,active UNINDEXED)');
+    } else {
+      db.exec('CREATE VIRTUAL TABLE content USING fts5(hash,doc)');
+    }
+    const answer = await prove(input);
+    assert.equal(answer.lexical, false);
+    assert.equal(answer.vector, false);
+  }
 });
 
 native('config-selected model takes precedence over environment and malformed models deny vector proof', async t => {
