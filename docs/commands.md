@@ -36,6 +36,16 @@ claude-note import --since 2026-01-01
 
 Automatic sweeps run every 30 minutes. Supported export zips in `~/Documents/claude-note-imports/` or recognized download patterns are normalized; processed exports move to `done/`. Backfills may queue model work. Automation/subagent runs are excluded from interactive-session recovery.
 
+Claude Code and Codex recovery isolate individual file failures: integer category
+counts show successfully queued sessions, `problems` lists bounded failures, and
+`failed` counts those reported problems. Other eligible files continue; failed
+files retain their prior seen values for retry. Any problem leaves the last-clean
+sweep heartbeat unchanged, so partial progress does not claim full success.
+The source limit is 256 MiB and metadata prefix limit is 1 MiB. Sources and session
+checkpoints are preserved; oversized transcripts need explicit lossless recovery,
+which this command does not yet provide. This per-file behavior does not extend
+to individual conversations inside ZIP/export or Cursor sources.
+
 ## Shared push and receipts
 
 ```bash

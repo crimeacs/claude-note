@@ -1,5 +1,27 @@
 # Developments
 
+## 2.1.4 — native transcript import failure isolation (14 October 2026)
+
+Claude Code and Codex recovery sweeps continue past individual unreadable,
+oversized, malformed or incomplete transcripts. Category counts remain the
+number of successfully queued sessions; each failed file produces a bounded
+problem entry and stays retryable without advancing its seen value or session
+checkpoint. Partial progress is saved, while any problem keeps the last-clean
+sweep heartbeat unchanged. Direct helper callers without a problem accumulator
+receive an exception carrying the partial queued count and all bounded problems.
+Malformed records and incomplete trailing bytes now prevent native recovery
+from marking that file seen, even when earlier records were readable. The
+`failed` count is the number of reported problems, not every malformed record
+or all files in a category. Queue publication retains its existing two-event
+mechanism; this patch does not provide transactional or exactly-once enqueue.
+
+The full-source limit remains 256 MiB, checked before metadata and again while
+reading. Metadata reads have a 1 MiB prefix limit. Original sources remain
+untouched; this release does not implement lossless streaming recovery for
+larger transcripts. Preserve originals and existing cursors rather than replacing
+them with lossy summaries or treating split files as new independent sessions.
+ZIP/export and Cursor per-conversation isolation is outside this change.
+
 ## 2.0 — recall before action (10 October 2026)
 
 1.x wrote knowledge down. Nothing put it back in front of an agent: the docs said prompt-time
