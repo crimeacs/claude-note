@@ -4,7 +4,7 @@ The worker consumes queued events and sweeps supported import sources every 30 m
 
 ## macOS
 
-The preferred setup is `scripts/install-from-checkout.sh --non-interactive --vault PATH`; it preserves authored config and creates the worker LaunchAgent only when needed. Existing installs use the same script without `--non-interactive` to reinstall source and restart the loaded worker.
+The preferred setup is `scripts/install-from-checkout.sh --non-interactive --vault PATH`; it preserves authored config and creates the worker LaunchAgent only when needed. Existing installs use the same script without `--non-interactive` to reinstall source and restart the loaded worker. From 2.1.1, macOS upgrades also refresh and restart an existing recall-server LaunchAgent through the newly installed package; an absent server stays absent. Failed restarts leave installation incomplete and preserve the previous completion receipt so managed installations retry. The restart step does not run indexing or embedding jobs, download model weights or build native code. Manually managed servers on Linux still require a restart through their service manager after upgrading.
 
 The worker label is `com.claude-note.worker`; the plist is `~/Library/LaunchAgents/com.claude-note.worker.plist`. Use the generated file or [template](../service/com.claude-note.worker.plist.template), with absolute executable paths.
 

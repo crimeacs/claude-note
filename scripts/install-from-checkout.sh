@@ -10,7 +10,7 @@
 # The source tree is a git checkout or a bundled copy (for example the one the
 # Sweat app ships; a copy records its ref in a SOURCE_REF file). Without
 # --non-interactive this updates an existing install only: it replaces the
-# package, restarts the worker if one is loaded, and never touches config.toml,
+# package, restarts existing worker/recall jobs, and never touches config.toml,
 # the vault or the worker plist. The installed ref is recorded in
 # ~/.local/share/claude-note/installed-from.json.
 #
@@ -156,12 +156,13 @@ export PATH="$(dirname "$BIN"):$PATH"
 
 STATE_DIR="$HOME/.local/share/claude-note"
 mkdir -p "$STATE_DIR"
+RECEIPT_TMP="$(mktemp "$STATE_DIR/installed-from.XXXXXXXX")"
+trap 'rm -f "$RECEIPT_TMP"' EXIT
 printf '{"path": "%s", "source": "%s", "repository": "%s", "branch": "%s", "commit": "%s", "dirty": %s, "installed_at": "%s"}\n' \
     "$(json_escape "$ROOT")" "$SOURCE_KIND" "$(json_escape "$REPOSITORY")" \
     "$(json_escape "$BRANCH")" "$(json_escape "$COMMIT")" \
     "$([[ -n "$DIRTY" ]] && echo true || echo false)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    > "$STATE_DIR/installed-from.json.tmp"
-mv "$STATE_DIR/installed-from.json.tmp" "$STATE_DIR/installed-from.json"
+    > "$RECEIPT_TMP"
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/claude-note"
 CONFIG="$CONFIG_DIR/config.toml"
@@ -262,6 +263,7 @@ EOF
                 echo "Started the worker"; WORKER_STARTED=1
             else
                 echo "could not start the worker ($PLIST); claude-note status --json will show it" >&2
+                exit 1
             fi
         fi
     fi
@@ -269,13 +271,23 @@ fi
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
     if [[ $WORKER_STARTED -eq 0 ]] && launchctl print "gui/$(id -u)/com.claude-note.worker" >/dev/null 2>&1; then
-        launchctl kickstart -k "gui/$(id -u)/com.claude-note.worker" && echo "Restarted the worker"
+        launchctl kickstart -k "gui/$(id -u)/com.claude-note.worker" \
+            || { echo "could not restart the worker; installation remains incomplete" >&2; exit 1; }
+        echo "Restarted the worker"
+    fi
+    # Run through the newly installed package, never this checkout's Python.
+    # The helper refreshes only an existing recall agent; it does not set one up.
+    if ! "$BIN" _upgrade-recall-server; then
+        echo "recall server upgrade failed; installation remains incomplete and can be retried" >&2
+        exit 1
     fi
     if [[ $PUSH_AGENT -eq 1 ]]; then
         "$BIN" push --install-agent
     fi
 elif command -v systemctl >/dev/null && systemctl --user is-active --quiet claude-note.service 2>/dev/null; then
-    systemctl --user restart claude-note.service && echo "Restarted the worker"
+    systemctl --user restart claude-note.service \
+        || { echo "could not restart the worker; installation remains incomplete" >&2; exit 1; }
+    echo "Restarted the worker"
 fi
 if [[ $PUSH_AGENT -eq 1 && "$(uname -s)" != "Darwin" ]]; then
     echo "--push-agent installs a launchd job and is macOS-only; skipped" >&2
@@ -288,4 +300,5 @@ if [[ $CODEX_HOOKS -eq 1 ]]; then
     "$BIN" install-codex-hooks
 fi
 
+mv "$RECEIPT_TMP" "$STATE_DIR/installed-from.json"
 echo "Installed $(uv tool list 2>/dev/null | grep -m1 '^claude-note ' || echo claude-note) at $BIN from ${COMMIT:0:12}"

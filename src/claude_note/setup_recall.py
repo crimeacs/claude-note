@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import plistlib
 import re
 import shutil
 import subprocess
@@ -475,7 +476,31 @@ def real_node() -> str | None:
     return node
 
 
-def install_server_agent(qmd: str, port: int = 8182, dry_run: bool = False) -> str:
+def _missing_server(result) -> bool:
+    message = (result.stderr or result.stdout or '').casefold()
+    return bool(result.returncode and 'could not find service' in message and SERVER_LABEL in message)
+
+
+def _server_arguments(previous) -> list[str]:
+    if not isinstance(previous, dict) or previous.get('Label') != SERVER_LABEL:
+        raise ValueError('existing recall agent has an unsupported label or plist shape')
+    arguments = previous.get('ProgramArguments')
+    if (not isinstance(arguments, list) or not 3 <= len(arguments) <= 6
+            or any(not isinstance(value, str) or not value or '\0' in value for value in arguments)
+            or Path(arguments[1]).name != 'recall_server.mjs'):
+        raise ValueError('existing recall agent has unsupported runtime arguments')
+    if len(arguments) > 3 and (not arguments[3].isdigit() or not 1 <= int(arguments[3]) <= 65535):
+        raise ValueError('existing recall agent has an invalid port')
+    if previous.get('Program', arguments[0]) != arguments[0]:
+        raise ValueError('existing recall agent uses an unsupported launcher')
+    environment = previous.get('EnvironmentVariables', {})
+    if not isinstance(environment, dict) or any(not isinstance(key, str) or not isinstance(value, str)
+                                               for key, value in environment.items()):
+        raise ValueError('existing recall agent has an invalid environment')
+    return arguments
+
+
+def install_server_agent(qmd: str, port: int = 8182, dry_run: bool = False, *, previous=None) -> str:
     """Keep the recall server warm: QMD's keyword and meaning search plus its reranker, models
     loaded, on 127.0.0.1. Recall falls back to the CLI ladder whenever it is not answering."""
     if not qmd:
@@ -487,30 +512,91 @@ def install_server_agent(qmd: str, port: int = 8182, dry_run: bool = False) -> s
     if not sdk or not node:
         return "skipped: could not find QMD's SDK or node; recall uses keywords only"
     server = Path(__file__).with_name("recall_server.mjs")
+    try:
+        pin = re.search(r"(?m)^const PIN = ['\"]([^'\"]+)['\"];", server.read_text())
+        with (sdk.parent.parent / 'package.json').open('rb') as handle:
+            metadata = handle.read(16385)
+        if len(metadata) > 16384 or not pin or json.loads(metadata).get('version') != pin[1]:
+            return 'failed: installed QMD SDK does not match the bundled recall runtime version'
+    except (OSError, ValueError, AttributeError):
+        return 'failed: cannot verify the installed QMD SDK version before restarting recall'
     if sys.platform != "darwin":
         return f"not macOS: run `{node} {server} {sdk} {port}` under systemd (Restart=always)"
     plist = HOME / "Library" / "LaunchAgents" / f"{SERVER_LABEL}.plist"
-    body = f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>{SERVER_LABEL}</string>
-  <key>ProgramArguments</key><array><string>{node}</string><string>{server}</string><string>{sdk}</string><string>{port}</string></array>
-  <key>EnvironmentVariables</key><dict><key>QMD_METAL_KEEP_RESIDENCY</key><string>1</string></dict>
-  <key>KeepAlive</key><true/>
-  <key>RunAtLoad</key><true/>
-  <key>Nice</key><integer>5</integer>
-  <key>StandardOutPath</key><string>/dev/null</string>
-  <key>StandardErrorPath</key><string>{SHARE}/recall-server.err</string>
-</dict></plist>
-"""
+    body = {"Label": SERVER_LABEL, "ProgramArguments": [node, str(server), str(sdk), str(port)],
+            "EnvironmentVariables": {"QMD_METAL_KEEP_RESIDENCY": "1"}, "KeepAlive": True,
+            "RunAtLoad": True, "Nice": 5, "StandardOutPath": "/dev/null",
+            "StandardErrorPath": str(SHARE / "recall-server.err")}
+    if previous is not None:
+        arguments = _server_arguments(previous)
+        body.update(previous)
+        body['ProgramArguments'] = [node, str(server), str(sdk), *(arguments[3:] or [str(port)])]
+        body['EnvironmentVariables'] = {"QMD_METAL_KEEP_RESIDENCY": "1", **previous.get('EnvironmentVariables', {})}
+        if 'Program' in previous:
+            body['Program'] = node
     if dry_run:
         return f"would install {plist.name} (127.0.0.1:{port})"
+    if plist.is_symlink():
+        return "failed: recall agent plist is a symlink; reconcile it before upgrading"
     plist.parent.mkdir(parents=True, exist_ok=True)
-    plist.write_text(body)
+    SHARE.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=plist.parent, prefix=f'.{SERVER_LABEL}.', delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            plistlib.dump(body, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temporary.replace(plist)
+        finally:
+            temporary.unlink(missing_ok=True)
     uid = os.getuid()
-    subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist)], capture_output=True, timeout=30)
-    subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist)], capture_output=True, timeout=30)
+    target = f"gui/{uid}/{SERVER_LABEL}"
+    stopped = subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist)],
+                             capture_output=True, text=True, timeout=30)
+    if stopped.returncode:
+        status = subprocess.run(["launchctl", "print", target], capture_output=True, text=True, timeout=30)
+        if not _missing_server(status):
+            return f"failed: could not stop existing recall server: {(stopped.stderr or stopped.stdout).strip()[:200]}"
+    started = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist)],
+                             capture_output=True, text=True, timeout=30)
+    if started.returncode:
+        return f"failed: could not start recall server: {(started.stderr or started.stdout).strip()[:200]}"
+    if subprocess.run(["launchctl", "print", target], capture_output=True, timeout=30).returncode:
+        return "failed: recall server was not loaded after bootstrap"
     return f"installed {plist.name} (127.0.0.1:{port}, restarts if it stops)"
+
+
+def upgrade_existing_server() -> int:
+    """Installer-only refresh from this installed package; never set up a new job."""
+    if sys.platform != 'darwin':
+        return 0
+    plist = HOME / 'Library/LaunchAgents' / f'{SERVER_LABEL}.plist'
+    try:
+        status = subprocess.run(['launchctl', 'print', f'gui/{os.getuid()}/{SERVER_LABEL}'],
+                                capture_output=True, text=True, timeout=30)
+        loaded = status.returncode == 0
+        if not loaded and not _missing_server(status):
+            raise ValueError('cannot determine recall service state: ' + (status.stderr or status.stdout).strip()[:200])
+        if not plist.exists() and not plist.is_symlink() and not loaded:
+            print('Recall server not configured; left absent')
+            return 0
+        if not plist.is_file() or plist.is_symlink():
+            raise ValueError('existing recall service has no regular plist; restore its configuration before upgrading')
+        port = 8182
+        with plist.open('rb') as handle:
+            previous = handle.read(65537)
+        if len(previous) > 65536:
+            raise ValueError('existing recall agent plist exceeds inspection bound')
+        previous = plistlib.loads(previous)
+        arguments = _server_arguments(previous)
+        if len(arguments) > 3:
+            port = int(arguments[3])
+        verdict = install_server_agent(qmd_exe() or '', port=port, previous=previous)
+        print('Recall server upgrade: ' + verdict)
+        return 0 if verdict.startswith('installed ') else 1
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        print(f'Recall server upgrade failed: {exc}', file=sys.stderr)
+        return 1
 
 
 # --------------------------------------------------------------------------- #

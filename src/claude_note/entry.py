@@ -93,6 +93,9 @@ def _knowledge_main(argv: list) -> int:
 
 def main() -> int:
     argv = sys.argv[1:]
+    if argv == ["_upgrade-recall-server"]:
+        from .setup_recall import upgrade_existing_server
+        return upgrade_existing_server()
     if argv[:1] == ["status"] and "--json" in argv[1:]:
         from . import health
         return health.main()
