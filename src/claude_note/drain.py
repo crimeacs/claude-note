@@ -83,6 +83,8 @@ def drain_all() -> tuple:
                 new_events = [event for event in events if event.event_id not in processed]
                 # Update session state from events
                 state = session_tracker.update_session_from_events(session_id, events)
+                session_tracker.save_session_state(state)
+                new_events = [event for event in new_events if event.event_id not in state.filtered_event_ids]
 
                 # Check if we have any new events to process
                 if not state.events:
@@ -99,6 +101,9 @@ def drain_all() -> tuple:
 
                 # Skip already-written sessions (same as worker.py)
                 if session_tracker.is_session_written(state):
+                    if session_tracker.should_flush_immediately(new_events):
+                        session_tracker.schedule_synthesis(state)
+                        session_tracker.save_session_state(state)
                     if state.synthesis_pending:
                         sessions_processed += 1
                         session_tracker.run_pending_synthesis(state, run_synthesis_for_drain, force=True)

@@ -1,11 +1,12 @@
 """Session state tracking with locks and debouncing."""
 
 import fcntl
+import logging
 import os
 import time
 import re
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
@@ -75,8 +76,8 @@ def load_session_state(session_id: str) -> Optional[models.SessionState]:
 
     try:
         return models.SessionState(**read_json(state_file))
-    except Exception:
-        return None
+    except (OSError, ValueError, TypeError) as exc:
+        raise ValueError("Existing session state is unreadable or incompatible; preserve it for recovery") from exc
 
 
 def save_session_state(state: models.SessionState) -> None:
@@ -184,54 +185,97 @@ def extract_event_summary(event: models.QueuedEvent) -> models.EventSummary:
     return models.EventSummary(ts=ts, event=event_type, description=description)
 
 
+def _event_time(value):
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
 def update_session_from_events(session_id: str, events: list) -> models.SessionState:
     """
     Update or create session state from events.
 
     Filters out recursive events and deduplicates by event_id.
     """
-    state = load_session_state(session_id)
+    from . import import_publication
 
+    # Verify every reference before any capture acknowledgement, including
+    # already-seen IDs and revisions that will not become the active view.
+    verified = {}
+    for event in events:
+        event.validate()
+        if event.session_id != session_id:
+            raise ValueError("Event session differs from capture target")
+        publication = import_publication.validate_event(event)
+        if publication:
+            verified[event.event_id] = publication
+    state = load_session_state(session_id)
     if state is None:
         if not events:
             raise ValueError("Cannot create session state with no events")
         first_event = events[0]
-        state = models.SessionState(
-            session_id=session_id,
-            first_event_ts=first_event.ts,
-            last_event_ts=first_event.ts,
-            cwd=first_event.cwd,
-            transcript_path=first_event.transcript_path,
-        )
-
+        state = models.SessionState(session_id=session_id, first_event_ts=first_event.ts,
+                                   last_event_ts="", cwd=first_event.cwd,
+                                   transcript_path=first_event.transcript_path)
+    if not all(isinstance(value, dict) for value in
+               (state.import_binding, state.import_ordinals, state.import_publications)):
+        raise ValueError("Invalid persisted import capture state")
     processed_ids = set(state.processed_event_ids)
-
-    for event in events:
-        # Skip already processed
+    accepted_completion = False
+    # Delivery filenames and hash order do not define evidence freshness.
+    # Ordinals order imports from one logical stream; local creation timestamps
+    # delimit newer hooks. Clock rollback across hooks remains a limitation.
+    for event in sorted(events, key=lambda event: (_event_time(event.ts), event.event_id)):
         if event.event_id in processed_ids:
             continue
-
-        # Skip recursive events
-        if is_recursive_event(event):
-            state.processed_event_ids.append(event.event_id)
-            processed_ids.add(event.event_id)
-            state.filtered_event_ids[event.event_id] = "recursion-policy"
-            continue
-
-        # Update state
-        state.last_event_ts = event.ts
+        publication = verified.get(event.event_id)
+        if publication:
+            identity, stream = publication["publication_id"], publication["stream"]
+            ordinal = publication["ordinal"]
+            old_ordinal = state.import_ordinals.get(stream, 0)
+            if type(old_ordinal) is not int or old_ordinal < 0:
+                raise ValueError("Invalid persisted import stream ordinal")
+            if len(state.import_publications) >= 10000 and identity not in state.import_publications:
+                raise ValueError("Import history exceeds bounded session state; preserve for recovery")
+            state.import_publications[identity] = import_publication.binding(publication)
+            stale = ordinal < old_ordinal or (state.last_native_event_ts and
+                                             _event_time(event.ts) < _event_time(state.last_native_event_ts))
+            # Advance the stream high-water even when a newer hook superseded it.
+            state.import_ordinals[stream] = max(old_ordinal, ordinal)
+        else:
+            stale = bool(state.last_event_ts and _event_time(event.ts) < _event_time(state.last_event_ts))
         state.processed_event_ids.append(event.event_id)
         processed_ids.add(event.event_id)
-
-        # Update cwd/transcript if newer
+        if stale or is_recursive_event(event):
+            state.filtered_event_ids[event.event_id] = "stale-source-binding" if stale else "recursion-policy"
+            continue
+        if publication:
+            if state.import_binding.get("publication_id") != publication["publication_id"]:
+                # A new accepted immutable revision is work even under clock
+                # rollback; last_event_ts itself must never move backwards.
+                state.last_write_ts = None
+            state.import_binding = import_publication.binding(publication)
+        else:
+            # A genuinely newer hook resumes the mutable native transcript.
+            state.import_binding = {}
+            state.last_native_event_ts = event.ts
+        if not state.last_event_ts or _event_time(event.ts) > _event_time(state.last_event_ts):
+            state.last_event_ts = event.ts
         if event.cwd:
             state.cwd = event.cwd
         if event.transcript_path:
             state.transcript_path = event.transcript_path
+        summary = extract_event_summary(event).to_dict()
+        if publication:
+            summary["details"] = {"publication_id": publication["publication_id"],
+                                  "captured_revision": publication["captured_revision"],
+                                  "logical_revision": publication["logical_revision"]}
+        state.events.append(summary)
+        accepted_completion |= event.event in {"Stop", "SessionEnd"}
 
-        # Add event summary
-        summary = extract_event_summary(event)
-        state.events.append(summary.to_dict())
+    # Persist the completed turn's outstanding action with its captured IDs.
+    # A crash after capture cannot consume the only request for synthesis.
+    if accepted_completion and any(event.get("event") == "UserPromptSubmit" for event in state.events):
+        schedule_synthesis(state)
 
     return state
 
@@ -254,9 +298,12 @@ def get_sessions_ready_for_write(debounce_seconds: float = None) -> list[str]:
 
     for state_file in config.STATE_DIR.glob("*.json"):
         session_id = state_file.stem
-        state = load_session_state(session_id)
-        if state and state.should_write(debounce_seconds):
-            ready.append(session_id)
+        try:
+            state = load_session_state(session_id)
+            if state and state.should_write(debounce_seconds):
+                ready.append(session_id)
+        except (OSError, ValueError, TypeError):
+            logging.getLogger(__name__).warning("Incompatible session state retained; readiness scan continues")
 
     return ready
 
@@ -331,7 +378,10 @@ def get_pending_synthesis_sessions() -> list[str]:
         return []
     pending = []
     for path in config.STATE_DIR.glob("*.json"):
-        state = load_session_state(path.stem)
-        if state and state.synthesis_pending and not state.synthesis_parked:
-            pending.append(state.session_id)
+        try:
+            state = load_session_state(path.stem)
+            if state and state.synthesis_pending and not state.synthesis_parked:
+                pending.append(state.session_id)
+        except (OSError, ValueError, TypeError):
+            logging.getLogger(__name__).warning("Incompatible session state retained; synthesis scan continues")
     return pending

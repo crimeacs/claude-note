@@ -33,6 +33,40 @@ value's lifetime. Similarly, retaining a note does not extend the applicability
 of its advice. Context already delivered to a model cannot be recalled by this
 mechanism. [Rust lifetimes](https://doc.rust-lang.org/book/ch10-03-lifetime-syntax.html)
 
+## Import publication owns one captured revision
+
+An import publication binds a source, logical session, exact captured digest,
+immutable snapshot, stable event IDs and a per-session ordinal. A durable intent
+retains its first event pair and timestamps. Only after restrictions and the
+canonical receipt are durable does a complete queue batch become visible.
+Retrying reuses that pair, including after the seen store was not saved. A
+normalized conversation from another export may add origins but cannot change
+canonical captured bytes under the same logical revision; all other differences
+fail as identity conflicts.
+
+The worker verifies every imported reference before acknowledging capture,
+including older revisions that will not become the current view. It reads the
+bound snapshot while preserving the original transcript identity. An older
+publication cannot replace a later imported revision or a newer native hook.
+A completion event stores its pending synthesis intent in the same durable
+capture save, so a crash cannot acknowledge away unscheduled work. Capture
+acknowledgement and synthesis completion are separate durable states;
+this provides idempotent local capture, not exactly-once model execution or
+external effects. Hook/import ordering uses local event times; wall-clock
+rollback across hooks remains a limitation.
+
+Authored private and claim audiences, including protected transitive lineage,
+are conservatively retained with the snapshot. Later source edits cannot loosen
+those restrictions. Configurable owner policy stays live and original supplied
+and canonical source identities remain subject to it. Cleanup may remove an old,
+fully acknowledged queue batch; canonical receipts, restrictions and evidence
+remain for replay and recovery. Publication history is bounded at 10,000
+revisions per session and fails closed without evicting history. Origin-only
+normalized replay comparison permits individual records up to 8 MiB; larger
+comparisons remain explicit recovery failures. New state fields load older records with defaults;
+older releases cannot safely read the new fields. Rollback requires preserving
+and reconciling state, rather than resetting capture history.
+
 ## Index refreshes borrow a captured generation
 
 `IndexRefreshLease` is a frozen, validated metadata object for an existing index

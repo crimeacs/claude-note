@@ -302,6 +302,117 @@ def record_derivation(path, content, *, vault_root):
         os.close(descriptor)
 
 
+
+def capture_restrictions(snapshot_path, *, origins, captured_text, vault_root=None):
+    """Freeze authored restrictions on captured bytes before queue visibility.
+
+    This captures restrictions, never configurable policy grants. Original
+    source identities remain in the ledger and are checked against current
+    owner policy at egress. Once captured, an authored restriction cannot be
+    removed by editing the original or replaying a less restrictive export.
+    """
+    from .state_io import atomic_json, open_lock, read_json
+    from .mutation import _vault, resolve_note_path
+
+    if vault_root is None:
+        from . import config
+        vault_root = config.STATE_DIR
+    if not isinstance(captured_text, str) or len(captured_text.encode('utf-8')) > 256 * 1024 * 1024:
+        raise EgressDenied('Captured source exceeds restriction inspection bound')
+    origins = list(origins)
+    if (len(origins) > 2000 or any(not isinstance(item, str) or not item or len(item) > 32768
+                                  for item in origins)):
+        raise EgressDenied('Invalid captured source origins')
+    target = _lineage_path(snapshot_path, vault_root)
+    descriptor = open_lock(target.with_suffix('.lock'))
+    deadline = time.monotonic() + LINEAGE_LOCK_TIMEOUT
+    try:
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('Captured restriction publication lock deadline')
+                time.sleep(.01)
+        try:
+            previous = read_json(target)
+        except FileNotFoundError:
+            previous = {}
+        if (not isinstance(previous, dict) or previous.get('version', 1) != 1
+                or not isinstance(previous.get('unknown', False), bool)):
+            raise EgressDenied('Invalid captured source lineage')
+        stored = previous.get('origins', [])
+        if (not isinstance(stored, list) or len(stored) > 2000
+                or any(not isinstance(item, str) or not item for item in stored)):
+            raise EgressDenied('Invalid captured source lineage')
+        found = set(stored) | set(origins)
+        allowed = _audience_set(previous['artifact_audiences']) if 'artifact_audiences' in previous else None
+        unknown = previous.get('unknown', False)
+        failure = None
+
+        def restrict(constraint):
+            nonlocal allowed
+            if constraint is not None:
+                allowed = constraint if allowed is None else allowed & constraint
+
+        try:
+            restrict(_artifact_audiences(captured_text))
+            recorded, constraint = _recorded_lineage(snapshot_path)
+            restrict(constraint)
+            pending = list(found | set(recorded) | set(derivations(captured_text)))
+            visited = set()
+            inspected = 0
+            while pending:
+                source = pending.pop()
+                if source in visited:
+                    continue
+                visited.add(source)
+                found.add(source)
+                if len(visited) > 2000 or len(found) > 2000:
+                    raise EgressDenied('Captured source closure exceeds inspection bound')
+                path = Path(source)
+                parent = _vault(path.absolute().parent)
+                path = resolve_note_path(path.name, parent, allow_protected=True)
+                # Preserve both the supplied identity and the source actually
+                # captured, even if an ancestor alias is retargeted later.
+                canonical = str(path)
+                found.add(canonical)
+                if canonical not in visited:
+                    pending.append(canonical)
+                if not path.exists():
+                    raise EgressDenied('Cannot capture restrictions of a missing origin')
+                recorded, constraint = _recorded_lineage(path)
+                restrict(constraint)
+                pending.extend(recorded)
+                if path.is_dir():
+                    continue
+                text = _source_restrictions(path, parent)
+                inspected += len(text.encode('utf-8'))
+                if inspected > 256 * 1024 * 1024:
+                    raise EgressDenied('Captured origin closure exceeds inspection bound')
+                restrict(_artifact_audiences(text))
+                pending.extend(derivations(text))
+        except (OSError, ValueError, RuntimeError) as exc:
+            unknown = True
+            failure = exc
+        # Do not publish a truncated closure as a trustworthy record. A small
+        # unknown record retains the original supplied identities for recovery.
+        if len(found) > 2000:
+            found = set(stored) | set(origins)
+            if len(found) > 2000:
+                found = set(stored)
+            unknown = True
+        record = {'version': 1, 'origins': sorted(found), 'unknown': unknown,
+                  'revision': hashlib.sha256(captured_text.encode('utf-8')).hexdigest()}
+        if allowed is not None:
+            record['artifact_audiences'] = sorted(allowed)
+        atomic_json(target, record)
+        if failure is not None or unknown:
+            raise EgressDenied('Captured source restrictions need owner reconciliation') from failure
+    finally:
+        os.close(descriptor)
+
 def _record_derivation(target, content):
     from .state_io import atomic_json, read_json
     try:

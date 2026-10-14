@@ -352,7 +352,7 @@ def _read_codex_transcript(transcript_path: Path, raw=None) -> TranscriptContent
     return content
 
 
-def read_transcript(transcript_path: Union[str, Path]) -> TranscriptContent:
+def read_transcript(transcript_path: Union[str, Path], *, captured_bytes=None) -> TranscriptContent:
     """
     Read and parse a transcript JSONL file: Claude Code's format, or a Codex
     rollout (Codex CLI and the ChatGPT desktop app).
@@ -365,12 +365,16 @@ def read_transcript(transcript_path: Union[str, Path]) -> TranscriptContent:
     """
     transcript_path = Path(transcript_path)
 
-    if not transcript_path.exists():
-        raise FileNotFoundError(f"Transcript not found: {transcript_path}")
-
-    check_transcript_size(transcript_path)
-    with transcript_path.open("rb") as source:
-        captured = source.read(MAX_TRANSCRIPT_BYTES + 1)
+    if captured_bytes is None:
+        if not transcript_path.exists():
+            raise FileNotFoundError(f"Transcript not found: {transcript_path}")
+        check_transcript_size(transcript_path)
+        with transcript_path.open("rb") as source:
+            captured = source.read(MAX_TRANSCRIPT_BYTES + 1)
+    else:
+        if not isinstance(captured_bytes, bytes):
+            raise ValueError("Captured transcript must be immutable bytes")
+        captured = captured_bytes
     if len(captured) > MAX_TRANSCRIPT_BYTES:
         raise ValueError(TRANSCRIPT_LIMIT_ERROR)
     complete = captured.rfind(b"\n") + 1
@@ -556,7 +560,7 @@ def derivation_sources(content, cwd=""):
     return sorted(paths)
 
 
-def read_transcript_from_state(state) -> TranscriptContent:
+def read_transcript_from_state(state, *, full=False) -> TranscriptContent:
     """
     Read transcript for a session from its state.
 
@@ -569,8 +573,16 @@ def read_transcript_from_state(state) -> TranscriptContent:
     if not state.transcript_path:
         raise ValueError("Session state has no transcript_path")
 
-    content = read_transcript(state.transcript_path)
-    checkpoint = getattr(state, "transcript_checkpoint", {}) or {}
+    if getattr(state, "import_binding", {}):
+        from . import import_publication
+        publication, raw = import_publication.read_binding(state)
+        content = read_transcript(state.transcript_path, captured_bytes=raw)
+        content.context_sources.append(publication["snapshot_path"])
+        content.coverage["import_publication"] = publication["publication_id"]
+        content.coverage["import_logical_revision"] = publication["logical_revision"]
+    else:
+        content = read_transcript(state.transcript_path)
+    checkpoint = {} if full else getattr(state, "transcript_checkpoint", {}) or {}
     size, start = checkpoint.get("bytes", 0), checkpoint.get("lines", 0)
     if not size or not start:
         return _snapshot(content, content._source_bytes)

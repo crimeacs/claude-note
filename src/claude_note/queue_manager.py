@@ -4,6 +4,7 @@ import fcntl
 import os
 import hashlib
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Optional
@@ -45,6 +46,12 @@ def read_events(queue_file: Path) -> Iterator[models.QueuedEvent]:
     if not queue_file.exists():
         return
 
+    from . import import_publication
+    if import_publication.is_batch(queue_file):
+        record = import_publication.validate_batch(queue_file)
+        yield from (models.QueuedEvent(**event).validate() for event in record["events"])
+        return
+
     with open(queue_file, "r") as f:
         for line in f:
             line = line.strip()
@@ -68,11 +75,47 @@ def read_pending_events(limit: int = 10000) -> Iterator[models.QueuedEvent]:
     Delivery itself does not acknowledge a record. Prefix digests detect edits
     and truncation, with full replay on a mismatch. A partial final line waits
     for the append to complete. Session-state dedup remains the effect boundary.
+    Import batch preflight hashes retained snapshots before delivery; its local
+    IO cost scales with the visible backlog, rather than being constant-time.
     """
     from .session_tracker import load_session_state
     state_cache = {}
     delivered = 0
-    for path in read_queue_files():
+    from . import import_publication
+    paths = list(read_queue_files())
+    batches, blocked_sessions = {}, set()
+    # Preflight ALL visible batches before yielding any session's evidence.
+    # A corrupt older revision cannot disappear behind a valid newer binding.
+    for path in paths:
+        if import_publication.is_batch(path):
+            try:
+                batches[path] = import_publication.validate_batch(path)
+            except (OSError, ValueError) as exc:
+                session = getattr(exc, "session_id", "")
+                if session:
+                    blocked_sessions.add(session)
+                blocked_sessions.update(import_publication.batch_session_hints(path))
+                logging.getLogger(__name__).warning("Import batch verification failed (%s); evidence retained", path.name[:80])
+    for path in paths:
+        if import_publication.is_batch(path):
+            record = batches.get(path)
+            if not record or record["session_id"] in blocked_sessions:
+                continue
+            try:
+                state = load_session_state(record["session_id"])
+            except (OSError, ValueError):
+                blocked_sessions.add(record["session_id"])
+                logging.getLogger(__name__).warning("Incompatible import session state retained; skipping this session")
+                continue
+            captured = set(state.processed_event_ids) if state else set()
+            for payload in record["events"]:
+                event = models.QueuedEvent(**payload).validate()
+                if event.event_id not in captured:
+                    yield event
+                    delivered += 1
+                    if delivered >= limit:
+                        return
+            continue
         cursor = config.STATE_DIR / "queue-offsets" / (path.stem + ".json")
         try:
             saved = read_json(cursor)
@@ -107,15 +150,43 @@ def read_pending_events(limit: int = 10000) -> Iterator[models.QueuedEvent]:
                 try:
                     event = models.QueuedEvent.from_json(line)
                 except (ValueError, TypeError):
+                    declares_import = False
+                    try:
+                        malformed = json.loads(line)
+                        payload = malformed.get("data") if isinstance(malformed, dict) else None
+                        declares_import = isinstance(payload, dict) and any(
+                            key in payload for key in (import_publication.KEY, import_publication.REVISION_KEY))
+                    except (ValueError, UnicodeError):
+                        pass
+                    if declares_import or b"_import_publication" in line or b"_import_revision" in line:
+                        contiguous = False
+                        logging.getLogger(__name__).warning("Malformed imported journal reference retained without acknowledgement")
+                        continue
                     # Invalid full records remain inspectable in the journal.
                     if contiguous:
                         acknowledged, acknowledged_digest = handle.tell(), digest.hexdigest()
                     continue
+                if event.session_id in blocked_sessions:
+                    contiguous = False
+                    continue
+                # Imported references copied into an ordinary hook journal
+                # remain imports; invalid references never inherit malformed-
+                # legacy-line cursor acknowledgement.
+                if import_publication.KEY in event.data:
+                    try:
+                        import_publication.validate_event(event)
+                    except (OSError, ValueError):
+                        contiguous = False
+                        logging.getLogger(__name__).warning("Imported journal reference could not be verified; evidence retained")
+                        continue
                 if event.session_id not in state_cache:
                     try:
                         state = load_session_state(event.session_id)
-                    except ValueError:
-                        state = None
+                    except (OSError, ValueError):
+                        blocked_sessions.add(event.session_id)
+                        contiguous = False
+                        logging.getLogger(__name__).warning("Incompatible journal session state retained; skipping this session")
+                        continue
                     state_cache[event.session_id] = set(state.processed_event_ids) if state else set()
                 captured = event.event_id in state_cache[event.session_id]
                 if contiguous and captured:
@@ -169,6 +240,23 @@ def cleanup_old_queue_files(keep_days: int = 7) -> None:
 
     cutoff = datetime.utcnow().date()
     for queue_file in config.QUEUE_DIR.glob("*.jsonl"):
+        from . import import_publication
+        if import_publication.is_batch(queue_file):
+            try:
+                record = import_publication.validate_batch(queue_file)
+                created = datetime.fromisoformat(record["events"][0]["ts"].rstrip("Z")).date()
+                if (cutoff - created).days <= keep_days:
+                    continue
+                from .session_tracker import load_session_state
+                state = load_session_state(record["session_id"])
+                if state and all(event["event_id"] in state.processed_event_ids for event in record["events"]):
+                    # Canonical publication receipt, protected lineage and source
+                    # snapshots are retained. Replay sees captured IDs and does
+                    # not resurrect a cleaned batch.
+                    queue_file.unlink()
+            except (OSError, ValueError, TypeError):
+                pass
+            continue
         try:
             file_date = datetime.strptime(queue_file.stem, "%Y-%m-%d").date()
             age_days = (cutoff - file_date).days

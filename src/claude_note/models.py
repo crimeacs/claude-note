@@ -89,6 +89,10 @@ class SessionState:
     note_pending_path: str = ""
     note_pending_revision: str = ""
     filtered_event_ids: dict = field(default_factory=dict)
+    import_binding: dict = field(default_factory=dict)
+    import_ordinals: dict = field(default_factory=dict)
+    import_publications: dict = field(default_factory=dict)
+    last_native_event_ts: str = ""
 
     def to_json(self) -> str:
         """Serialize to JSON string."""

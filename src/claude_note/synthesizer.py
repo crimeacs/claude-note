@@ -297,7 +297,7 @@ def build_synthesis_prompt(
     user_prompts = _format_user_prompts(transcript.user_prompts)
     tool_summary = _format_tool_summary(transcript.tool_uses)
     files_list = _format_files_list(transcript.files_touched)
-    context_sources = set()
+    context_sources = set(transcript.context_sources)
     vault_summary = _format_vault_summary(vault_index, " ".join(transcript.user_prompts[-3:]), sources=context_sources)
     schema = knowledge_pack.get_schema_description()
 
@@ -603,7 +603,7 @@ def resynthesize_session(session_id: str, model: str = None) -> Optional[knowled
         raise ValueError(f"Session has no transcript: {session_id}")
 
     # Read transcript
-    transcript = transcript_reader.read_transcript(state.transcript_path)
+    transcript = transcript_reader.read_transcript_from_state(state, full=True)
 
     # Get fresh vault index
     vault_index = vault_indexer.build_index()
