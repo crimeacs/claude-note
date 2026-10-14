@@ -149,6 +149,36 @@ class ImportPreflightTests(unittest.TestCase):
         self.assertEqual(list(queue_manager.read_pending_events()), [])
         self.assertTrue(result.queue_path.exists())
 
+    def test_deeply_malformed_receipt_isolates_affected_session(self):
+        result = self.publish('affected')
+        healthy = self.publish('healthy')
+        receipt = publication._receipt(result.publication_id)
+        malformed = '{"nested":' + '['*1500 + '0' + ']'*1500 + '}'
+        receipt.write_text(malformed)
+        events = list(queue_manager.read_pending_events())
+        self.assertEqual({event.session_id for event in events}, {'healthy'})
+        self.assertEqual({event.event_id for event in events}, set(healthy.event_ids))
+        self.assertTrue(result.queue_path.exists())
+        self.assertEqual(receipt.read_text(), malformed)
+        self.assertFalse(session_tracker.get_state_file('affected').exists())
+
+    def test_deep_first_hint_line_preserves_later_deny_only_session_hint(self):
+        result = self.publish('affected', 1)
+        hint = self.events(result)[1].to_json()
+        newer = self.publish('affected', 2)
+        healthy = self.publish('healthy')
+        # Invalid canonical metadata supplies no trusted session identity. The
+        # second queue line may only deny delivery; it cannot authorize capture.
+        publication._receipt(result.publication_id).write_text('{}')
+        deep_line = '['*1500 + '0' + ']'*1500
+        result.queue_path.write_text(deep_line + '\n' + hint + '\n')
+        self.assertEqual(publication.batch_session_hints(result.queue_path), {'affected'})
+        events = list(queue_manager.read_pending_events())
+        self.assertEqual({event.session_id for event in events}, {'healthy'})
+        self.assertEqual({event.event_id for event in events}, set(healthy.event_ids))
+        self.assertTrue(result.queue_path.exists() and newer.queue_path.exists())
+        self.assertFalse(session_tracker.get_state_file('affected').exists())
+
     def test_corrupt_unrelated_session_state_does_not_stop_healthy_delivery(self):
         self.publish('broken-state')
         session_tracker.get_state_file('broken-state').write_bytes(b'{invalid')

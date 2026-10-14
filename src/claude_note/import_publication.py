@@ -84,7 +84,7 @@ def _record(path):
     raw = _read(path, MAX_BATCH)
     try:
         value = json.loads(raw, object_pairs_hook=_unique)
-    except (ValueError, UnicodeError) as exc:
+    except (ValueError, UnicodeError, RecursionError) as exc:
         raise PublicationError("Invalid publication receipt") from exc
     if not isinstance(value, dict):
         raise PublicationError("Invalid publication receipt")
@@ -265,7 +265,7 @@ def batch_session_hints(path):
                 session = event.get("session_id") if isinstance(event, dict) else None
                 if isinstance(session, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,200}", session):
                     sessions.add(session)
-            except (ValueError, UnicodeError):
+            except (ValueError, UnicodeError, RecursionError):
                 continue
     except (OSError, ValueError):
         pass
