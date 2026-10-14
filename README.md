@@ -78,6 +78,12 @@ claude-note setup --codex      # index, recall + sentinel hooks, agent rules, ho
 claude-note doctor             # prove it works
 ```
 
+Upgrades retain the installed tool's external Python. Use `--python 3.11` with
+the checkout installer, or set `UV_PYTHON=3.11` with either installer, to reselect
+through uv's current settings. An explicit executable works too. Persistent uv
+discovery preferences do not migrate an existing runtime automatically; see
+[the installer policy](docs/developments.md#216--retain-the-installed-python-on-upgrades).
+
 `setup` is idempotent and backs up every file it changes; `--dry-run` shows what it would do. It:
 
 1. registers your vault, and Claude Code's per-project memory files, as QMD collections, so one

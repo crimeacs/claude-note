@@ -21,11 +21,14 @@ FAKE_UV = """#!/bin/sh
 # tool install <root> ... | tool dir --bin | tool list
 case "$1 $2" in
   "tool install")
+    printf '%s\\0' "$@" > "$HOME/uv-install-arguments"
     printf '%s' "$3" > "$HOME/installed-source.txt"
     printf '#!/bin/sh\\nexec "%s" "%s/python-launcher.py" "$@"\\n' "{python}" "$HOME" > "$HOME/.local/bin/claude-note"
     chmod +x "$HOME/.local/bin/claude-note"
     echo "$3" >> "$HOME/uv-installs.log" ;;
-  "tool dir") echo "$HOME/.local/bin" ;;
+  "tool dir")
+    if test "$3" = --bin; then echo "$HOME/.local/bin";
+    else echo "${UV_TOOL_DIR:-$HOME/.local/share/uv/tools}"; fi ;;
   "tool list") echo "claude-note v0" ;;
 esac
 """
@@ -93,8 +96,9 @@ class BundledInstallTests(unittest.TestCase):
         installer.write_text(installer.read_text().replace('$HOME', '$CLAUDE_NOTE_TEST_HOME'))
         (self.bundle / "SOURCE_REF").write_text("abc123def456\n")
 
-    def run_script(self, *args):
+    def run_script(self, *args, env_overrides=None):
         env = {"CLAUDE_NOTE_TEST_HOME": str(self.home), "PATH": f"{self.home}/.local/bin:/usr/bin:/bin", "LANG": "C"}
+        env.update(env_overrides or {})
         return subprocess.run(["bash", str(self.bundle / SCRIPT), "--allow-temp", *args],
                               env=env, capture_output=True, text=True, timeout=120)
 

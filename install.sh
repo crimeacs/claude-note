@@ -187,17 +187,15 @@ echo -e "  ${GREEN}✓${NC} Vault: $VAULT_PATH"
 echo
 echo -e "${BLUE}[3/8]${NC} Installing claude-note with uv..."
 
-# Ensure Python 3.11+ is available via uv
-echo "  Ensuring Python 3.11 is available..."
-uv python install 3.11 --quiet 2>/dev/null || true
-
 # Check if we're running from the repo itself
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ -f "${SCRIPT_DIR}/pyproject.toml" ]]; then
     # Install from local directory
     echo "  Installing from local directory..."
-    uv tool install "${SCRIPT_DIR}" --python 3.11 --force --quiet
+    source "${SCRIPT_DIR}/scripts/install-python.sh"
+    claude_note_select_install_python
+    uv tool install "${SCRIPT_DIR}" --python "$CLAUDE_NOTE_INSTALL_PYTHON" --force --quiet
 else
     # Clone and install from repo
     echo "  Cloning repository..."
@@ -206,7 +204,9 @@ else
     git clone --quiet --depth 1 "$REPO_URL" "${TEMP_DIR}/claude-note"
 
     echo "  Installing..."
-    uv tool install "${TEMP_DIR}/claude-note" --python 3.11 --force --quiet
+    source "${TEMP_DIR}/claude-note/scripts/install-python.sh"
+    claude_note_select_install_python
+    uv tool install "${TEMP_DIR}/claude-note" --python "$CLAUDE_NOTE_INSTALL_PYTHON" --force --quiet
 fi
 
 # Verify installation

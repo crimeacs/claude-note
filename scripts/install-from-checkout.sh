@@ -5,6 +5,7 @@
 #   scripts/install-from-checkout.sh [--non-interactive] [--vault PATH] [--author EMAIL]
 #                                    [--push-agent] [--claude-hooks] [--codex-hooks]
 #                                    [--install-uv] [--source-ref REF]
+#                                    [--python REQUEST]
 #                                    [--allow-dirty] [--allow-temp]
 #
 # The source tree is a git checkout or a bundled copy (for example the one the
@@ -26,6 +27,8 @@
 #   --install-uv       install uv (astral.sh standalone installer, ~/.local/bin,
 #                      shell profiles untouched) when it is missing
 #   --source-ref REF   the ref to record for a tree that is not a git checkout
+#   --python REQUEST   select a Python version or executable instead of reusing
+#                      the existing tool's external interpreter; UV_PYTHON also works
 #   --allow-dirty      install even with uncommitted changes in the checkout
 #   --allow-temp       install even though the tree is under a temp directory
 #
@@ -66,20 +69,21 @@ xml_escape() {
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 NON_INTERACTIVE=0 PUSH_AGENT=0 CLAUDE_HOOKS=0 CODEX_HOOKS=0 INSTALL_UV=0 ALLOW_DIRTY=0 ALLOW_TEMP=0
-VAULT="" AUTHOR="" SOURCE_REF="" WORKER_STARTED=0
+VAULT="" AUTHOR="" SOURCE_REF="" PYTHON_REQUEST="" WORKER_STARTED=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --non-interactive) NON_INTERACTIVE=1 ;;
         --vault) VAULT="${2:?--vault needs a path}"; shift ;;
         --author) AUTHOR="${2:?--author needs an email}"; shift ;;
         --source-ref) SOURCE_REF="${2:?--source-ref needs a ref}"; shift ;;
+        --python) PYTHON_REQUEST="${2:?--python needs a version or executable}"; shift ;;
         --push-agent) PUSH_AGENT=1 ;;
         --claude-hooks) CLAUDE_HOOKS=1 ;;
         --codex-hooks) CODEX_HOOKS=1 ;;
         --install-uv) INSTALL_UV=1 ;;
         --allow-dirty) ALLOW_DIRTY=1 ;;
         --allow-temp) ALLOW_TEMP=1 ;;
-        -h|--help) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,/^set -euo pipefail/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
     shift
@@ -146,7 +150,9 @@ else
 fi
 
 echo "Installing claude-note from $ROOT ($SOURCE_KIND: $BRANCH @ ${COMMIT:0:12}${DIRTY:+, with uncommitted changes})"
-uv tool install "$ROOT" --python 3.11 --force --reinstall --quiet
+source "$ROOT/scripts/install-python.sh"
+claude_note_select_install_python "$PYTHON_REQUEST"
+uv tool install "$ROOT" --python "$CLAUDE_NOTE_INSTALL_PYTHON" --force --reinstall --quiet
 
 BIN="$(uv tool dir --bin 2>/dev/null || echo "$HOME/.local/bin")/claude-note"
 [[ -x "$BIN" ]] || BIN="$(command -v claude-note || true)"
