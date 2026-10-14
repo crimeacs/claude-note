@@ -19,6 +19,7 @@ synthesis. A content hash per conversation makes every source idempotent.
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -29,7 +30,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
-from . import models, queue_manager
 
 HOME = Path.home()
 TRANSCRIPTS_DIR = HOME / ".local/share/claude-note/transcripts"
@@ -47,14 +47,51 @@ FIRST_RUN_LOOKBACK_DAYS = 7     # first sweep does not backfill all history
 CODEX_IDLE_SECONDS = 600        # a rollout untouched this long is finished
 CLAUDE_CODE_MAX_PER_SWEEP = 10  # each queued session costs one synthesis call; the rest waits a sweep
 MAX_IMPORT_PROBLEM_CHARS = 768
+MAX_IMPORT_PROBLEM_DETAILS = 100
+MAX_IMPORT_PAYLOAD_BYTES = 256 * 1024 * 1024
+
+
+class ImportProblems(list):
+    """Bound displayed diagnostics without losing the exact failure count."""
+    def __init__(self, limit=MAX_IMPORT_PROBLEM_DETAILS):
+        if type(limit) is not int or not 1 <= limit <= MAX_IMPORT_PROBLEM_DETAILS:
+            raise ValueError('Import problem detail limit must be between 1 and 100')
+        super().__init__()
+        self.limit = limit
+        self.total = 0
+
+    @property
+    def omitted(self):
+        return self.total - len(self)
+
+    def append(self, detail):
+        self.total += 1
+        if len(self) < self.limit:
+            super().append(detail[:MAX_IMPORT_PROBLEM_CHARS])
+
+    def extend(self, details):
+        total = getattr(details, 'total', len(details))
+        self.total += total
+        for detail in details:
+            if len(self) >= self.limit:
+                break
+            super().append(detail[:MAX_IMPORT_PROBLEM_CHARS])
+
+
+def _counter(report, key, count=1):
+    if report is not None:
+        report[key] = report.get(key, 0) + count
 
 
 class SourceImportError(RuntimeError):
     """Direct callers without a problem sink still receive visible failure."""
-    def __init__(self, source, queued, problems):
+    def __init__(self, source, queued, problems, report=None):
         self.queued = queued
         self.problems = tuple(problems)
-        super().__init__(f'{source}: {len(problems)} failed file(s); {queued} queued; {problems[0]}'[:1024])
+        self.failed = getattr(problems, 'total', len(problems))
+        self.omitted_problem_details = getattr(problems, 'omitted', 0)
+        self.report = dict(report or {})
+        super().__init__(f'{source}: {self.failed} failed item(s); {queued} queued; {problems[0]}'[:1024])
 
 
 def _source_problem(source, path, error):
@@ -62,7 +99,13 @@ def _source_problem(source, path, error):
     safe_messages = {TRANSCRIPT_LIMIT_ERROR, METADATA_LIMIT_ERROR,
         'Transcript source must be a regular file', 'Codex session metadata is missing or malformed',
         'Claude Code session metadata is malformed',
-        'Transcript contains malformed or incomplete JSONL records'}
+        'Transcript contains malformed or incomplete JSONL records',
+        'Export member exceeds 256 MiB; preserve the original for lossless recovery',
+        'Export member must contain a conversation list', 'Export conversation is malformed',
+        'Export conversation identity is missing or malformed', 'Export parent chain is incomplete or cyclic',
+        'Cursor composer is malformed', 'Cursor conversation is missing or malformed',
+        'Cursor required bubble is missing or malformed', 'Cursor bubble type is unsupported',
+        'Cursor workspace metadata is malformed', 'Cursor source exceeds 256 MiB'}
     message = error.args[0] if len(error.args) == 1 and isinstance(error.args[0], str) else ''
     detail = ': ' + message if message in safe_messages else ''
     # Exception messages can contain source text. Report type and an escaped,
@@ -73,11 +116,17 @@ def _source_problem(source, path, error):
     return f'{source}: {label}: {type(error).__name__}{detail}'[:MAX_IMPORT_PROBLEM_CHARS]
 
 
-def _finish_source(source, queued, errors, problems):
+def _finish_source(source, queued, errors, problems, report=None):
+    if report is not None:
+        report['queued_sessions'] = queued
+        report['failed_items'] = getattr(errors, 'total', len(errors))
+        report['problem_details_omitted'] = getattr(errors, 'omitted', 0)
     if problems is not None:
         problems.extend(errors)
+        if not isinstance(problems, ImportProblems) and getattr(errors, 'omitted', 0):
+            problems.append(f'{source}: {errors.omitted} additional failures; details omitted')
     elif errors:
-        raise SourceImportError(source, queued, errors)
+        raise SourceImportError(source, queued, errors, report)
     return queued
 
 
@@ -112,16 +161,15 @@ def _since(seen: dict, since: Optional[datetime]) -> float:
     return float(seen["_watermark"])
 
 
-def _enqueue(session_id: str, transcript_path: Path, cwd: str, prompt: str, source: str) -> None:
-    for event in ("UserPromptSubmit", "Stop"):
-        queue_manager.enqueue_event(models.QueuedEvent.from_hook_input({
-            "hook_event_name": event,
-            "session_id": session_id,
-            "cwd": cwd,
-            "transcript_path": str(transcript_path),
-            "prompt": prompt[:500] if event == "UserPromptSubmit" else "",
-            "source": source,
-        }))
+def _enqueue(session_id: str, transcript_path: Path, cwd: str, prompt: str, source: str,
+             *, raw: bytes, logical_id=None, logical_revision=None, origin_sources=()) -> bool:
+    """Publish one captured revision as a complete, retry-stable local batch."""
+    from . import import_publication
+    result = import_publication.publish(source, session_id,
+        logical_id if logical_id is not None else str(transcript_path.absolute()),
+        transcript_path, raw, cwd, prompt[:500], origin_sources,
+        logical_revision=logical_revision)
+    return result.status == 'published'
 
 
 def write_session(seen: dict, source: str, conv_id: str, messages: list, cwd: str = "", *, origin_sources=()) -> bool:
@@ -145,15 +193,6 @@ def write_session(seen: dict, source: str, conv_id: str, messages: list, cwd: st
     path = TRANSCRIPTS_DIR / source / f"{session_id}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     origins = sorted({str(Path(item).absolute()) for item in origin_sources}) or ['unknown-import-origin']
-    # Retain restrictive origins even for unchanged conversations encountered
-    # in another export. Authored JSONL metadata alone is not a durable boundary.
-    from .egress import record_derivation
-    record_derivation(path, '---\nderivation_sources: ' + json.dumps(origins) + '\n---\n', vault_root=TRANSCRIPTS_DIR)
-    legacy_id = re.sub(r"[^A-Za-z0-9_-]", "", conv_id)[:80] or hashlib.sha256(conv_id.encode()).hexdigest()[:32]
-    if seen.get(key) == digest or seen.get(f"{source}:{legacy_id}") == digest:
-        seen[key] = digest  # migrate the watermark without reimporting history
-        return False
-
     lines = []
     for n, m in enumerate(messages):
         metadata = {"uuid": m.get("id") or hashlib.sha256(f"{source}:{conv_id}:{n}".encode()).hexdigest()[:24],
@@ -177,12 +216,24 @@ def write_session(seen: dict, source: str, conv_id: str, messages: list, cwd: st
                                 "exit_code": tool.get("exit_code")})
         lines.append({**metadata, "type": "assistant", "message": {"content": blocks}})
         lines.extend(results)
+    raw = "".join(json.dumps(line) + "\n" for line in lines).encode()
+    # Every encounter can narrow controls, including an unchanged conversation
+    # from a second export. Neither mutable JSONL nor seen is policy authority.
+    from . import egress, import_publication
+    egress.capture_restrictions(path, origins=origins, captured_text=raw.decode('utf-8'),
+                                vault_root=TRANSCRIPTS_DIR)
+    legacy_id = re.sub(r"[^A-Za-z0-9_-]", "", conv_id)[:80] or hashlib.sha256(conv_id.encode()).hexdigest()[:32]
+    if seen.get(key) == digest or seen.get(f"{source}:{legacy_id}") == digest:
+        import_publication.protect_existing(source, session_id, conv_id, raw, origins,
+                                            logical_revision=digest)
+        seen[key] = digest  # migrate the watermark without reimporting history
+        return False
     from .state_io import atomic_bytes
-    atomic_bytes(path, "".join(json.dumps(line) + "\n" for line in lines).encode())
-
-    _enqueue(session_id, path, cwd, prompts[0], source)
+    atomic_bytes(path, raw)
+    queued = _enqueue(session_id, path, cwd, prompts[0], source, raw=raw,
+                      logical_id=conv_id, logical_revision=digest, origin_sources=origins)
     seen[key] = digest
-    return True
+    return queued
 
 
 # --------------------------------------------------------------------------
@@ -227,67 +278,157 @@ def _chatgpt_export_messages(conv: dict) -> list:
     return out
 
 
-def import_zip(zip_path: Path, seen: dict) -> Optional[int]:
-    """Import one export zip. Returns conversations queued, or None if not an export."""
+def _export_conversation(conv):
+    """Validate required structure before deriving one independent conversation."""
+    if not isinstance(conv, dict):
+        raise ValueError('Export conversation is malformed')
+    if 'chat_messages' in conv:
+        if not isinstance(conv['chat_messages'], list):
+            raise ValueError('Export conversation is malformed')
+        source, conv_id, cwd = 'claude-ai', conv.get('uuid'), 'claude.ai'
+        messages = _claude_export_messages(conv)
+    elif 'mapping' in conv:
+        mapping, node_id = conv['mapping'], conv.get('current_node')
+        if not isinstance(mapping, dict) or not isinstance(node_id, str) or node_id not in mapping:
+            raise ValueError('Export conversation is malformed')
+        visited = set()
+        while node_id:
+            if node_id in visited or node_id not in mapping or len(visited) >= 100000:
+                raise ValueError('Export parent chain is incomplete or cyclic')
+            visited.add(node_id)
+            node = mapping[node_id]
+            if not isinstance(node, dict):
+                raise ValueError('Export conversation is malformed')
+            node_id = node.get('parent')
+            if node_id is not None and not isinstance(node_id, str):
+                raise ValueError('Export conversation is malformed')
+        source, conv_id, cwd = 'chatgpt', conv.get('conversation_id') or conv.get('id'), 'chatgpt.com'
+        messages = _chatgpt_export_messages(conv)
+    else:
+        raise ValueError('Export conversation is malformed')
+    if not isinstance(conv_id, str) or not conv_id:
+        raise ValueError('Export conversation identity is missing or malformed')
+    return source, conv_id, messages, cwd
+
+
+def _interactive(messages):
+    return (any(message['role'] == 'user' and (message.get('text') or '').strip() for message in messages)
+            and any(message['role'] == 'assistant' for message in messages))
+
+
+def import_zip(zip_path: Path, seen: dict, *, problems=None, report=None) -> Optional[int]:
+    """None means readable non-export; recognized failures remain visible."""
+    zip_path = Path(zip_path)
+    queued, errors = 0, ImportProblems()
+    local = {} if report is None else report
+    _counter(local, 'archives_examined')
     try:
         with zipfile.ZipFile(zip_path) as zf:
-            members = [n for n in zf.namelist()
-                       if re.fullmatch(r"(?:[^/]+/)?conversations(?:-\d+)?\.json", n)]
+            members = [item for item in zf.infolist()
+                       if re.fullmatch(r"(?:[^/]+/)?conversations(?:-\d+)?\.json", item.filename)]
             if not members:
+                _counter(local, 'skipped_unrelated_archives')
                 return None
-            queued = 0
-            for name in members:
-                convs = json.loads(zf.read(name))
-                for conv in convs if isinstance(convs, list) else []:
-                    if not isinstance(conv, dict):
+            _counter(local, 'recognized_archives')
+            for member_number, member in enumerate(members, 1):
+                _counter(local, 'members_examined')
+                label = f'{zip_path}#member-{member_number}'
+                try:
+                    if member.file_size > MAX_IMPORT_PAYLOAD_BYTES:
+                        raise ValueError('Export member exceeds 256 MiB; preserve the original for lossless recovery')
+                    with zf.open(member) as stream:
+                        body = stream.read(MAX_IMPORT_PAYLOAD_BYTES + 1)
+                    if len(body) > MAX_IMPORT_PAYLOAD_BYTES:
+                        raise ValueError('Export member exceeds 256 MiB; preserve the original for lossless recovery')
+                    convs = json.loads(body)
+                    if not isinstance(convs, list):
+                        raise ValueError('Export member must contain a conversation list')
+                except Exception as error:
+                    errors.append(_source_problem('zips', label, error))
+                    _counter(local, 'member_failures')
+                    continue
+                for conversation_number, conv in enumerate(convs, 1):
+                    _counter(local, 'conversations_examined')
+                    try:
+                        source, conv_id, messages, cwd = _export_conversation(conv)
+                        if not _interactive(messages):
+                            _counter(local, 'skipped_noninteractive_conversations')
+                            continue
+                        _counter(local, 'valid_interactive_conversations')
+                        if write_session(seen, source, conv_id, messages, cwd, origin_sources=[zip_path]):
+                            queued += 1
+                        else:
+                            _counter(local, 'unchanged_conversations')
+                    except Exception as error:
+                        errors.append(_source_problem('zips', f'{label}/conversation-{conversation_number}', error))
+                        _counter(local, 'conversation_failures')
                         continue
-                    if "chat_messages" in conv:
-                        source, conv_id, msgs = "claude-ai", conv.get("uuid", ""), _claude_export_messages(conv)
-                        cwd = "claude.ai"
-                    elif "mapping" in conv:
-                        source, conv_id, msgs = "chatgpt", conv.get("conversation_id") or conv.get("id", ""), _chatgpt_export_messages(conv)
-                        cwd = "chatgpt.com"
-                    else:
-                        continue
-                    if conv_id and write_session(seen, source, conv_id, msgs, cwd, origin_sources=[zip_path]):
-                        queued += 1
-            return queued
-    except (zipfile.BadZipFile, OSError, ValueError):
-        return None
+    except Exception as error:
+        errors.append(_source_problem('zips', zip_path, error))
+        _counter(local, 'archive_failures')
+    return _finish_source('zips', queued, errors, problems, local)
 
 
-def sweep_zips(seen: dict, problems: list) -> int:
+def sweep_zips(seen: dict, problems=None, *, report=None) -> int:
     """Import export zips; retain originals and archive newly imported versions."""
     done_dir = IMPORTS_DIR / "done"
-    queued = 0
+    queued, errors = 0, ImportProblems()
+    local = {} if report is None else report
     for folder in WATCH_DIRS:
         try:
             candidates = sorted(folder / n for n in os.listdir(folder) if n.endswith(".zip"))
         except FileNotFoundError:
+            _counter(local, 'skipped_missing_watch_directories')
             continue
-        except PermissionError as e:
-            # macOS privacy: the worker's Python needs access to this folder.
-            problems.append(f"cannot read {folder}: {e.strerror}")
+        except OSError as error:
+            errors.append(_source_problem('zips', folder, error))
+            _counter(local, 'directory_failures')
             continue
         for zip_path in candidates:
             if folder != IMPORTS_DIR and not _looks_like_export(zip_path):
+                _counter(local, 'skipped_unrecognized_download_names')
                 continue
-            if time.time() - zip_path.stat().st_mtime < 60:
-                continue  # still downloading
-            count = import_zip(zip_path, seen)
-            if count is None:
-                continue
-            queued += count
-            if not count:
-                continue
-            done_dir.mkdir(parents=True, exist_ok=True)
-            target = done_dir / zip_path.name
-            if target.exists():
-                target = done_dir / f"{zip_path.stem}-{int(time.time())}.zip"
-            # Moving the original erases its inspectable policy identity. Keep
-            # it in place so a deny on the actual export remains enforceable.
-            shutil.copy2(zip_path, target)
-    return queued
+            try:
+                if time.time() - zip_path.stat().st_mtime < 60:
+                    _counter(local, 'deferred_downloading_archives')
+                    continue
+                archive = {}
+                count = import_zip(zip_path, seen, problems=errors, report=archive)
+                for key, value in archive.items():
+                    if key not in {'queued_sessions', 'failed_items', 'problem_details_omitted'}:
+                        _counter(local, key, value)
+                queued += count or 0
+                if count is None or not archive.get('valid_interactive_conversations'):
+                    continue
+                try:
+                    _archive_backup(zip_path, done_dir, local)
+                except Exception as error:
+                    errors.append(_source_problem('zips-backup', zip_path, error))
+                    _counter(local, 'archive_backup_failures')
+            except Exception as error:
+                errors.append(_source_problem('zips', zip_path, error))
+                _counter(local, 'archive_failures')
+    return _finish_source('zips', queued, errors, problems, local)
+
+
+def _archive_backup(zip_path, done_dir, report):
+    """Retry an optional backup even when conversation publication is unchanged."""
+    info = zip_path.stat()
+    done_dir.mkdir(parents=True, exist_ok=True)
+    target = done_dir / zip_path.name
+    if target.exists():
+        previous = target.stat()
+        if (previous.st_size, previous.st_mtime_ns) == (info.st_size, info.st_mtime_ns):
+            _counter(report, 'archive_backups_present')
+            return
+        target = done_dir / f'{zip_path.stem}-{info.st_mtime_ns}-{info.st_size}.zip'
+        if target.exists() and (target.stat().st_size, target.stat().st_mtime_ns) == (info.st_size, info.st_mtime_ns):
+            _counter(report, 'archive_backups_present')
+            return
+    # Keep the original inspectable policy identity. Backup status says nothing
+    # about failures in other members/conversations or complete import coverage.
+    shutil.copy2(zip_path, target)
+    _counter(report, 'archive_backups_copied')
 
 
 def _looks_like_export(zip_path: Path) -> bool:
@@ -300,80 +441,185 @@ def _looks_like_export(zip_path: Path) -> bool:
 # Cursor
 # --------------------------------------------------------------------------
 
-def _cursor_workspace_folders() -> dict:
+def _cursor_workspace_folders(*, problems=None, report=None) -> dict:
     """composerId -> workspace folder, from each workspace's own state.vscdb."""
-    folders = {}
+    folders, errors = {}, ImportProblems()
     for ws in CURSOR_WORKSPACES.glob("*"):
+        _counter(report, 'workspace_sources_examined')
+        db = None
         try:
-            folder = json.loads((ws / "workspace.json").read_text()).get("folder", "")
-            db = sqlite3.connect(f"file:{ws / 'state.vscdb'}?mode=ro", uri=True, timeout=5)
+            if not (ws / 'workspace.json').exists():
+                _counter(report, 'skipped_workspaces_without_metadata')
+                continue
+            with (ws / 'workspace.json').open('rb') as stream:
+                raw = stream.read(MAX_IMPORT_PAYLOAD_BYTES + 1)
+            if len(raw) > MAX_IMPORT_PAYLOAD_BYTES:
+                raise ValueError('Cursor source exceeds 256 MiB')
+            metadata = json.loads(raw)
+            folder = metadata.get('folder', '') if isinstance(metadata, dict) else None
+            if not isinstance(folder, str):
+                raise ValueError('Cursor workspace metadata is malformed')
+            if not folder:
+                _counter(report, 'skipped_workspaces_without_folder')
+                continue
+            db = sqlite3.connect((ws / 'state.vscdb').absolute().as_uri() + '?mode=ro', uri=True, timeout=5)
+            db.execute('PRAGMA query_only=ON')
+            db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_IMPORT_PAYLOAD_BYTES + 65536)
             row = db.execute("select value from ItemTable where key='composer.composerData'").fetchone()
-            db.close()
-        except (OSError, ValueError, sqlite3.Error):
+            if row and row[0] is not None and (not isinstance(row[0], (str, bytes)) or
+                    len(row[0].encode() if isinstance(row[0], str) else row[0]) > MAX_IMPORT_PAYLOAD_BYTES):
+                raise ValueError('Cursor source exceeds 256 MiB')
+            data = json.loads(row[0]) if row and row[0] else {}
+            composers = data.get('allComposers', []) if isinstance(data, dict) else None
+            if not isinstance(composers, list):
+                raise ValueError('Cursor workspace metadata is malformed')
+            for comp in composers:
+                if not isinstance(comp, dict) or (comp.get('composerId') is not None and not isinstance(comp['composerId'], str)):
+                    raise ValueError('Cursor workspace metadata is malformed')
+                if comp.get('composerId'):
+                    folders[comp['composerId']] = folder.removeprefix('file://')
+        except Exception as error:
+            errors.append(_source_problem('cursor-workspace', ws, error))
+            _counter(report, 'workspace_source_failures')
             continue
-        for comp in (json.loads(row[0]) if row and row[0] else {}).get("allComposers") or []:
-            if comp.get("composerId"):
-                folders[comp["composerId"]] = folder.replace("file://", "")
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception as error:
+                    errors.append(_source_problem('cursor-workspace', ws, error))
+                    _counter(report, 'workspace_source_failures')
+    _finish_source('cursor-workspaces', 0, errors, problems)
     return folders
 
 
 def _cursor_bubble_message(bubble: dict) -> Optional[dict]:
+    if not isinstance(bubble, dict):
+        raise ValueError('Cursor required bubble is missing or malformed')
     role = {1: "user", 2: "assistant"}.get(bubble.get("type"))
     if not role:
-        return None
+        raise ValueError('Cursor bubble type is unsupported')
+    if bubble.get('text') is not None and not isinstance(bubble['text'], str):
+        raise ValueError('Cursor required bubble is missing or malformed')
     tools = []
-    tf = bubble.get("toolFormerData") or {}
+    tf = bubble.get("toolFormerData")
+    tf = {} if tf is None else tf
+    if not isinstance(tf, dict):
+        raise ValueError('Cursor required bubble is missing or malformed')
+    if tf and not tf.get('name'):
+        raise ValueError('Cursor required bubble is missing or malformed')
     if tf.get("name"):
+        if not isinstance(tf['name'], str):
+            raise ValueError('Cursor required bubble is missing or malformed')
+        raw_args = tf.get('params', tf.get('rawArgs', '{}'))
         try:
-            params = json.loads(tf.get("params") or tf.get("rawArgs") or "{}")
+            params = json.loads(raw_args) if isinstance(raw_args, (str, bytes)) else raw_args
         except ValueError:
-            params = {"input": tf.get("rawArgs")}
+            params = {"input": raw_args}
         params = params if isinstance(params, dict) else {"input": params}
         path = params.get("relativeWorkspacePath") or params.get("targetFile")
         if path and "file_path" not in params:
             params["file_path"] = path
-        tools.append({"name": tf["name"], "input": params,
-                      "output": (tf.get("result") or "")[:2000]})
-    thinking = (bubble.get("thinking") or {}).get("text") if isinstance(bubble.get("thinking"), dict) else None
+        tool = {"name": tf["name"], "input": params}
+        if 'result' in tf:
+            tool['output'] = tf['result']  # full normalized evidence, never a 2,000-character view
+        tools.append(tool)
+    thinking_data = bubble.get('thinking')
+    if thinking_data is not None and not isinstance(thinking_data, dict):
+        raise ValueError('Cursor required bubble is missing or malformed')
+    thinking = (thinking_data or {}).get('text')
+    if thinking is not None and not isinstance(thinking, str):
+        raise ValueError('Cursor required bubble is missing or malformed')
     return {"role": role, "text": bubble.get("text") or "", "tools": tools, "thinking": [thinking] if thinking else []}
 
 
-def sweep_cursor(seen: dict, since_ts: float, db_path: Path = None) -> int:
-    db_path = db_path or CURSOR_DB
+def sweep_cursor(seen: dict, since_ts: float, db_path: Path = None, *, problems=None, report=None) -> int:
+    db_path = Path(db_path or CURSOR_DB)
+    queued, errors = 0, ImportProblems()
+    local = {} if report is None else report
     if not db_path.exists():
-        return 0
-    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10)
+        _counter(local, 'skipped_missing_optional_databases')
+        return _finish_source('cursor', 0, errors, problems, local)
+    db = None
     try:
+        db = sqlite3.connect(db_path.absolute().as_uri() + '?mode=ro', uri=True, timeout=10)
+        db.execute('PRAGMA query_only=ON')
+        db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_IMPORT_PAYLOAD_BYTES + 65536)
         folders = None
-        queued = 0
-        for key, value in db.execute("select key, value from cursorDiskKV where key like 'composerData:%'"):
+        _counter(local, 'database_scans_started')
+        # Fetch keys independently: a bad composer/bubble cannot abort the key
+        # scan or cause an otherwise complete conversation to be omitted.
+        for (key,) in db.execute("select key from cursorDiskKV where key like 'composerData:%'"):
+            _counter(local, 'composers_examined')
+            label = f'{db_path}#composer-{hashlib.sha256(str(key).encode()).hexdigest()[:16]}'
             try:
+                row = db.execute('select value from cursorDiskKV where key=?', (key,)).fetchone()
+                value = row[0] if row else None
+                if not isinstance(value, (str, bytes)) or len(value.encode() if isinstance(value, str) else value) > MAX_IMPORT_PAYLOAD_BYTES:
+                    raise ValueError('Cursor source exceeds 256 MiB')
                 comp = json.loads(value) if value else None
-            except ValueError:
+                if not isinstance(comp, dict):
+                    raise ValueError('Cursor composer is malformed')
+                if 'conversation' not in comp and 'fullConversationHeadersOnly' not in comp:
+                    raise ValueError('Cursor conversation is missing or malformed')
+                updated = comp.get('lastUpdatedAt') or comp.get('createdAt') or 0
+                if type(updated) not in (int, float) or not math.isfinite(updated):
+                    raise ValueError('Cursor composer is malformed')
+                if updated / 1000 < since_ts:
+                    _counter(local, 'skipped_old_composers')
+                    continue
+                comp_id = comp.get('composerId') or key.split(':', 1)[1]
+                if not isinstance(comp_id, str) or not comp_id:
+                    raise ValueError('Cursor composer is malformed')
+                if comp.get('conversation'):
+                    bubbles = comp['conversation']
+                    if not isinstance(bubbles, list):
+                        raise ValueError('Cursor conversation is missing or malformed')
+                else:
+                    headers = comp.get('fullConversationHeadersOnly')
+                    if headers is None and comp.get('conversation') == []:
+                        headers = []
+                    if not isinstance(headers, list):
+                        raise ValueError('Cursor conversation is missing or malformed')
+                    bubbles, payload_bytes = [], len(value.encode() if isinstance(value, str) else value)
+                    for header in headers:
+                        if not isinstance(header, dict) or not isinstance(header.get('bubbleId'), str) or not header['bubbleId']:
+                            raise ValueError('Cursor required bubble is missing or malformed')
+                        row = db.execute('select value from cursorDiskKV where key=?',
+                            (f"bubbleId:{comp_id}:{header['bubbleId']}",)).fetchone()
+                        if not row or not isinstance(row[0], (str, bytes)) or not row[0]:
+                            raise ValueError('Cursor required bubble is missing or malformed')
+                        raw = row[0].encode() if isinstance(row[0], str) else row[0]
+                        payload_bytes += len(raw)
+                        if payload_bytes > MAX_IMPORT_PAYLOAD_BYTES:
+                            raise ValueError('Cursor source exceeds 256 MiB')
+                        bubbles.append(json.loads(raw))
+                messages = [_cursor_bubble_message(bubble) for bubble in bubbles]
+                if not _interactive(messages):
+                    _counter(local, 'skipped_noninteractive_composers')
+                    continue
+                if folders is None:
+                    folders = _cursor_workspace_folders(problems=errors, report=local)
+                if write_session(seen, 'cursor', comp_id, messages, folders.get(comp_id) or 'cursor', origin_sources=[db_path]):
+                    queued += 1
+                else:
+                    _counter(local, 'unchanged_composers')
+            except Exception as error:
+                errors.append(_source_problem('cursor', label, error))
+                _counter(local, 'composer_failures')
                 continue
-            if not comp or (comp.get("lastUpdatedAt") or comp.get("createdAt") or 0) / 1000 < since_ts:
-                continue
-            comp_id = comp.get("composerId") or key.split(":", 1)[1]
-            if comp.get("conversation"):
-                bubbles = comp["conversation"]
-            else:
-                bubbles = []
-                for header in comp.get("fullConversationHeadersOnly") or []:
-                    row = db.execute("select value from cursorDiskKV where key=?",
-                                     (f"bubbleId:{comp_id}:{header.get('bubbleId')}",)).fetchone()
-                    if row and row[0]:
-                        try:
-                            bubbles.append(json.loads(row[0]))
-                        except ValueError:
-                            pass
-            msgs = [m for m in (_cursor_bubble_message(b) for b in bubbles) if m]
-            if folders is None:
-                folders = _cursor_workspace_folders()
-            if write_session(seen, "cursor", comp_id, msgs, folders.get(comp_id) or "cursor", origin_sources=[db_path]):
-                queued += 1
-        return queued
+        _counter(local, 'database_scans_completed')
+    except Exception as error:
+        errors.append(_source_problem('cursor-database', db_path, error))
+        _counter(local, 'database_scan_failures')
     finally:
-        db.close()
+        if db is not None:
+            try:
+                db.close()
+            except Exception as error:
+                errors.append(_source_problem('cursor-database', db_path, error))
+                _counter(local, 'database_close_failures')
+    return _finish_source('cursor', queued, errors, problems, local)
 
 
 # --------------------------------------------------------------------------
@@ -382,10 +628,10 @@ def sweep_cursor(seen: dict, since_ts: float, db_path: Path = None) -> int:
 
 def sweep_codex(seen: dict, since_ts: float, sessions_dir: Path = None, *, problems=None) -> int:
     from .transcript_reader import check_transcript_size, codex_session_meta, read_transcript
-    from . import session_tracker
+    from . import session_tracker, import_publication
 
     sessions_dir = sessions_dir or CODEX_SESSIONS
-    queued, errors = 0, []
+    queued, errors = 0, ImportProblems()
     now = time.time()
     for path in sessions_dir.glob("*/*/*/rollout-*.jsonl"):
         try:
@@ -405,25 +651,28 @@ def sweep_codex(seen: dict, since_ts: float, sessions_dir: Path = None, *, probl
             if meta.get("background"):
                 seen[key] = mtime
                 continue
-            if key not in seen and session_tracker.get_state_file(session_id).exists():
+            if (key not in seen and session_tracker.get_state_file(session_id).exists()
+                    and not import_publication.has_history('codex', session_id)):
                 seen[key] = mtime  # the hook already delivered this session
                 continue
             content = read_transcript(path)
             _validate_native_content(content)
+            if meta != codex_session_meta(path, content._source_bytes, strict=True):
+                raise ValueError('Native source metadata changed before capture')
             if content.user_prompts and content.assistant_texts:
-                _enqueue(session_id, path, meta.get("cwd", ""), content.user_prompts[0], "codex")
-                queued += 1
+                queued += _enqueue(session_id, path, meta.get("cwd", ""), content.user_prompts[0], "codex",
+                                   raw=content._source_bytes, origin_sources=[str(path.absolute())])
             seen[key] = mtime
         except Exception as error:
             errors.append(_source_problem('codex', path, error))
     return _finish_source('codex', queued, errors, problems)
 
 
-def _claude_code_meta(path: Path) -> dict:
+def _claude_code_meta(path: Path, raw=None) -> dict:
     """sessionId, cwd and entrypoint from the first lines of a Claude Code transcript."""
     meta = {}
     from .transcript_reader import metadata_lines
-    for line in metadata_lines(path, max_lines=51):
+    for line in metadata_lines(path, max_lines=51, raw=raw):
         try:
             row = json.loads(line)
         except ValueError:
@@ -451,11 +700,11 @@ def sweep_claude_code(seen: dict, since_ts: float, projects_dir: Path = None,
     `limit` per sweep; the rest stay unseen for the next sweep.
     """
     from .transcript_reader import check_transcript_size, read_transcript
-    from . import session_tracker
+    from . import session_tracker, import_publication
 
     projects_dir = projects_dir or CLAUDE_PROJECTS
     now = time.time()
-    candidates, errors = [], []
+    candidates, errors = [], ImportProblems()
     for path in projects_dir.glob("*/*.jsonl"):
         try:
             mtime = path.stat().st_mtime
@@ -479,14 +728,17 @@ def sweep_claude_code(seen: dict, since_ts: float, projects_dir: Path = None,
             if str(meta.get("entrypoint", "")).startswith("sdk"):
                 seen[key] = mtime
                 continue
-            if key not in seen and session_tracker.get_state_file(session_id).exists():
+            if (key not in seen and session_tracker.get_state_file(session_id).exists()
+                    and not import_publication.has_history('claude-code', session_id)):
                 seen[key] = mtime  # the hook already delivered this session
                 continue
             content = read_transcript(path)
             _validate_native_content(content)
+            if meta != _claude_code_meta(path, content._source_bytes):
+                raise ValueError('Native source metadata changed before capture')
             if content.user_prompts and content.assistant_texts:
-                _enqueue(session_id, path, meta.get("cwd", ""), content.user_prompts[0], "claude-code")
-                queued += 1
+                queued += _enqueue(session_id, path, meta.get("cwd", ""), content.user_prompts[0], "claude-code",
+                                   raw=content._source_bytes, origin_sources=[str(path.absolute())])
             seen[key] = mtime
         except Exception as error:
             errors.append(_source_problem('claude-code', path, error))
@@ -512,26 +764,34 @@ def _sweep(since: Optional[datetime] = None, zips: Iterable[Path] = ()) -> dict:
     """Run every source once; touch the heartbeat on success."""
     seen = _load_seen()
     since_ts = _since(seen, since)
-    counts, problems = {}, []
-    for name, fn in (("zips", lambda: sweep_zips(seen, problems)),
-                     ("cursor", lambda: sweep_cursor(seen, since_ts)),
+    counts, problems = {}, ImportProblems()
+    reports = {'zips': {}, 'cursor': {}}
+    for name, fn in (("zips", lambda: sweep_zips(seen, problems, report=reports['zips'])),
+                     ("cursor", lambda: sweep_cursor(seen, since_ts, problems=problems, report=reports['cursor'])),
                      ("codex", lambda: sweep_codex(seen, since_ts, problems=problems)),
                      ("claude-code", lambda: sweep_claude_code(seen, since_ts, problems=problems))):
         try:
             counts[name] = fn()
-        except Exception as e:  # one broken source must not stop the others
-            counts[name] = f"error: {e}"
-            problems.append(f"{name}: {e}")
+        except SourceImportError as error:
+            counts[name] = error.queued
+            failures = ImportProblems()
+            failures.extend(error.problems)
+            failures.total = error.failed
+            problems.extend(failures)
+        except Exception as error:  # one broken source must not stop the others
+            counts[name] = 0
+            problems.append(_source_problem(name, name, error))
         _save_seen(seen)
     for zip_path in zips:
-        count = import_zip(Path(zip_path), seen)
-        counts[str(zip_path)] = count
-        if count is None:
-            problems.append(f"{zip_path}: not a readable conversation export")
+        reports[str(zip_path)] = {}
+        count = import_zip(Path(zip_path), seen, problems=problems, report=reports[str(zip_path)])
+        counts[str(zip_path)] = count or 0
         _save_seen(seen)
     if problems:
         counts["problems"] = problems
-        counts["failed"] = len(problems)
+        counts["failed"] = problems.total
+        counts['problem_details_omitted'] = problems.omitted
+    counts['reports'] = reports
     HEARTBEAT.parent.mkdir(parents=True, exist_ok=True)
     # Keep the latest attempt separate from the last successful sweep. Health
     # checks can show a source error immediately without calling it a success.

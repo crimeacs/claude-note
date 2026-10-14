@@ -135,11 +135,13 @@ class ImporterTests(unittest.TestCase):
     def test_import_identity_includes_source_and_complete_conversation_id(self):
         seen = {}
         messages = [{"role": "user", "text": "A question"}, {"role": "assistant", "text": "An answer"}]
+        origin = self.tmp / 'identity-origin.md'
+        origin.write_text('Public synthetic identity origin.')
         for source, conv_id in (("cursor", "same-id"), ("chatgpt", "same-id"),
                                 ("cursor", "a/b"), ("cursor", "ab"),
                                 ("cursor", "x" * 80 + "a"), ("cursor", "x" * 80 + "b")):
-            self.assertTrue(importers.write_session(seen, source, conv_id, messages))
-            self.assertFalse(importers.write_session(seen, source, conv_id, messages))
+            self.assertTrue(importers.write_session(seen, source, conv_id, messages, origin_sources=[origin]))
+            self.assertFalse(importers.write_session(seen, source, conv_id, messages, origin_sources=[origin]))
         events = self._events()
         self.assertEqual(len({e.session_id for e in events}), 6)
         self.assertEqual(len({e.transcript_path for e in events}), 6)
@@ -149,14 +151,17 @@ class ImporterTests(unittest.TestCase):
         messages = [{"role": "user", "text": "A question"}, {"role": "assistant", "text": "An answer"}]
         digest = hashlib.sha256(json.dumps(messages, sort_keys=True, default=str).encode()).hexdigest()
         seen = {"chatgpt:legacy-id": digest}
-        self.assertFalse(importers.write_session(seen, "chatgpt", "legacy-id", messages))
+        origin = self.tmp / 'legacy-origin.md'
+        origin.write_text('Public synthetic legacy origin.')
+        self.assertFalse(importers.write_session(seen, "chatgpt", "legacy-id", messages, origin_sources=[origin]))
         self.assertEqual(len(self._events()), 0)
         self.assertEqual(len(seen), 2)
 
     def test_failed_source_is_reported_without_refreshing_success_heartbeat(self):
         with mock.patch.object(importers, "sweep_cursor", side_effect=RuntimeError("database unavailable")):
             counts = importers.sweep()
-        self.assertIn("cursor: database unavailable", counts["problems"])
+        self.assertEqual(counts["cursor"], 0)
+        self.assertIn('cursor: "cursor": RuntimeError', counts["problems"])
         self.assertFalse(importers.HEARTBEAT.exists())
         status = json.loads(importers.HEARTBEAT.with_suffix(".json").read_text())
         self.assertEqual(status["counts"]["problems"], counts["problems"])

@@ -1,5 +1,52 @@
 # Developments
 
+## 2.1.5 — revision-bound import publication and recovery (14 October 2026)
+
+Imports now own immutable captured revisions and publish a complete, stable
+prompt/stop batch after the protected source restrictions and canonical receipt
+are durable. Retries reuse the first pair, IDs and timestamps, including after
+seen-store failure or rediscovery in another export. The worker verifies every
+reference before durable capture acknowledgement; older publications cannot
+regress a newer binding or hook. Queue cleanup retains canonical receipts and
+evidence. Source identities remain available for current policy checks, while
+authored restrictions are retained against later metadata removal. See
+[ownership and validity](MEMORY_OWNERSHIP.md). These are local capture guarantees;
+model execution and external effects are not exactly-once. Older releases cannot
+safely read the added session-state fields; preserve state during rollback.
+
+ZIP imports distinguish readable unrelated archives from failed selected or
+recognized exports. Malformed or oversized members and failed conversations
+produce explicit problems while independent members and conversations continue.
+Cursor recovery isolates composers and rejects a conversation with a required
+missing, malformed or unsupported bubble rather than publishing incomplete
+normalized evidence. Tool results retain their full value within the 256 MiB
+source bound instead of the previous 2,000-character projection. Workspace
+association errors remain visible while valid composers can use a generic
+workspace. Late database-scan, close or archive-backup failures preserve already
+completed publications and integer queued counts. Failed items retain prior seen
+values and session checkpoints; originals are retained. Version-aware archive
+backups retry even when all valid conversations are already unchanged, and are
+not a receipt of complete archive import.
+
+Reports retain exact problem totals while storing at most 100 payload-safe
+details, with an explicit omitted count. This bound also applies to native
+transcript problems. `failed` counts reported problems, not all malformed records
+or all files in a category. Counters name their units and separate source items,
+queued sessions, failures, unchanged items, skips and deferrals; subsets overlap.
+Any problem leaves the last-clean heartbeat unchanged. Direct helper errors
+retain partial progress and exact/omitted failure counts. Synthetic regressions
+exercise more than 100 failures followed by healthy input, independent member
+and composer continuation, required bubbles, backup retries and late DB failures.
+
+The 256 MiB limit remains per decompressed export member or Cursor composer plus
+required bubbles; native transcript and metadata limits are unchanged. Recovery
+still uses normalized supported content, including only ChatGPT's selected
+visible text branch. Optional absent sources, recent downloading archives,
+unrecognized Downloads names, old composers and noninteractive conversations
+can be skipped or deferred. A clean eligible sweep does not assert complete
+historical or media capture. Lossless oversized-source streaming and unsupported
+format recovery remain pending; no lossy compaction or cursor reset is performed.
+
 ## 2.1.4 — native transcript import failure isolation (14 October 2026)
 
 Claude Code and Codex recovery sweeps continue past individual unreadable,

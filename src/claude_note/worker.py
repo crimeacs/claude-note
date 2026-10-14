@@ -172,6 +172,9 @@ def process_session(session_id: str, events: list, logger: logging.Logger) -> bo
             new_events = [event for event in events if event.event_id not in processed]
             # Update session state from events
             state = session_tracker.update_session_from_events(session_id, events)
+            # Capture acknowledgement is independent of note/model completion.
+            session_tracker.save_session_state(state)
+            new_events = [event for event in new_events if event.event_id not in state.filtered_event_ids]
 
             # Skip synthesis/empty sessions (no user prompts)
             has_user_prompt = any(
@@ -190,6 +193,12 @@ def process_session(session_id: str, events: list, logger: logging.Logger) -> bo
             # Skip if already written after last event (even for immediate events)
             already_written = session_tracker.is_session_written(state)
             if already_written:
+                if immediate:
+                    # Queue delivery limits may separate Prompt and Stop. A
+                    # note written between them does not consume Stop's request
+                    # for synthesis; replayed/filtered Stops are excluded above.
+                    session_tracker.schedule_synthesis(state)
+                    session_tracker.save_session_state(state)
                 session_tracker.run_pending_synthesis(state, lambda s: run_synthesis(s, logger))
                 logger.debug(f"Session {session_id[:8]}: already written, skipping")
                 return False

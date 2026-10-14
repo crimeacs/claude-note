@@ -101,14 +101,24 @@ def cmd_status(args) -> int:
 
     # Count sessions and their states
     sessions: dict[str, int] = {}
-    for event in queue_manager.read_all_events():
-        sessions[event.session_id] = sessions.get(event.session_id, 0) + 1
-        total_events += 1
+    unreadable_batches = 0
+    for queue_file in queue_files:
+        try:
+            for event in queue_manager.read_events(queue_file):
+                sessions[event.session_id] = sessions.get(event.session_id, 0) + 1
+                total_events += 1
+        except (OSError, ValueError, TypeError):
+            unreadable_batches += 1
 
     written_count = 0
     pending_count = 0
+    incompatible_states = 0
     for session_id in sessions:
-        state = session_tracker.load_session_state(session_id)
+        try:
+            state = session_tracker.load_session_state(session_id)
+        except (OSError, ValueError, TypeError):
+            incompatible_states += 1
+            continue
         if state and state.last_write_ts:
             written_count += 1
         else:
@@ -117,6 +127,8 @@ def cmd_status(args) -> int:
     print(f"  Files:     {len(queue_files)} ({_format_bytes(total_size)})")
     print(f"  Events:    {total_events}")
     print(f"  Sessions:  {len(sessions)} ({written_count} written, {pending_count} pending)")
+    if unreadable_batches or incompatible_states:
+        print(f"  INCOMPLETE: {unreadable_batches} unreadable queue files, {incompatible_states} incompatible session states; retained for recovery")
 
     # State directory
     print(f"\nState")
@@ -173,7 +185,7 @@ def cmd_status(args) -> int:
 
     print()
 
-    return 0
+    return 1 if unreadable_batches or incompatible_states else 0
 
 
 def cmd_import(args) -> int:
