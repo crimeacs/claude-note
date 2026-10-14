@@ -174,6 +174,55 @@ class CapabilityHealthTests(unittest.TestCase):
         self.assertEqual(search.call_args.args[1].index, "")
         self.assertEqual(search.call_args.args[1].collections, [setup_recall.PUBLIC_CANARY_COLLECTION])
 
+    def test_default_server_probe_rejects_own_fallback_when_global_readiness_is_true(self):
+        manifest = {"lexical_ready": True, "vector_ready": True, "rerank_ready": True}
+        result = recall.Result(status="hit", engine="server", reranked=False,
+                               coverage={"rerank": "sdk_fallback_no_rerank"}, hits=[recall.Hit(
+            uri="qmd://claude-note-public-canary/doctor-canary.md", title="Public canary", snippet="synthetic")])
+        with mock.patch.object(recall, "server_capabilities", return_value=manifest) as readiness, \
+             mock.patch.object(recall, "recall", return_value=result) as search:
+            out = setup_recall.probe_default_server(recall.Settings(), save=False)
+        checks = {row["check"]: row["ok"] for row in out["checks"]}
+        self.assertTrue(checks["rerank readiness"])
+        self.assertTrue(checks["default server retrieves public canary"])
+        self.assertFalse(checks["current public query rerank"])
+        self.assertFalse(out["ok"])
+        self.assertEqual(readiness.call_count, 2)
+        self.assertEqual(search.call_count, 1)
+
+    def test_default_server_probe_requires_consistent_positive_query_scoring(self):
+        manifest = {"lexical_ready": True, "vector_ready": True, "rerank_ready": True}
+        for flag, coverage, expected in ((True, "exact_passage", True),
+                                         (False, "exact_passage", False),
+                                         (True, "sdk_fallback_no_rerank", False),
+                                         (True, "partial_passage_scores", False),
+                                         (1, "exact_passage", False)):
+            with self.subTest(reranked=flag, coverage=coverage):
+                result = recall.Result(status="hit", engine="server", reranked=flag,
+                                       coverage={"rerank": coverage}, hits=[recall.Hit(
+                    uri="qmd://claude-note-public-canary/doctor-canary.md", title="Public canary", snippet="synthetic")])
+                with mock.patch.object(recall, "server_capabilities", return_value=manifest), \
+                     mock.patch.object(recall, "recall", return_value=result):
+                    out = setup_recall.probe_default_server(recall.Settings(), save=False)
+                self.assertIs(out["ok"], expected)
+
+    def test_default_server_probe_keeps_disabled_rerank_and_global_readiness_separate(self):
+        result = recall.Result(status="hit", engine="server", reranked=False,
+                               coverage={"rerank": "not_run"}, hits=[recall.Hit(
+            uri="qmd://claude-note-public-canary/doctor-canary.md", title="Public canary", snippet="synthetic")])
+        manifest = {"lexical_ready": True, "vector_ready": True, "rerank_ready": False}
+        with mock.patch.object(recall, "server_capabilities", return_value=manifest), \
+             mock.patch.object(recall, "recall", return_value=result):
+            disabled = setup_recall.probe_default_server(recall.Settings(rerank=False), save=False)
+            result.reranked = True
+            result.coverage["rerank"] = "exact_passage"
+            enabled = setup_recall.probe_default_server(recall.Settings(rerank=True), save=False)
+        self.assertTrue(disabled["ok"])
+        self.assertFalse(enabled["ok"])
+        enabled_checks = {row["check"]: row["ok"] for row in enabled["checks"]}
+        self.assertTrue(enabled_checks["current public query rerank"])
+        self.assertFalse(enabled_checks["rerank readiness"])
+
     def test_setup_canary_dry_run_does_not_write(self):
         with tempfile.TemporaryDirectory() as temporary, mock.patch.object(setup_recall, "HOME", Path(temporary)), \
              mock.patch.object(setup_recall, "add_collection", return_value="would add"):

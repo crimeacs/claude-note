@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import selectors
@@ -1060,17 +1061,72 @@ def _rank_passages(prompt: str, candidates: list[Hit], settings: Settings, resul
                           "text": h.scored_text} for h in top]}
     rr = _server_attempt(result, "/rerank", deadline, lambda request_id: server_post(
         settings, "/rerank", {**body, "request_id": request_id}, max(0, deadline - time.monotonic())))
-    if isinstance((rr or {}).get("client_transport"), dict):
-        result.server_calls[-1] = rr["client_transport"]
-    scores = (rr or {}).get("passage_scores") or {}
-    confirmed = set((rr or {}).get("scored_passage_ids") or [])
-    if not (rr or {}).get("error") and scores and all(h.passage_id in confirmed for h in top):
-        positions = {h.passage_id: i for i, h in enumerate(top)}
-        top.sort(key=lambda h: -(float(scores.get(h.passage_id, 0)) + settings.rerank_blend / (1 + positions[h.passage_id])))
-        result.reranked = True
-        result.coverage["rerank"] = "exact_passage"
-    else:
+    result.reranked = False
+    response = rr if isinstance(rr, dict) else {}
+    if isinstance(response.get("client_transport"), dict):
+        result.server_calls[-1] = response["client_transport"]
+    status, coverage = response.get("rerank_status"), response.get("coverage")
+    if response.get("error"):
         result.coverage["rerank"] = "unavailable_or_unverified_passage"
+        return candidates
+    if status == "sdk_fallback" or response.get("model") == "fallback" or coverage == "sdk_fallback_no_rerank":
+        result.coverage["rerank"] = "sdk_fallback_no_rerank"
+        return candidates
+    degraded = {"unverified_model": "unverified_model", "partial_scores": "partial_passage_scores",
+                "invalid_scores": "invalid_scores", "no_valid_scores": "no_valid_scores",
+                "model_cache_unavailable": "model_cache_unavailable", "not_requested": "no_passages"}
+    if status != "scored" or coverage != "exact_passage":
+        result.coverage["rerank"] = (degraded[status] if isinstance(status, str) and status in degraded and
+                                     degraded[status] == coverage else "unverified_rerank_execution")
+        return candidates
+
+    def model_metadata(manifest):
+        models = manifest.get("models") if isinstance(manifest, dict) else None
+        metadata = models.get("rerank") if isinstance(models, dict) else None
+        return metadata if isinstance(metadata, dict) else {}
+
+    def valid_model(value):
+        if (not isinstance(value, str) or not value or len(value) > 1024 or value.strip() != value or
+                value in ("fallback", "unknown") or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+            return False
+        try:
+            return len(value.encode("utf-8")) <= 1024
+        except UnicodeError:
+            return False
+
+    manifest = response.get("manifest")
+    metadata = model_metadata(manifest)
+    model, expected = response.get("model"), metadata.get("id")
+    previous = model_metadata(result.manifest).get("id")
+    if (not valid_model(model) or not valid_model(expected) or model != expected or
+            (previous is not None and (not valid_model(previous) or previous != expected)) or
+            manifest.get("rerank_ready") is not True or metadata.get("ready") is not True):
+        result.coverage["rerank"] = "unverified_model"
+        return candidates
+    # A score map alone is insufficient: old SDKs can produce finite placeholder
+    # scores without running their configured ranker. Require a complete positive
+    # model-bound observation and exact IDs before changing the fusion order.
+    scores, confirmed = response.get("passage_scores"), response.get("scored_passage_ids")
+    ids = [h.passage_id for h in top]
+    if (not all(isinstance(value, str) and value for value in ids) or len(set(ids)) != len(ids) or
+            not isinstance(scores, dict) or set(scores) != set(ids) or
+            not isinstance(confirmed, list) or not all(isinstance(value, str) for value in confirmed) or
+            len(confirmed) != len(ids) or set(confirmed) != set(ids)):
+        result.coverage["rerank"] = "invalid_scores"
+        return candidates
+    numeric = {}
+    try:
+        for identity, value in scores.items():
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise ValueError("Invalid passage score")
+            numeric[identity] = float(value)
+    except (ValueError, TypeError, OverflowError):
+        result.coverage["rerank"] = "invalid_scores"
+        return candidates
+    positions = {h.passage_id: i for i, h in enumerate(top)}
+    top.sort(key=lambda h: -(numeric[h.passage_id] + settings.rerank_blend / (1 + positions[h.passage_id])))
+    result.reranked = True
+    result.coverage["rerank"] = "exact_passage"
     return top + tail
 
 

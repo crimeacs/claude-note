@@ -772,6 +772,13 @@ def probe_default_server(settings=None, *, save: bool = True) -> dict:
                                ("rerank readiness", "rerank_ready", settings.rerank)):
         checks.append({"check": name, "ok": manifest.get(key) is True or not enabled,
                        "detail": "observed server capability; not a quality score" if enabled else "disabled in recall settings"})
+    # Global readiness may describe another request. Require this public query's
+    # positive scoring observation separately; neither is native execution proof.
+    scored = result.reranked is True and result.coverage.get("rerank") == "exact_passage"
+    checks.append({"check": "current public query rerank", "ok": scored or not settings.rerank,
+                   "detail": ("validated non-fallback passage scoring for this query; not native execution proof" if scored
+                              else "this query did not produce validated non-fallback passage scores")
+                   if settings.rerank else "disabled in recall settings"})
     found = result.engine == "server" and any(h.uri == expected for h in result.hits)
     checks.append({"check": "default server retrieves public canary", "ok": found,
                    "detail": "exact scoped public source returned" if found else result.reason or
