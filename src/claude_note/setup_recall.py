@@ -226,12 +226,8 @@ def _freshness_config(index: str) -> tuple[bytes, str]:
     return b"", ""
 
 
-def _freshness_capture(index: str) -> tuple[dict[Path, int], str]:
-    """Capture journals only for collections indexing their whole Markdown root.
-
-    A successful filtered collection update cannot establish whole-vault
-    freshness. Unknown/custom masks therefore remain unacknowledged.
-    """
+def _freshness_collections(index: str) -> tuple[dict[str, Path], str]:
+    """Return only full-root Markdown collections without custom exclusions."""
     body, identity = _freshness_config(index)
     if not identity:
         return {}, ""
@@ -243,13 +239,24 @@ def _freshness_capture(index: str) -> tuple[dict[Path, int], str]:
         data = json.loads(text)
     except ValueError:
         data = None
-    patterns = {}
+    patterns, ignored = {}, set()
     if isinstance(data, dict) and isinstance(data.get("collections"), dict):
         patterns = {key: value.get("pattern") for key, value in data["collections"].items()
                     if isinstance(value, dict)}
+        ignored = {key for key, value in data["collections"].items()
+                   if isinstance(value, dict) and value.get("ignore")}
     else:
         current = None
+        in_collections = False
         for line in text.splitlines():
+            if line == "collections:":
+                in_collections = True
+                continue
+            if line and not line.startswith(" ") and not line.startswith("#"):
+                in_collections = False
+                current = None
+            if not in_collections:
+                continue
             collection = re.fullmatch(r"  ([A-Za-z0-9_.-]+):\s*", line)
             if collection:
                 current = collection[1]
@@ -259,17 +266,55 @@ def _freshness_capture(index: str) -> tuple[dict[Path, int], str]:
                 pattern = re.fullmatch(r"    pattern:\s*(.*?)\s*", line)
                 if pattern:
                     patterns[current] = pattern[1].strip("\"'")
+                ignore = re.fullmatch(r'''    (?:ignore|"ignore"|'ignore')\s*:\s*(.*?)\s*''', line)
+                # An empty scalar can introduce a following block list. Only
+                # the explicit empty list is unambiguously exclusion-free.
+                if ignore and ignore[1] != "[]":
+                    ignored.add(current)
+                if re.match(r"    <<\s*:", line):
+                    # Inherited YAML fields may supply exclusions that this
+                    # small stdlib parser cannot establish are empty.
+                    ignored.add(current)
+    collections = {name: path.expanduser().resolve()
+                   for name, path in registered_collections(index).items()
+                   if patterns.get(name) == "**/*.md" and name not in ignored}
+    if _freshness_config(index)[1] != identity:
+        return {}, ""
+    return collections, identity
+
+
+def _freshness_capture(index: str) -> tuple[dict[Path, int], str]:
+    """Capture tracked generations only when QMD includes every dirty note.
+
+    QMD 2.8.3 excludes hidden paths and common generated directories even with
+    the full Markdown mask. A root containing an excluded tracked mutation
+    cannot be acknowledged as a whole.
+    """
+    collections, identity = _freshness_collections(index)
+    if not identity:
+        return {}, ""
     from . import freshness
     captured = {}
-    for collection, path in registered_collections(index).items():
-        if patterns.get(collection) != "**/*.md":
-            continue
-        root = path.expanduser().resolve()
+    excluded_dirs = {"node_modules", ".git", ".cache", "vendor", "dist", "build"}
+    for root in collections.values():
         if root in captured or not (root / ".claude-note/mutations/freshness/manifest.json").exists():
             continue
         try:
-            captured[root] = freshness.snapshot(root)["saved_generation"]
-        except (OSError, ValueError, KeyError) as exc:
+            value = freshness.snapshot(root)
+            generation = value["saved_generation"]
+            excluded = False
+            for relative, entry in value["dirty"].items():
+                path = Path(relative)
+                if entry["generation"] > generation or path.suffix.lower() != ".md":
+                    continue
+                if (path.is_absolute() or ".." in path.parts
+                        or any(part.startswith(".") for part in path.parts)
+                        or any(part in excluded_dirs for part in path.parts[:-1])):
+                    excluded = True
+                    break
+            if not excluded:
+                captured[root] = generation
+        except (OSError, ValueError, KeyError, TypeError) as exc:
             _log(f"WARN cannot capture tracked freshness for {root}: {type(exc).__name__}")
     # registered_collections reads the config separately. It must still match
     # the configuration whose masks were inspected before capturing journals.
@@ -292,18 +337,36 @@ def refresh(embed: bool = True, update_timeout: int = 900, embed_timeout: int = 
     try:
         LOCKDIR.mkdir()
     except FileExistsError:
-        if time.time() - LOCKDIR.stat().st_mtime < 90 * 60:
+        try:
+            stale = time.time() - LOCKDIR.stat().st_mtime >= 90 * 60
+        except OSError:
+            stale = False
+        if not stale:
             _log("SKIP another refresh is running")
             return 0
         _log("WARN clearing stale lock")
+        try:
+            LOCKDIR.rmdir()
+            LOCKDIR.mkdir()
+        except OSError:
+            _log("SKIP refresh lock changed during stale recovery")
+            return 0
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "CI": "1"}
     index = recall_mod.Settings.load().index
     base = [exe] + (["--index", index] if index else [])
     started = time.monotonic()
+    lease = None
+    update_ok, embed_ok = False, False
     try:
         # Capture before update: notes arriving during either stage may not be
         # present in its index, and must remain dirty for the following refresh.
-        captured, configuration = _freshness_capture(index)
+        from . import index_refresh
+        try:
+            lease = index_refresh.begin(index)
+            if lease.get("warning"):
+                _log("WARN " + lease["warning"])
+        except Exception as exc:  # metadata failure must not change indexing's exit status
+            _log(f"WARN freshness capture unavailable: {type(exc).__name__}")
         for stage, timeout in (("update", update_timeout), ("embed", embed_timeout)):
             if stage == "embed" and not embed:
                 continue
@@ -317,23 +380,28 @@ def refresh(embed: bool = True, update_timeout: int = 900, embed_timeout: int = 
                 _log(f"FAIL qmd {stage} rc={proc.returncode}"
                      + (" (text index is current, vectors are stale)" if stage == "embed" else ""))
                 return 1
-            if _freshness_config(index)[1] != configuration:
-                if captured:
-                    _log("WARN QMD collection configuration changed; tracked freshness not acknowledged")
-                captured = {}
-            from . import freshness
-            for root, generation in captured.items():
-                freshness.acknowledge(generation, capability="lexical" if stage == "update" else "vector",
-                                      vault_root=root)
+            if stage == "update":
+                update_ok = True
+            else:
+                embed_ok = True
         HEARTBEAT.write_text(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n")
         _log(f"OK {'update+embed' if embed else 'update'} in {time.monotonic() - started:.0f}s")
         _daily_eval()
         return 0
     finally:
         try:
-            LOCKDIR.rmdir()
-        except OSError:
-            pass
+            if lease is not None:
+                try:
+                    result = index_refresh.finish(lease["token"], lexical_ok=update_ok, vector_ok=embed_ok)
+                    if result.get("warning"):
+                        _log("WARN " + result["warning"])
+                except Exception as exc:  # metadata failure must not change indexing's exit status
+                    _log(f"WARN tracked freshness not acknowledged: {type(exc).__name__}")
+        finally:
+            try:
+                LOCKDIR.rmdir()
+            except OSError:
+                pass
 
 
 def _daily_eval() -> None:

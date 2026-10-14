@@ -4,6 +4,10 @@ Base: Claude Note 2.0.2, `5c1ec7e079eae7d6fe2f82b149a2f22b9bfc073a`.
 This implements the balanced design from the October 13 architecture study.
 A passing unit test establishes a contract, not an agent productivity gain.
 
+[Memory ownership and validity](MEMORY_OWNERSHIP.md) applies Rust's ownership,
+borrowing and lifetime discipline to evidence, controlled writes and index
+refresh leases. Historical retention remains separate from current applicability.
+
 | Workstream | Implementation and acceptance gate | State |
 |---|---|---|
 | Capture | Source/revision/line anchors, original message/time/parent IDs, explicit unknown outcomes, lossless local outputs; decisive correction/exit fixtures | Implemented; rollout checks below |

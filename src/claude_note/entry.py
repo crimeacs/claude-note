@@ -36,6 +36,8 @@ def _knowledge_parser(with_eval: bool = False) -> argparse.ArgumentParser:
 
     from .claims_cli import add_parser as add_claim_parser
     add_claim_parser(sub)
+    from .index_refresh import add_parser as add_index_refresh_parser
+    add_index_refresh_parser(sub)
 
     if with_eval:  # only for `eval`: the hooks run on every prompt and must not pay for it
         from .evals_cli import add_parser as add_eval_parser
@@ -43,7 +45,7 @@ def _knowledge_parser(with_eval: bool = False) -> argparse.ArgumentParser:
     return p
 
 
-KNOWLEDGE_COMMANDS = {"hook", "recall", "refresh", "doctor", "eval", "claim"}
+KNOWLEDGE_COMMANDS = {"hook", "recall", "refresh", "doctor", "eval", "claim", "index-refresh"}
 
 
 def _knowledge_main(argv: list) -> int:
@@ -84,6 +86,9 @@ def _knowledge_main(argv: list) -> int:
     if args.command == "claim":
         from .claims_cli import main as claim_main
         return claim_main(args)
+    if args.command == 'index-refresh':
+        from .index_refresh import main as index_refresh_main
+        return index_refresh_main(args)
     if args.command == "refresh":
         from .setup_recall import refresh
         return refresh(embed=not args.no_embed)

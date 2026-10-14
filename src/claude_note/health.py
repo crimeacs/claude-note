@@ -208,14 +208,37 @@ def freshness_summary(vault: Path) -> dict:
     try:
         value = snapshot(vault)
         present = (vault / ".claude-note/mutations/freshness/manifest.json").exists()
+        from .index_refresh import _scope, owner_identity, proof_identity
+        from .recall import Settings
+        selected_index = Settings.load().index
+        selected_owner = owner_identity(selected_index)
+        _, selection_warning = _scope(selected_index)
+        selected_proof_scope = proof_identity(selected_index) if not selection_warning else None
+        owner = value.get("index_owner")
+        binding = ("unavailable" if selection_warning else "bound" if owner == selected_owner else "mismatch" if owner is not None
+                   else "unowned" if value["saved_generation"] else "unowned_empty")
+        eligible = binding in ("bound", "unowned_empty")
+        baseline = value.get("index_baseline_generation", 0)
+        lexical_scope_ok = value.get("lexical_proof_scope") == selected_proof_scope if selected_proof_scope else False
+        vector_scope_ok = value.get("vector_proof_scope") == selected_proof_scope if selected_proof_scope else False
         return {k: value[k] for k in ("generation", "saved_generation", "lexical_generation", "vector_generation")} | {
             "journal_present": present, "dirty_count": len(value["dirty"]),
             "pending_count": sum(v.get("status") == "pending" for v in value["dirty"].values()),
-            "lexical_fresh": value["lexical_generation"] >= value["saved_generation"] if present else None,
-            "vector_fresh": value["vector_generation"] >= value["saved_generation"] if present else None,
-            "evidence": "tracked mutations only; generations do not prove preexisting corpus coverage"}
+            "index_owner": owner, "selected_index_owner": selected_owner, "index_binding_status": binding,
+            "index_binding_warning": selection_warning,
+            "index_baseline_generation": baseline,
+            "lexical_proof_scope": value.get("lexical_proof_scope"), "vector_proof_scope": value.get("vector_proof_scope"),
+            "selected_proof_scope": selected_proof_scope,
+            "lexical_scope_verified": lexical_scope_ok, "vector_scope_verified": vector_scope_ok,
+            "lexical_fresh": eligible and (lexical_scope_ok or binding == "unowned_empty")
+                             and value["lexical_generation"] >= value["saved_generation"] if present else None,
+            "vector_fresh": eligible and (vector_scope_ok or binding == "unowned_empty")
+                            and value["vector_generation"] >= value["saved_generation"] if present else None,
+            "evidence": f"retained tracked mutations after index binding baseline generation {baseline} only; "
+                        "generations do not prove earlier or preexisting corpus coverage"}
     except (OSError, ValueError) as exc:
-        return {"journal_present": False, "error": str(exc)[:200], "lexical_fresh": False, "vector_fresh": False}
+        return {"journal_present": False, "error": str(exc)[:200], "index_binding_status": "unavailable",
+                "lexical_fresh": False, "vector_fresh": False}
 
 
 def report() -> dict:

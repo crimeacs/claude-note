@@ -1,0 +1,106 @@
+# Ownership and validity of memory
+
+Rust's ownership, borrowing and lifetime rules provide a useful discipline for
+Claude Note's Python and Markdown boundaries. A memory consumer needs a valid
+reference to evidence; access to that reference must not manufacture authority
+or a second right to commit an operation.
+
+## Canonical owners and immutable readers
+
+Human-readable records and immutable evidence snapshots are canonical. Search
+indexes, summaries and prompt passages are derived views. Extraction, ranking
+and delivery must identify the same source revision and passage rather than
+independently copy text and lose its provenance. A captured snapshot can remain
+valid when the live transcript changes.
+
+Rust permits shared immutable references or an exclusive mutable reference.
+Claude Note applies that discipline through confined writes, canonical path
+identity, process-shared locks and revision checks. Human editors can bypass
+cooperative locks, so a writer must still detect changed content and stage a
+conflict. [Rust borrowing rules](https://doc.rust-lang.org/book/ch04-02-references-and-borrowing.html)
+
+## Validity belongs to the checked revision and context
+
+Claim authority binds an exact digest and unchanged supporting evidence.
+Applicability also depends on environment, repository, validity dates,
+dependencies and audience. A prior successful check cannot authorize a later
+operation after those inputs change. Delayed mutation and egress must validate
+their own current preconditions.
+
+A historical lesson remains available after it stops governing. Rust lifetime
+annotations describe validity relationships; they do not extend the underlying
+value's lifetime. Similarly, retaining a note does not extend the applicability
+of its advice. Context already delivered to a model cannot be recalled by this
+mechanism. [Rust lifetimes](https://doc.rust-lang.org/book/ch10-03-lifetime-syntax.html)
+
+## Index refreshes borrow a captured generation
+
+`IndexRefreshLease` is a frozen, validated metadata object for an existing index
+writer. Its `IndexedRevision` references capture the collection, relative path
+and exact saved revision, together with generations and index/configuration
+identity before indexing. Each tracked journal has one canonical index owner;
+another index cannot clear its freshness or automatically take ownership.
+The caller retains ownership of its commands, lock,
+checksum checks, timeouts and heartbeat.
+
+Each capability receipt also binds the configuration and model selection that
+was checked. Changing those inputs invalidates its current applicability even
+when saved generations are unchanged. Latest tracked revision metadata survives
+dirty-queue cleanup so the new scope can be checked again without a new write.
+
+On first binding, unscoped capability counters are reset and any earlier pruned
+generations become an explicit legacy baseline. Freshness describes retained
+tracked mutations after that baseline; it cannot reconstruct lost historical
+receipts or prove preexisting corpus coverage.
+
+The lease progresses through `open`, `finishing` and `complete`. Finish checks
+indexed revisions through a bounded read-only observer, then records the reported
+stages and verified results before acknowledging anything; replay can recover
+partial acknowledgement with the same flags and saved proof. QMD exiting zero
+alone is insufficient: skipped reads, skipped embedding and partial chunks must
+not manufacture freshness. A different completion, expired
+lease or changed scope cannot broaden the acknowledgement. Ambiguous project
+configuration and unsupported database overrides leave freshness unacknowledged.
+
+For example, a refresh captures generation 12, then a writer saves generation
+13. If text indexing succeeds and embedding fails, completion may acknowledge
+lexical generation 12 only. It cannot claim vector freshness or generation 13.
+A job that skips a contended lock never begins a lease. A crash leaves durable
+state for reconciliation rather than an invented success.
+
+These completion flags are reports from a cooperating local wrapper. The observer
+checks indexed hashes and vector chunks against the pinned writer's recorded
+expected totals for the selected model URI and pipeline fingerprint. That
+metadata does not attest the historical weight bytes
+used to produce a vector or establish semantic truth. Neither the reports nor
+the local database are a security boundary against a compromised host.
+Copying an evidence reference
+also does not copy a right to approve a claim or repeat an effect. Rust's
+`Clone` can share underlying state; reference copying and independent knowledge
+creation must remain distinct. [Rust Clone](https://doc.rust-lang.org/std/clone/trait.Clone.html)
+
+## Scoped cleanup and durable recovery
+
+Descriptors, locks, temporary files, timers and subprocesses have scoped owners.
+Context managers and `finally` release them on ordinary exits. Persistent
+intents and receipts handle abrupt termination, when cleanup may not run.
+Ending a query or dropping a reference never authorizes deletion of canonical
+notes, corrections or supporting evidence. Retention is a separate owner policy.
+[Rust Drop](https://doc.rust-lang.org/std/ops/trait.Drop.html),
+[destructor limits](https://doc.rust-lang.org/std/mem/fn.forget.html)
+
+## Acceptance contracts and next boundaries
+
+- Changed or deleted evidence invalidates authority without deleting history.
+- Concurrent writers serialize the complete read, check and commit operation.
+- New writes during indexing remain dirty; failed stages never acknowledge them.
+- A completion replay is idempotent; changed flags, expired leases and changed
+  index scope cannot reuse the earlier capability.
+- Cancellation releases ordinary resources; crash recovery preserves canonical
+  records and reconciles only known intents.
+
+Other cross-module boundaries should adopt the same small frozen evidence
+references and validated operation outcome variants. Frozen Python objects improve API
+discipline; runtime validation, detached attestations and filesystem boundaries
+remain necessary. Ownership here describes access and cleanup responsibility,
+not legal ownership, semantic truth or human approval.
