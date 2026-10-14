@@ -1,5 +1,43 @@
 # Developments
 
+## 2.1.6 — retain the installed Python on upgrades (14 October 2026)
+
+Both installers retain the existing tool's external Python by default. The
+checkout installer accepts `--python VERSION_OR_PATH`; either installer also
+honors `UV_PYTHON`. These explicit requests take precedence over reuse. Explicit
+`UV_MANAGED_PYTHON`, `UV_NO_MANAGED_PYTHON` or `UV_PYTHON_PREFERENCE` environment
+settings opt out of reuse and leave selection to uv with the default 3.11
+request. No new selector is combined with those settings. Fresh installs keep
+the normal 3.11 discovery and download behavior; offline, index and download
+settings stay with uv. The interactive installer no longer preemptively downloads
+Python before it knows whether it needs one.
+
+This is an upgrade continuity policy, analogous to `uv tool upgrade`: changing a
+persistent uv discovery preference does not silently migrate an existing tool's
+interpreter. Pass `--python 3.11` or set `UV_PYTHON=3.11` to reselect using current
+uv settings, or give an explicit executable. An exact executable request bypasses
+uv's managed/system discovery filters; reuse is not a proof that every current
+discovery preference permits that interpreter. Owner configuration is neither
+parsed nor rewritten by the installers.
+
+Selection reads uv's tool directory and resolves at most 40 symlinks from the
+installed `claude-note/bin/python`. The chosen executable must be outside the
+entire tool directory, because uv can remove an environment while reinstalling
+it. No Python code runs during this selection. uv remains responsible for
+validating the executable and the package's Python requirement. Broken, copied,
+cyclic, internal or newline-ambiguous runtimes fail before installation, with an
+explicit `--python`/`UV_PYTHON` recovery instruction; they do not trigger an ambiguous
+fallback. A missing tool uses fresh-install discovery. Receipt publication still
+requires the package and existing worker/recall upgrade steps to finish.
+Resolving the existing executable also retains its concrete patch version;
+explicit reselection is the path to a different Python release.
+
+The observed failure was an unrelated Conda 3.10 startup probe during a 3.11
+upgrade; the existing managed 3.11 interpreter was healthy. Reusing its exact
+external executable avoids that search. This change does not add process-tree
+supervision or claim that every Python startup and fresh-install discovery is
+bounded independently of the caller's installation deadline.
+
 ## 2.1.5 — revision-bound import publication and recovery (14 October 2026)
 
 Imports now own immutable captured revisions and publish a complete, stable
