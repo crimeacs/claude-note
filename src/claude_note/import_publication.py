@@ -84,7 +84,7 @@ def _record(path):
     raw = _read(path, MAX_BATCH)
     try:
         value = json.loads(raw, object_pairs_hook=_unique)
-    except (ValueError, UnicodeError) as exc:
+    except (ValueError, UnicodeError, RecursionError) as exc:
         raise PublicationError("Invalid publication receipt") from exc
     if not isinstance(value, dict):
         raise PublicationError("Invalid publication receipt")
@@ -159,7 +159,7 @@ def _validate(record, publication_id):
     if not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", session):
         session = ""
     expected = {"version", "publication_id", "source", "session_id", "logical_id", "logical_revision", "captured_revision", "normalized", "transcript_path", "snapshot_path", "stream", "ordinal", "events"}
-    if set(record) != expected or record.get("version") != 1:
+    if set(record) != expected or type(record.get("version")) is not int or record["version"] != 1:
         raise PublicationError("Unsupported publication receipt", session)
     try:
         if record["publication_id"] != publication_id or not isinstance(record["normalized"], bool):
@@ -227,17 +227,31 @@ def validate_event(event):
         raise PublicationError("Imported event could not be verified", event.session_id) from exc
 
 
-def validate_batch(path):
+def _validate_batch(path, *, verify_source):
     name = Path(path).name
     if not re.fullmatch(r"import-[0-9a-f]{64}\.jsonl", name):
         raise PublicationError("Invalid import batch name")
-    record = load(name[7:-6])
+    record = load(name[7:-6], verify_source=verify_source)
     try:
         if _read(path, MAX_BATCH) != _batch_bytes(record):
             raise ValueError()
     except (OSError, ValueError) as exc:
         raise PublicationError("Import batch differs from canonical publication", record["session_id"]) from exc
     return record
+
+
+def validate_batch(path):
+    """Verify canonical metadata, exact delivery bytes and current source digest."""
+    return _validate_batch(path, verify_source=True)
+
+
+def _validate_batch_metadata(path):
+    """Inspect delivery metadata only; this does not verify source evidence.
+
+    Queue scheduling may use this to decide which sessions need work. Delivery,
+    acknowledgement and source use still require their full verification gate.
+    """
+    return _validate_batch(path, verify_source=False)
 
 
 def batch_session_hints(path):
@@ -251,7 +265,7 @@ def batch_session_hints(path):
                 session = event.get("session_id") if isinstance(event, dict) else None
                 if isinstance(session, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,200}", session):
                     sessions.add(session)
-            except (ValueError, UnicodeError):
+            except (ValueError, UnicodeError, RecursionError):
                 continue
     except (OSError, ValueError):
         pass

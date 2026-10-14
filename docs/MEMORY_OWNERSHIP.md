@@ -55,6 +55,17 @@ this provides idempotent local capture, not exactly-once model execution or
 external effects. Hook/import ordering uses local event times; wall-clock
 rollback across hooks remains a limitation.
 
+Queue polling inspects canonical metadata globally, then verifies all visible
+import snapshots for a session before delivering its events or acknowledging
+an ordinary journal cursor. That check includes older, already captured
+revisions, so they cannot hide behind a newer binding. The verified session set
+is local to one reader invocation; capture and actual source use perform their
+own current checks. Idle captured batches need no repeated source read.
+Snapshot-only corruption in idle history can consequently be detected later,
+when that session needs work or the evidence is used. Metadata checks still
+scale with queue size, and all visible revisions of a selected session must be
+read. This is neither a stat-based digest cache nor a historical corpus audit.
+
 Authored private and claim audiences, including protected transitive lineage,
 are conservatively retained with the snapshot. Later source edits cannot loosen
 those restrictions. Configurable owner policy stays live and original supplied

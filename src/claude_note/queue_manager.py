@@ -75,27 +75,54 @@ def read_pending_events(limit: int = 10000) -> Iterator[models.QueuedEvent]:
     Delivery itself does not acknowledge a record. Prefix digests detect edits
     and truncation, with full replay on a mismatch. A partial final line waits
     for the append to complete. Session-state dedup remains the effect boundary.
-    Import batch preflight hashes retained snapshots before delivery; its local
-    IO cost scales with the visible backlog, rather than being constant-time.
+    Canonical import metadata is checked globally. Before delivery or a journal
+    acknowledgement, all visible import snapshots for that session are hashed.
+    Idle captured batches need no snapshot reads; metadata work still scales
+    with the visible backlog. Source use/capture has its own current checks.
     """
     from .session_tracker import load_session_state
     state_cache = {}
     delivered = 0
     from . import import_publication
     paths = list(read_queue_files())
-    batches, blocked_sessions = {}, set()
-    # Preflight ALL visible batches before yielding any session's evidence.
-    # A corrupt older revision cannot disappear behind a valid newer binding.
+    batches, session_batches, blocked_sessions = {}, {}, set()
+    # Check ALL visible canonical metadata, including already captured batches.
+    # This first pass does not attest any snapshot's current content digest.
     for path in paths:
         if import_publication.is_batch(path):
             try:
-                batches[path] = import_publication.validate_batch(path)
+                record = import_publication._validate_batch_metadata(path)
+                batches[path] = record
+                session_batches.setdefault(record["session_id"], []).append((path, record))
             except (OSError, ValueError) as exc:
                 session = getattr(exc, "session_id", "")
                 if session:
                     blocked_sessions.add(session)
                 blocked_sessions.update(import_publication.batch_session_hints(path))
                 logging.getLogger(__name__).warning("Import batch verification failed (%s); evidence retained", path.name[:80])
+
+    verified_sessions = set()
+
+    def verify_session(session_id):
+        if session_id in blocked_sessions:
+            return False
+        if session_id in verified_sessions:
+            return True
+        # Include captured historical revisions: a corrupt older visible source
+        # must still block newer events, ordinary hooks and journal cursor ACKs.
+        # Verification is scoped to this invocation, never cached by file stat.
+        for path, expected in session_batches.get(session_id, ()):
+            try:
+                current = import_publication.validate_batch(path)
+                if import_publication._json(current) != import_publication._json(expected):
+                    raise import_publication.PublicationError("Import metadata changed during preflight", session_id)
+            except (OSError, ValueError):
+                blocked_sessions.add(session_id)
+                logging.getLogger(__name__).warning("Import session verification failed (%s); evidence retained", path.name[:80])
+                return False
+        verified_sessions.add(session_id)
+        return True
+
     for path in paths:
         if import_publication.is_batch(path):
             record = batches.get(path)
@@ -108,6 +135,9 @@ def read_pending_events(limit: int = 10000) -> Iterator[models.QueuedEvent]:
                 logging.getLogger(__name__).warning("Incompatible import session state retained; skipping this session")
                 continue
             captured = set(state.processed_event_ids) if state else set()
+            if (any(payload["event_id"] not in captured for payload in record["events"])
+                    and not verify_session(record["session_id"])):
+                continue
             for payload in record["events"]:
                 event = models.QueuedEvent(**payload).validate()
                 if event.event_id not in captured:
@@ -166,7 +196,7 @@ def read_pending_events(limit: int = 10000) -> Iterator[models.QueuedEvent]:
                     if contiguous:
                         acknowledged, acknowledged_digest = handle.tell(), digest.hexdigest()
                     continue
-                if event.session_id in blocked_sessions:
+                if not verify_session(event.session_id):
                     contiguous = False
                     continue
                 # Imported references copied into an ordinary hook journal
@@ -243,13 +273,21 @@ def cleanup_old_queue_files(keep_days: int = 7) -> None:
         from . import import_publication
         if import_publication.is_batch(queue_file):
             try:
-                record = import_publication.validate_batch(queue_file)
+                record = import_publication._validate_batch_metadata(queue_file)
                 created = datetime.fromisoformat(record["events"][0]["ts"].rstrip("Z")).date()
                 if (cutoff - created).days <= keep_days:
                     continue
                 from .session_tracker import load_session_state
                 state = load_session_state(record["session_id"])
                 if state and all(event["event_id"] in state.processed_event_ids for event in record["events"]):
+                    # Age/state only select deletion candidates. Recheck exact
+                    # metadata and source bytes before retiring a delivery copy.
+                    current = import_publication.validate_batch(queue_file)
+                    if import_publication._json(current) != import_publication._json(record):
+                        continue
+                    state = load_session_state(record["session_id"])
+                    if not state or not all(event["event_id"] in state.processed_event_ids for event in record["events"]):
+                        continue
                     # Canonical publication receipt, protected lineage and source
                     # snapshots are retained. Replay sees captured IDs and does
                     # not resurrect a cleaned batch.
