@@ -17,6 +17,8 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const metadata = { corpus_digest: 'corpus', generation: 'generation', vector_rows: 1, vector_models: ['embed-id'] };
 const row = { filepath: 'qmd://public/a.md', title: 'A', body: 'The retry handler must preserve idempotency keys across failed payment attempts.', score: .5 };
 const lex = () => ({ request: async () => ({ rows: [row], metadata }), close() {} });
+const rerankModel = 'synthetic:public-reranker';
+const rerankManifest = { models: { rerank: { id: rerankModel } } };
 const deferred = () => {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -35,9 +37,9 @@ test('passage selection retains older matching evidence instead of an unrelated 
 test('scope is sent structurally to both lanes; rank sees and identifies exactly delivered passage', async () => {
   const seen = [];
   const service = createRecallService({ lexical: { request: async request => { seen.push(request); return { rows: [row], metadata }; } },
-    llm: { embedModel: {}, rerank: async (_, docs) => { seen.push(docs); return { results: docs.map(d => ({ file: d.file, score: .8 })) }; } },
+    llm: { embedModel: {}, rerank: async (_, docs) => { seen.push(docs); return { model: rerankModel, results: docs.map(d => ({ file: d.file, score: .8 })) }; } },
     store: { searchVector: async (_, options) => { seen.push(options); return [row, { ...row, filepath: 'qmd://private/secret.md' }]; } },
-    manifest: { index: { id: 'default' }, models: { embed: { id: 'embed-id' } } } });
+    manifest: { index: { id: 'default' }, models: { embed: { id: 'embed-id' }, rerank: { id: rerankModel } } } });
   const result = await service.request('/search', { rungs: ['retry'], question: 'retry idempotency', collections: ['public'] });
   assert.deepEqual(seen[0].collections, ['public']);
   assert.deepEqual(seen[1].collection, ['public']);
@@ -196,12 +198,182 @@ test('late start after queued expiry poisons runtime; acknowledged never-started
 });
 
 test('resolved reranker with no finite scores does not claim readiness', async () => {
-  const service = createRecallService({ store: {}, lexical: lex(), llm: { rerank: async () => ({ results: [] }) } });
+  const service = createRecallService({ store: {}, lexical: lex(), manifest: rerankManifest,
+    llm: { rerank: async () => ({ model: rerankModel, results: [] }) } });
   const result = await service.request('/rerank', { passages: [{ file: row.filepath, passage_id: 'p1', revision: 'r1', text: row.body }] });
   assert.equal(result.manifest.rerank_ready, false);
   assert.deepEqual(result.scored_passage_ids, []);
+  assert.equal(result.rerank_status, 'no_valid_scores');
+  assert.equal(result.coverage, 'no_valid_scores');
   assert.ok(result.manifest.degradation.includes('rerank_no_scores_observed'));
   service.close();
+});
+
+const rankedPassages = () => ['a', 'b'].map(id => ({ file: `qmd://public/${id}.md`, passage_id: `passage-${id}`,
+  revision: `synthetic-revision-${id}`, text: `Public ${id}: ${row.body}` }));
+const rankRequest = () => ({ question: 'retry idempotency', passages: rankedPassages() });
+const rankRows = docs => docs.map((doc, i) => ({ file: doc.file, score: i ? .9 : .5 }));
+
+test('explicit SDK fallback rejects finite constant scores and does not remain ready after prior success', async () => {
+  let mode = 'normal', calls = 0;
+  const service = createRecallService({ store: {}, lexical: lex(), manifest: rerankManifest,
+    llm: { rerank: async (_, docs) => {
+      calls++;
+      return mode === 'fallback'
+        ? { model: 'fallback', results: docs.map(doc => ({ ...doc, score: .5, index: 0 })) }
+        : { model: rerankModel, results: rankRows(docs) };
+    } } });
+  try {
+    const first = await service.request('/rerank', rankRequest());
+    assert.equal(first.rerank_status, 'scored');
+    assert.equal(first.model, rerankModel);
+    assert.equal(first.coverage, 'exact_passage');
+    assert.equal(first.passage_scores['passage-a'], .5); // A legitimate .5 is accepted.
+    assert.equal(first.manifest.rerank_ready, true);
+    mode = 'fallback';
+    const fallback = await service.request('/rerank', rankRequest());
+    assert.equal(fallback.rerank_status, 'sdk_fallback');
+    assert.equal(fallback.model, 'fallback');
+    assert.equal(fallback.coverage, 'sdk_fallback_no_rerank');
+    assert.deepEqual(fallback.scores, {});
+    assert.deepEqual(fallback.passage_scores, {});
+    assert.deepEqual(fallback.scored_passage_ids, []);
+    assert.equal(fallback.manifest.rerank_ready, false);
+    assert.equal(fallback.manifest.models.rerank.ready, false);
+    assert.equal(service.capabilities().rerank_status, 'sdk_fallback');
+    assert.ok(fallback.manifest.degradation.includes('rerank_sdk_fallback'));
+    mode = 'normal';
+    const recovered = await service.request('/rerank', rankRequest());
+    assert.equal(recovered.rerank_status, 'scored');
+    assert.equal(recovered.manifest.rerank_ready, true);
+    assert.equal(recovered.manifest.models.rerank.ready, true);
+    assert.ok(recovered.manifest.degradation.includes('rerank_sdk_fallback'));
+    assert.equal(calls, 3);
+  } finally { service.close(); }
+});
+
+test('missing, malformed and wrong returned model IDs cannot confirm passage scoring', async () => {
+  for (const model of [undefined, null, false, [], {}, 'another-model', 'unknown', 'x'.repeat(2048)]) {
+    const service = createRecallService({ store: {}, lexical: lex(), manifest: rerankManifest,
+      llm: { rerank: async (_, docs) => ({ model, results: rankRows(docs) }) } });
+    try {
+      const result = await service.request('/rerank', rankRequest());
+      assert.equal(result.rerank_status, 'unverified_model');
+      assert.equal(result.coverage, 'unverified_model');
+      assert.equal(result.model, 'unknown'); // Never echo an arbitrary adapter model string.
+      assert.deepEqual(result.passage_scores, {});
+      assert.deepEqual(result.scores, {});
+      assert.deepEqual(result.scored_passage_ids, []);
+      assert.equal(result.manifest.rerank_ready, false);
+      assert.equal(result.manifest.models.rerank.ready, false);
+    } finally { service.close(); }
+  }
+});
+
+test('unbounded or unverified configured model identity prevents the SDK call', async () => {
+  for (const id of [undefined, '', false, {}, 'fallback', 'unknown', ' trailing ', 'bad\nmodel',
+    '\uD800', '\uDC00', 'é'.repeat(513)]) {
+    let calls = 0;
+    const service = createRecallService({ store: {}, lexical: lex(), manifest: { models: { rerank: { id } } },
+      llm: { rerank: async (_, docs) => { calls++; return { model: id, results: rankRows(docs) }; } } });
+    try {
+      const result = await service.request('/rerank', rankRequest());
+      assert.equal(result.rerank_status, 'unverified_model');
+      assert.equal(result.model, 'unknown');
+      assert.equal(result.manifest.rerank_ready, false);
+      assert.deepEqual(result.scored_passage_ids, []);
+      assert.equal(calls, 0);
+    } finally { service.close(); }
+  }
+});
+
+test('invalid score records reject the whole score result instead of accepting a convincing subset', async () => {
+  const invalidResults = [undefined, null, {}, [null], [{ file: 'unknown-passage', score: .8 }],
+    [{ file: 'passage-a', score: '0.8' }], [{ file: 'passage-a', score: true }],
+    [{ file: 'passage-a', score: NaN }], [{ file: 'passage-a', score: Infinity }],
+    [{ file: 'passage-a', score: .8 }, { file: 'passage-a', score: .8 }],
+    [{ file: 'passage-a', score: .8 }, { file: 'passage-a', score: .1 }],
+    [{ file: 'passage-a', score: .8 }, { file: 'passage-b', score: NaN }]];
+  for (const results of invalidResults) {
+    const service = createRecallService({ store: {}, lexical: lex(), manifest: rerankManifest,
+      llm: { rerank: async () => ({ model: rerankModel, results }) } });
+    try {
+      const result = await service.request('/rerank', rankRequest());
+      assert.equal(result.rerank_status, 'invalid_scores');
+      assert.equal(result.coverage, 'invalid_scores');
+      assert.equal(result.model, rerankModel);
+      assert.deepEqual(result.passage_scores, {});
+      assert.deepEqual(result.scores, {});
+      assert.deepEqual(result.scored_passage_ids, []);
+      assert.equal(result.manifest.rerank_ready, false);
+      assert.equal(result.manifest.models.rerank.ready, false);
+    } finally { service.close(); }
+  }
+});
+
+test('partial matching-model scores remain partial and clear current readiness', async () => {
+  let partial = false;
+  const service = createRecallService({ store: {}, lexical: lex(), manifest: rerankManifest,
+    llm: { rerank: async (_, docs) => ({ model: rerankModel, results: rankRows(partial ? docs.slice(0, 1) : docs) }) } });
+  try {
+    assert.equal((await service.request('/rerank', rankRequest())).manifest.rerank_ready, true);
+    partial = true;
+    const result = await service.request('/rerank', rankRequest());
+    assert.equal(result.rerank_status, 'partial_scores');
+    assert.equal(result.coverage, 'partial_passage_scores');
+    assert.deepEqual(result.passage_scores, { 'passage-a': .5 });
+    assert.deepEqual(result.scored_passage_ids, ['passage-a']);
+    assert.equal(result.manifest.rerank_ready, false);
+    assert.equal(result.manifest.models.rerank.ready, false);
+  } finally { service.close(); }
+});
+
+test('cache absence, empty requests and failed model operations do not inherit earlier readiness', async () => {
+  let available = true, fail = false, calls = 0;
+  const service = createRecallService({ store: {}, lexical: lex(), manifest: rerankManifest,
+    modelAvailable: () => available, llm: { rerank: async (_, docs) => {
+      calls++; if (fail) throw new Error('Synthetic adapter failure');
+      return { model: rerankModel, results: rankRows(docs) };
+    } } });
+  try {
+    assert.equal((await service.request('/rerank', rankRequest())).manifest.rerank_ready, true);
+    available = false;
+    const missing = await service.request('/rerank', rankRequest());
+    assert.equal(missing.rerank_status, 'model_cache_unavailable');
+    assert.equal(missing.coverage, 'model_cache_unavailable');
+    assert.equal(missing.model, 'unknown');
+    assert.equal(missing.manifest.rerank_ready, false);
+    assert.deepEqual(missing.passage_scores, {});
+    available = true;
+    assert.equal((await service.request('/rerank', rankRequest())).manifest.rerank_ready, true);
+    const empty = await service.request('/rerank', { passages: [] });
+    assert.equal(empty.rerank_status, 'not_requested');
+    assert.equal(empty.coverage, 'no_passages');
+    assert.equal(empty.manifest.rerank_ready, false);
+    assert.deepEqual(empty.passage_scores, {});
+    fail = true;
+    await assert.rejects(service.request('/rerank', rankRequest()), /Synthetic adapter failure/);
+    assert.equal(service.capabilities().rerank_status, 'failed');
+    assert.equal(service.capabilities().rerank_ready, false);
+    assert.equal(calls, 3);
+  } finally { service.close(); }
+});
+
+test('duplicate or unversioned requested passages fail before scoring and clear readiness', async () => {
+  let calls = 0;
+  const service = createRecallService({ store: {}, lexical: lex(), manifest: rerankManifest,
+    llm: { rerank: async (_, docs) => { calls++; return { model: rerankModel, results: rankRows(docs) }; } } });
+  try {
+    assert.equal((await service.request('/rerank', rankRequest())).manifest.rerank_ready, true);
+    const first = rankedPassages()[0];
+    for (const passages of [[first, first], [{ ...first, revision: undefined }],
+      [{ ...first, revision: {} }], [{ ...first, passage_id: 1 }], [null]]) {
+      await assert.rejects(service.request('/rerank', { passages }), e => e.code === 'invalid_passage');
+      assert.equal(service.capabilities().rerank_ready, false);
+      assert.equal(service.capabilities().rerank_status, 'invalid_passage');
+    }
+    assert.equal(calls, 1);
+  } finally { service.close(); }
 });
 
 test('real pinned SDK and production HTTP worker serve a wholly isolated public lexical fixture',

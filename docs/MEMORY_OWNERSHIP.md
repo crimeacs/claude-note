@@ -94,6 +94,14 @@ another model operation beside it. Search and reranking are separate queue jobs,
 so another search can consume the remaining rerank budget. These boundaries do
 not establish cold-process or concurrent-request latency.
 
+The rerank operation also owns its observation: only a complete, finite scoring
+response naming the configured model may establish current readiness. SDK
+fallback, unknown model, partial scores and malformed results cannot borrow a
+previous operation's successful state. They preserve retrieval order and clear
+current readiness; a later valid result may restore it without erasing failure
+history. This is a runtime response contract, not a trace of native inference or
+SDK-internal text truncation.
+
 ## Index refreshes borrow a captured generation
 
 `IndexRefreshLease` is a frozen, validated metadata object for an existing index

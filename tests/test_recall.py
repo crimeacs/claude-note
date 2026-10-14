@@ -338,7 +338,9 @@ class ServerEngineTests(unittest.TestCase):
                 return {"lex": lex, "vec": vec}
             scores = {"qmd://notes/a.md": 0.9, "qmd://notes/b.md": 0.1, "qmd://notes/c.md": 0.5}
             return {"passage_scores": {p["passage_id"]: scores[p["file"]] for p in body["passages"]},
-                    "scored_passage_ids": [p["passage_id"] for p in body["passages"]]}
+                    "scored_passage_ids": [p["passage_id"] for p in body["passages"]],
+                    "rerank_status": "scored", "coverage": "exact_passage", "model": "synthetic:ranker-v1",
+                    "manifest": {"rerank_ready": True, "models": {"rerank": {"id": "synthetic:ranker-v1", "ready": True}}}}
         with mock.patch.object(recall, "server_post", side_effect=post), \
                 mock.patch.object(recall, "local_path", return_value=None):
             res = recall.recall("Can I just run npm run build on the 4 GB box?", settings(engine="server"))

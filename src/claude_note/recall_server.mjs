@@ -206,12 +206,14 @@ export function createRecallService({ store, llm, lexical, manifest = {}, queueL
   let active = false, poisoned = false, closed = false, expired = 0, rejected = 0;
   let metadataRefresh = null, activeJob = null;
   let metadata = {}, lexicalReady = false, vectorObserved = false, rerankObserved = false;
+  let rerankStatus = 'not_observed';
   const degradation = new Set();
   const capabilities = () => ({ ...manifest, protocol_version: 2, engine: 'qmd-sdk', ok: !poisoned && !closed,
     index: { ...manifest.index, ...metadata,
       generation: metadata.generation ? digest(JSON.stringify([metadata.generation, manifest.index?.config_revision,
         manifest.models?.embed?.id, manifest.models?.embed?.revision, manifest.models?.rerank?.id, manifest.models?.rerank?.revision])) : undefined }, lexical_ready: lexicalReady && !poisoned && !closed,
     vector_ready: vectorObserved && !poisoned && !closed, rerank_ready: rerankObserved && !poisoned && !closed,
+    rerank_status: rerankStatus,
     models: { ...manifest.models, embed: { ...manifest.models?.embed, ready: vectorObserved && !poisoned && !closed },
       rerank: { ...manifest.models?.rerank, ready: rerankObserved && !poisoned && !closed } },
     degradation: [...degradation], queue: { active, pending: waiting.length, limit: queueLimit, expired, rejected },
@@ -340,12 +342,31 @@ export function createRecallService({ store, llm, lexical, manifest = {}, queueL
       manifest: capabilities(), ms: { lex: Math.round(tl - t), vec: Math.round(performance.now() - tl) } };
   }
   async function rerank(body, deadline) {
-    if (!modelAvailable('rerank')) return { passage_scores: {}, scored_passage_ids: [], scores: {}, coverage: 'model_cache_unavailable', manifest: capabilities() };
+    // This is an observed SDK scoring contract, not evidence of native/GPU
+    // execution. A previous success cannot make a later fallback look ready.
+    rerankObserved = false; rerankStatus = 'pending';
+    let t = performance.now();
+    const finish = (status, coverage, model = 'unknown', scores = {}, passage_scores = {}) => {
+      rerankStatus = status;
+      rerankObserved = status === 'scored';
+      return { scores, passage_scores, scored_passage_ids: Object.keys(passage_scores), coverage,
+        rerank_status: status, model, manifest: capabilities(), ms: Math.round(performance.now() - t) };
+    };
+    if (!modelAvailable('rerank')) {
+      degradation.add('rerank_model_cache_unavailable');
+      return finish('model_cache_unavailable', 'model_cache_unavailable');
+    }
     const docs = [];
     if (Array.isArray(body.passages)) {
       for (const p of body.passages.slice(0, 20)) {
-        if (typeof p.text !== 'string' || Buffer.byteLength(p.text) > 16000 || !p.passage_id || !p.revision) throw err('invalid_passage', 'Bounded versioned passage required');
-        docs.push({ file: String(p.passage_id), title: String(p.title || '').slice(0, 160), text: p.text, original_file: String(p.file || '') });
+        if (!p || typeof p.text !== 'string' || Buffer.byteLength(p.text) > 16000
+            || typeof p.passage_id !== 'string' || !p.passage_id || Buffer.byteLength(p.passage_id) > 256
+            || typeof p.revision !== 'string' || !p.revision || Buffer.byteLength(p.revision) > 128
+            || docs.some(d => d.file === p.passage_id)) {
+          rerankStatus = 'invalid_passage';
+          throw err('invalid_passage', 'Unique bounded versioned passage required');
+        }
+        docs.push({ file: p.passage_id, title: String(p.title || '').slice(0, 160), text: p.text, original_file: String(p.file || '') });
       }
     } else {
       // Legacy clients get a selected passage, never an unrelated fixed prefix.
@@ -356,17 +377,52 @@ export function createRecallService({ store, llm, lexical, manifest = {}, queueL
         if (p.scored_text) docs.push({ file: p.passage_id, title: p.title, text: p.scored_text, original_file: String(file) });
       }
     }
-    const t = performance.now();
-    const ranked = docs.length ? await modelCall(() => llm.rerank(String(body.question || '').slice(0, 2400), docs), deadline) : { results: [] };
-    const scores = {}, passage_scores = {};
-    for (const row of ranked.results || []) {
-      const doc = docs.find(d => d.file === row.file);
-      if (doc && Number.isFinite(row.score)) { passage_scores[doc.file] = row.score; scores[doc.original_file] = row.score; }
+    if (!docs.length) return finish('not_requested', 'no_passages');
+    const expectedModel = manifest.models?.rerank?.id;
+    if (typeof expectedModel !== 'string' || !expectedModel || expectedModel.trim() !== expectedModel
+        || Buffer.byteLength(expectedModel) > 1024 || /[\x00-\x1f\x7f]/.test(expectedModel)
+        || /[\uD800-\uDFFF]/u.test(expectedModel)
+        || ['fallback', 'unknown'].includes(expectedModel)) {
+      degradation.add('rerank_unverified_model');
+      return finish('unverified_model', 'unverified_model');
     }
-    rerankObserved = Object.keys(passage_scores).length > 0;
-    if (docs.length && !rerankObserved) degradation.add('rerank_no_scores_observed');
-    return { scores, passage_scores, scored_passage_ids: Object.keys(passage_scores), coverage: 'exact_passage',
-      manifest: capabilities(), ms: Math.round(performance.now() - t) };
+    t = performance.now();
+    let ranked;
+    try { ranked = await modelCall(() => llm.rerank(String(body.question || '').slice(0, 2400), docs), deadline); }
+    catch (error) { rerankStatus = error.code === 'deadline' ? 'deadline' : 'failed'; throw error; }
+    // QMD 2.8.3 returns finite constant scores with model="fallback" when it
+    // cannot create a ranking context. Reject the discriminator, not score .5.
+    if (ranked?.model === 'fallback') {
+      degradation.add('rerank_sdk_fallback');
+      return finish('sdk_fallback', 'sdk_fallback_no_rerank', 'fallback');
+    }
+    if (ranked?.model !== expectedModel) {
+      degradation.add('rerank_unverified_model');
+      return finish('unverified_model', 'unverified_model');
+    }
+    const byId = new Map(docs.map(doc => [doc.file, doc])), accepted = new Map();
+    let invalid = !Array.isArray(ranked.results) || ranked.results.length > docs.length;
+    for (const row of invalid ? [] : ranked.results) {
+      if (!row || !byId.has(row.file) || !Number.isFinite(row.score) || accepted.has(row.file)) {
+        invalid = true; break;
+      }
+      accepted.set(row.file, row.score);
+    }
+    if (invalid) {
+      degradation.add('rerank_invalid_scores');
+      return finish('invalid_scores', 'invalid_scores', expectedModel);
+    }
+    if (!accepted.size) {
+      degradation.add('rerank_no_scores_observed');
+      return finish('no_valid_scores', 'no_valid_scores', expectedModel);
+    }
+    const scores = Object.fromEntries([...accepted].map(([id, score]) => [byId.get(id).original_file, score]));
+    const passage_scores = Object.fromEntries(accepted);
+    if (accepted.size !== docs.length) {
+      degradation.add('rerank_partial_scores');
+      return finish('partial_scores', 'partial_passage_scores', expectedModel, scores, passage_scores);
+    }
+    return finish('scored', 'exact_passage', expectedModel, scores, passage_scores);
   }
   async function drain() {
     if (active || closed) return;

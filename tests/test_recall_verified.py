@@ -162,7 +162,9 @@ print(json.dumps({'status':r.status,'kinds':[h.revision_kind for h in r.hits],
                 return {"lex": [[self.row("a.md", lexical_evidence=True), self.row("b.md", lexical_evidence=True)]], "vec": []}
             seen.extend(body["passages"])
             return {"passage_scores": {p["passage_id"]: i for i, p in enumerate(body["passages"])},
-                    "scored_passage_ids": [p["passage_id"] for p in body["passages"]]}
+                    "scored_passage_ids": [p["passage_id"] for p in body["passages"]],
+                    "rerank_status": "scored", "coverage": "exact_passage", "model": "synthetic:ranker-v1",
+                    "manifest": {"rerank_ready": True, "models": {"rerank": {"id": "synthetic:ranker-v1", "ready": True}}}}
         with mock.patch.object(recall, "server_post", side_effect=post):
             result = recall.recall("OAuth stale token correction", self.settings(engine="server"))
         self.assertTrue(result.reranked)

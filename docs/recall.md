@@ -107,6 +107,34 @@ close the worker while that later search is using it. This preserves deadlines
 and may consume part of a queued search's budget. It is separate from the index
 writer's update/embedding refresh.
 
+## Reranking requires a configured-model observation
+
+The server accepts scores only when the SDK reports the configured rerank model
+and returns unique finite scores for the requested passage identities. The
+client additionally requires `rerank_status=scored`, `coverage=exact_passage`,
+both current readiness flags and complete, exact score/identity coverage. If the
+model differs from the search manifest, it preserves the original fusion order.
+
+QMD can return `model=fallback` and constant finite scores without invoking its
+ranker. Those results have empty accepted score maps, `sdk_fallback` status and
+`sdk_fallback_no_rerank` coverage. Missing or conflicting model identities,
+invalid scores and partial results also keep fusion order and `reranked=false`.
+Older servers lacking this positive execution contract still deliver retrieval
+results; their reranking is labelled `unverified_rerank_execution`. A legitimate
+configured-model score of `0.5` is accepted; score values do not identify fallback.
+
+Each unsuccessful SDK scoring result clears current rerank readiness. A later
+complete, validated result can restore readiness, while historical fallback
+degradation remains visible. Readiness means a model-bound SDK scoring response
+was observed. It does not independently prove native hardware execution,
+calibrated relevance, or task benefit. Passage identity binds the text sent over
+the wire; SDK-internal token truncation is not traced by this contract.
+
+The result's `manifest` remains the search-stage snapshot. Its `reranked` and
+`coverage.rerank` fields describe this query's later scoring result. The doctor
+checks that scoring result separately from a fresh global capability read;
+another request's readiness cannot make this query's fallback pass.
+
 ## The sentinel
 
 The sentinel reads the **output** of a failed command, never the command text. An earlier version

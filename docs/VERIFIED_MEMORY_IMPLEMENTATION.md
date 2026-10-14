@@ -73,6 +73,14 @@ the earlier observed six- and eight-second failures or establish deployed cold
 and concurrent latency. Isolated model experiments must retain setup and query
 failures separately from successful calls.
 
+The 2.1.9 rerank contract rejects the pinned SDK's explicit fallback model and
+missing or conflicting configured-model identities. Only a complete positive
+scoring observation may reorder the exact requested passage set and establish
+current rerank readiness. Synthetic fallback, malformed score/ID, partial result
+and readiness-transition regressions verify that degraded paths retain fusion
+order and visible history. These contracts do not independently trace native
+inference, SDK-internal token truncation or measured task benefit.
+
 The original 15-workstream research and A–F deliverables remain broader than
 these implementation contracts. Full task outcomes, each baseline's own learned
 memory across phases, dense-only comparison, evidence × extraction and
