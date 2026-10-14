@@ -46,6 +46,44 @@ SWEEP_INTERVAL = 1800           # seconds between sweeps inside the worker
 FIRST_RUN_LOOKBACK_DAYS = 7     # first sweep does not backfill all history
 CODEX_IDLE_SECONDS = 600        # a rollout untouched this long is finished
 CLAUDE_CODE_MAX_PER_SWEEP = 10  # each queued session costs one synthesis call; the rest waits a sweep
+MAX_IMPORT_PROBLEM_CHARS = 768
+
+
+class SourceImportError(RuntimeError):
+    """Direct callers without a problem sink still receive visible failure."""
+    def __init__(self, source, queued, problems):
+        self.queued = queued
+        self.problems = tuple(problems)
+        super().__init__(f'{source}: {len(problems)} failed file(s); {queued} queued; {problems[0]}'[:1024])
+
+
+def _source_problem(source, path, error):
+    from .transcript_reader import TRANSCRIPT_LIMIT_ERROR, METADATA_LIMIT_ERROR
+    safe_messages = {TRANSCRIPT_LIMIT_ERROR, METADATA_LIMIT_ERROR,
+        'Transcript source must be a regular file', 'Codex session metadata is missing or malformed',
+        'Claude Code session metadata is malformed',
+        'Transcript contains malformed or incomplete JSONL records'}
+    message = error.args[0] if len(error.args) == 1 and isinstance(error.args[0], str) else ''
+    detail = ': ' + message if message in safe_messages else ''
+    # Exception messages can contain source text. Report type and an escaped,
+    # bounded path, plus only fixed explanations authored in this package.
+    label = json.dumps(str(path), ensure_ascii=True)
+    if len(label) > 500:
+        label = label[:450] + '...#' + hashlib.sha256(str(path).encode('utf-8', 'surrogatepass')).hexdigest()[:16]
+    return f'{source}: {label}: {type(error).__name__}{detail}'[:MAX_IMPORT_PROBLEM_CHARS]
+
+
+def _finish_source(source, queued, errors, problems):
+    if problems is not None:
+        problems.extend(errors)
+    elif errors:
+        raise SourceImportError(source, queued, errors)
+    return queued
+
+
+def _validate_native_content(content):
+    if content.coverage.get('malformed_records') or content.coverage.get('incomplete_trailing_bytes'):
+        raise ValueError('Transcript contains malformed or incomplete JSONL records')
 
 
 # --------------------------------------------------------------------------
@@ -342,61 +380,68 @@ def sweep_cursor(seen: dict, since_ts: float, db_path: Path = None) -> int:
 # Codex rollouts not delivered by the hook
 # --------------------------------------------------------------------------
 
-def sweep_codex(seen: dict, since_ts: float, sessions_dir: Path = None) -> int:
-    from .transcript_reader import codex_session_meta, read_transcript
+def sweep_codex(seen: dict, since_ts: float, sessions_dir: Path = None, *, problems=None) -> int:
+    from .transcript_reader import check_transcript_size, codex_session_meta, read_transcript
     from . import session_tracker
 
     sessions_dir = sessions_dir or CODEX_SESSIONS
-    queued = 0
+    queued, errors = 0, []
     now = time.time()
     for path in sessions_dir.glob("*/*/*/rollout-*.jsonl"):
         try:
             mtime = path.stat().st_mtime
-        except OSError:
-            continue  # a session may move or disappear during the scan
+        except OSError as error:
+            errors.append(_source_problem('codex', path, error))
+            continue
         if mtime < since_ts or now - mtime < CODEX_IDLE_SECONDS:
             continue
         key = f"codex:{path.name}"
         if seen.get(key) == mtime:
             continue
-        meta = codex_session_meta(path)
-        session_id = meta.get("id")
-        if not session_id or meta.get("background"):
+        try:
+            check_transcript_size(path)
+            meta = codex_session_meta(path, strict=True)
+            session_id = meta.get("id")
+            if meta.get("background"):
+                seen[key] = mtime
+                continue
+            if key not in seen and session_tracker.get_state_file(session_id).exists():
+                seen[key] = mtime  # the hook already delivered this session
+                continue
+            content = read_transcript(path)
+            _validate_native_content(content)
+            if content.user_prompts and content.assistant_texts:
+                _enqueue(session_id, path, meta.get("cwd", ""), content.user_prompts[0], "codex")
+                queued += 1
             seen[key] = mtime
-            continue
-        if key not in seen and session_tracker.get_state_file(session_id).exists():
-            seen[key] = mtime  # the hook already delivered this session
-            continue
-        content = read_transcript(path)
-        if content.user_prompts and content.assistant_texts:
-            _enqueue(session_id, path, meta.get("cwd", ""), content.user_prompts[0], "codex")
-            queued += 1
-        seen[key] = mtime
-    return queued
+        except Exception as error:
+            errors.append(_source_problem('codex', path, error))
+    return _finish_source('codex', queued, errors, problems)
 
 
 def _claude_code_meta(path: Path) -> dict:
     """sessionId, cwd and entrypoint from the first lines of a Claude Code transcript."""
     meta = {}
-    try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for n, line in enumerate(f):
-                if n > 50 or len(meta) == 3:
-                    break
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                for src, dst in (("sessionId", "id"), ("cwd", "cwd"), ("entrypoint", "entrypoint")):
-                    if row.get(src) and dst not in meta:
-                        meta[dst] = row[src]
-    except OSError:
-        pass
+    from .transcript_reader import metadata_lines
+    for line in metadata_lines(path, max_lines=51):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        for src, dst in (("sessionId", "id"), ("cwd", "cwd"), ("entrypoint", "entrypoint")):
+            if row.get(src) and dst not in meta:
+                if not isinstance(row[src], str):
+                    raise ValueError('Claude Code session metadata is malformed')
+                meta[dst] = row[src]
+        if len(meta) == 3:
+            break
     return meta
 
 
 def sweep_claude_code(seen: dict, since_ts: float, projects_dir: Path = None,
-                      limit: int = CLAUDE_CODE_MAX_PER_SWEEP) -> int:
+                      limit: int = CLAUDE_CODE_MAX_PER_SWEEP, *, problems=None) -> int:
     """Queue interactive Claude Code sessions the hook did not deliver.
 
     Scripted runs (`claude -p`, the SDK: entrypoint `sdk-*`) are skipped: they
@@ -405,16 +450,17 @@ def sweep_claude_code(seen: dict, since_ts: float, projects_dir: Path = None,
     transcripts live one level deeper and are not globbed. Newest first, at most
     `limit` per sweep; the rest stay unseen for the next sweep.
     """
-    from .transcript_reader import read_transcript
+    from .transcript_reader import check_transcript_size, read_transcript
     from . import session_tracker
 
     projects_dir = projects_dir or CLAUDE_PROJECTS
     now = time.time()
-    candidates = []
+    candidates, errors = [], []
     for path in projects_dir.glob("*/*.jsonl"):
         try:
             mtime = path.stat().st_mtime
-        except OSError:
+        except OSError as error:
+            errors.append(_source_problem('claude-code', path, error))
             continue
         if mtime < since_ts or now - mtime < CODEX_IDLE_SECONDS:
             continue
@@ -426,20 +472,25 @@ def sweep_claude_code(seen: dict, since_ts: float, projects_dir: Path = None,
         if queued >= limit:
             break
         key = f"claude-code:{path.stem}"
-        meta = _claude_code_meta(path)
-        session_id = meta.get("id") or path.stem
-        if str(meta.get("entrypoint", "")).startswith("sdk"):
+        try:
+            check_transcript_size(path)
+            meta = _claude_code_meta(path)
+            session_id = meta.get("id") or path.stem
+            if str(meta.get("entrypoint", "")).startswith("sdk"):
+                seen[key] = mtime
+                continue
+            if key not in seen and session_tracker.get_state_file(session_id).exists():
+                seen[key] = mtime  # the hook already delivered this session
+                continue
+            content = read_transcript(path)
+            _validate_native_content(content)
+            if content.user_prompts and content.assistant_texts:
+                _enqueue(session_id, path, meta.get("cwd", ""), content.user_prompts[0], "claude-code")
+                queued += 1
             seen[key] = mtime
-            continue
-        if key not in seen and session_tracker.get_state_file(session_id).exists():
-            seen[key] = mtime  # the hook already delivered this session
-            continue
-        content = read_transcript(path)
-        if content.user_prompts and content.assistant_texts:
-            _enqueue(session_id, path, meta.get("cwd", ""), content.user_prompts[0], "claude-code")
-            queued += 1
-        seen[key] = mtime
-    return queued
+        except Exception as error:
+            errors.append(_source_problem('claude-code', path, error))
+    return _finish_source('claude-code', queued, errors, problems)
 
 
 # --------------------------------------------------------------------------
@@ -464,8 +515,8 @@ def _sweep(since: Optional[datetime] = None, zips: Iterable[Path] = ()) -> dict:
     counts, problems = {}, []
     for name, fn in (("zips", lambda: sweep_zips(seen, problems)),
                      ("cursor", lambda: sweep_cursor(seen, since_ts)),
-                     ("codex", lambda: sweep_codex(seen, since_ts)),
-                     ("claude-code", lambda: sweep_claude_code(seen, since_ts))):
+                     ("codex", lambda: sweep_codex(seen, since_ts, problems=problems)),
+                     ("claude-code", lambda: sweep_claude_code(seen, since_ts, problems=problems))):
         try:
             counts[name] = fn()
         except Exception as e:  # one broken source must not stop the others
@@ -480,6 +531,7 @@ def _sweep(since: Optional[datetime] = None, zips: Iterable[Path] = ()) -> dict:
         _save_seen(seen)
     if problems:
         counts["problems"] = problems
+        counts["failed"] = len(problems)
     HEARTBEAT.parent.mkdir(parents=True, exist_ok=True)
     # Keep the latest attempt separate from the last successful sweep. Health
     # checks can show a source error immediately without calling it a success.

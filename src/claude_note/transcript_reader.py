@@ -8,9 +8,38 @@ import json
 import hashlib
 import io
 import re
+import stat
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional, Union
+
+MAX_TRANSCRIPT_BYTES = 256 * 1024 * 1024
+MAX_METADATA_BYTES = 1024 * 1024
+TRANSCRIPT_LIMIT_ERROR = "Transcript exceeds 256 MB; preserve the original for explicit lossless recovery"
+METADATA_LIMIT_ERROR = "Transcript metadata exceeds 1 MB"
+
+
+def check_transcript_size(path):
+    """Reject known oversized/nonregular sources before reading metadata."""
+    info = Path(path).stat()
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("Transcript source must be a regular file")
+    if info.st_size > MAX_TRANSCRIPT_BYTES:
+        raise ValueError(TRANSCRIPT_LIMIT_ERROR)
+
+
+def metadata_lines(path, *, max_lines=1, raw=None):
+    """Bound both individual JSONL records and the whole metadata prefix."""
+    with (Path(path).open('rb') if raw is None else io.BytesIO(raw)) as source:
+        remaining = MAX_METADATA_BYTES
+        for _ in range(max_lines):
+            line = source.readline(remaining + 1)
+            if not line:
+                break
+            if len(line) > remaining:
+                raise ValueError(METADATA_LIMIT_ERROR)
+            remaining -= len(line)
+            yield line
 
 
 @dataclass
@@ -164,20 +193,29 @@ def _is_codex_transcript(transcript_path: Path, raw=None) -> bool:
     return False
 
 
-def codex_session_meta(transcript_path, raw=None) -> dict:
+def codex_session_meta(transcript_path, raw=None, *, strict=False) -> dict:
     """First-record metadata of a Codex rollout: id, cwd, and whether it is a
     background run (a subagent thread, or `codex exec` automation) that should
     not become a note of its own. Empty dict if not a Codex rollout."""
     try:
-        with _stream(transcript_path, raw) as f:
-            entry = json.loads(f.readline())
+        entry = json.loads(next(metadata_lines(transcript_path, raw=raw), b''))
     except (OSError, ValueError):
+        if strict:
+            raise
         return {}
     if not isinstance(entry, dict) or entry.get("type") != "session_meta":
+        if strict:
+            raise ValueError("Codex session metadata is missing or malformed")
         return {}
     payload = entry.get("payload")
     if not isinstance(payload, dict):
+        if strict:
+            raise ValueError("Codex session metadata is missing or malformed")
         return {}
+    if strict and (not isinstance(payload.get("id") or payload.get("session_id"), str)
+                   or not (payload.get("id") or payload.get("session_id"))
+                   or not isinstance(payload.get('cwd', ''), str)):
+        raise ValueError("Codex session metadata is missing or malformed")
     source = payload.get("source")
     background = source == "exec" or (isinstance(source, dict) and "subagent" in source)
     return {"id": payload.get("id") or payload.get("session_id"), "cwd": payload.get("cwd", ""), "background": background}
@@ -330,10 +368,11 @@ def read_transcript(transcript_path: Union[str, Path]) -> TranscriptContent:
     if not transcript_path.exists():
         raise FileNotFoundError(f"Transcript not found: {transcript_path}")
 
+    check_transcript_size(transcript_path)
     with transcript_path.open("rb") as source:
-        captured = source.read(256 * 1024 * 1024 + 1)
-    if len(captured) > 256 * 1024 * 1024:
-        raise ValueError("Transcript exceeds 256 MB; split or compact the source explicitly")
+        captured = source.read(MAX_TRANSCRIPT_BYTES + 1)
+    if len(captured) > MAX_TRANSCRIPT_BYTES:
+        raise ValueError(TRANSCRIPT_LIMIT_ERROR)
     complete = captured.rfind(b"\n") + 1
     raw = captured[:complete]
     trailing_bytes = len(captured) - complete
