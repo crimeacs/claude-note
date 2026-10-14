@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -123,19 +124,36 @@ def write_note(vault: Path, text: str, **kwargs) -> tuple[Path, bool]:
 
 
 def reindex(index: str = "", timeout: float = 120.0) -> tuple[bool, float]:
-    """Run `qmd update` so the note is searchable now (BM25 needs no model)."""
+    """Index text and acknowledge only the generation captured before it."""
+    from . import index_refresh
+
     settings = recall_mod.Settings.load()
     exe = recall_mod.qmd_executable(settings)
     if not exe:
         return False, 0.0
     cmd = [exe] + (["--index", index] if index else []) + ["update"]
     started = time.monotonic()
+    lease = None
+    succeeded = False
     try:
+        try:
+            lease = index_refresh.begin(index=index)
+        except (OSError, ValueError) as exc:
+            print(f"Index freshness capture unavailable: {type(exc).__name__}", file=sys.stderr)
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
                               stdin=subprocess.DEVNULL)
-        return proc.returncode == 0, time.monotonic() - started
+        succeeded = proc.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
-        return False, time.monotonic() - started
+        pass
+    finally:
+        if lease is not None:
+            try:
+                result = index_refresh.finish(lease['token'], lexical_ok=succeeded)
+                if result.get('warning'):
+                    print(f"Index freshness: {result['warning']}", file=sys.stderr)
+            except (OSError, ValueError) as exc:
+                print(f"Index freshness needs reconciliation: {type(exc).__name__}", file=sys.stderr)
+    return succeeded, time.monotonic() - started
 
 
 def cmd_remember(args) -> int:

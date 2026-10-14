@@ -170,6 +170,42 @@ Unknown required context denies a machine claim; legacy prose remains an unverif
 
 ## Evaluation and recovery
 
+An existing QMD scheduler can report indexing stages without handing its commands
+or timer to Claude Note. After acquiring its own refresh lock, call
+`claude-note index-refresh begin --index ''` and retain the returned token. On
+exit, call `claude-note index-refresh finish --token TOKEN`, adding `--lexical-ok`
+only after a successful full text update and `--vector-ok` only after successful
+embedding as well. A skipped or failed job must not report a successful stage.
+Completion also checks captured saved revisions in the bound index; an exit code
+alone cannot establish freshness. Partial or wrong-model vectors remain dirty.
+These hooks do not index, embed or call providers. They capture only registered
+whole-root Markdown generations and bind the selected configuration. New writes,
+changed scope, expired leases, project-local default configuration and unsupported
+database overrides remain unacknowledged. QMD's hidden/generated-directory
+exclusions and custom ignore rules cannot establish whole-root freshness. Each
+journal binds to its configured canonical index; a different index cannot clear
+it or automatically rebind it. A partial completion can replay with
+the same flags; changing them requires a new refresh. The caller's stage reports
+are trusted local integration input, not protection against host compromise.
+The observer performs no model calls, downloads, schema migrations or index writes.
+It checks bounded indexed content and FTS rows, then the selected model URI,
+pipeline fingerprint, recorded expected chunk counts and stored finite nonzero
+vectors. The native vector observer requires the existing QMD 2.8.3 SDK; an
+unsupported or unavailable observer leaves that capability unacknowledged.
+The proof is limited to 1,000 captured references, 1 MiB per indexed body, 8 MiB
+total and an eight-second budget. Exceeding a bound leaves freshness dirty while
+the caller's maintenance command keeps its own exit status.
+
+The first index binding resets unscoped capability counters and records a legacy
+baseline. Status describes retained tracked mutations after that baseline;
+earlier pruned receipts and preexisting corpus coverage remain unverified. A
+different owner requires an explicit migration, rather than silently taking over
+the journal.
+Capability receipts bind the selected configuration and model selector. Changing
+them makes the receipt unverified until another bounded proof succeeds. Latest
+tracked path/revision metadata is retained after dirty entries clear, allowing
+that recheck without rewriting a note; note bodies are not stored in the journal.
+
 `claude-note eval tasks` runs simulated policy contracts. Actual constrained code editing is
 separate: `claude-note eval agent-tasks --help` describes public fixtures, provider budgets,
 OS sandbox requirements and exact baseline configuration. A missing backend or failed model
