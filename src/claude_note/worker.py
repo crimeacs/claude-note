@@ -15,6 +15,7 @@ from datetime import datetime
 
 from . import config
 from . import models
+from . import mutation
 from . import queue_manager
 from . import session_tracker
 from . import note_writer
@@ -58,70 +59,43 @@ def handle_signal(signum, frame):
 
 
 def update_session_summary(state: models.SessionState, pack, logger: logging.Logger) -> bool:
-    """
-    Update session note's Summary section with synthesis results.
-
-    Args:
-        state: SessionState object
-        pack: KnowledgePack with synthesis results
-        logger: Logger instance
-
-    Returns:
-        True if summary was updated
-    """
+    """Update generated summaries or preserve a review proposal on human edits."""
     import re
 
     try:
         note_path = note_writer.get_note_path(state)
-        if not note_path.exists():
-            return False
-
-        content = note_path.read_text(encoding="utf-8")
-
-        # Build summary content
         summary_lines = [f"**{pack.title}**", ""]
-
         if pack.highlights:
-            summary_lines.append("Key outcomes:")
-            for h in pack.highlights:
-                summary_lines.append(f"- {h}")
-            summary_lines.append("")
-
+            summary_lines.extend(["Key outcomes:", *(f"- {item}" for item in pack.highlights), ""])
         if pack.concepts:
             summary_lines.append(f"Concepts: {', '.join(c.name for c in pack.concepts[:5])}")
         if pack.decisions:
             summary_lines.append(f"Decisions: {len(pack.decisions)}")
         if pack.open_questions:
             summary_lines.append(f"Open questions: {len(pack.open_questions)}")
-
         summary_text = "\n".join(summary_lines)
-
-        # Replace placeholder in Summary section
-        # Look for the placeholder text
-        placeholder = "(Updated on Stop/SessionEnd with session highlights)"
-
-        if placeholder in content:
-            new_content = content.replace(placeholder, summary_text)
-        else:
-            # Try to find and replace the Summary section content
-            pattern = r"(## Summary\n\n).*?(\n\n## )"
-            match = re.search(pattern, content, re.DOTALL)
+        def update(content):
+            if content is None:
+                return None
+            placeholder = "(Updated on Stop/SessionEnd with session highlights)"
+            if placeholder in content:
+                return content.replace(placeholder, summary_text, 1)
+            match = re.search(r"(## Summary\n\n).*?(\n\n## )", content, re.DOTALL)
             if match:
-                new_content = content[:match.start()] + match.group(1) + summary_text + match.group(2) + content[match.end():]
-            else:
-                # Couldn't find Summary section
-                return False
-
-        # Write atomically
-        temp_path = note_path.with_suffix(".tmp")
-        temp_path.write_text(new_content, encoding="utf-8")
-        temp_path.rename(note_path)
-
-        logger.info(f"Updated session summary: {pack.title}")
-        return True
-
-    except Exception as e:
-        logger.error(f"Failed to update session summary: {e}")
+                return content[:match.start()] + match.group(1) + summary_text + match.group(2) + content[match.end():]
+            return None
+        result = mutation.mutate(note_path, update, vault_root=config.VAULT_ROOT, allow_protected=True,
+                                 operation_id=mutation.operation_id('session-summary', state.session_id,
+                                                                    getattr(pack, 'generation', ''), summary_text))
+        if not result.applied:
+            logger.warning("Session summary staged for review: %s", result.staged_path)
+            return False
+        if result.status != 'unchanged':
+            logger.info("Updated session summary: %s", pack.title)
+            return True
+        return False
+    except Exception as exc:
+        logger.error("Failed to update session summary: %s", exc)
         return False
 
 
@@ -168,6 +142,8 @@ def run_synthesis(state: models.SessionState, logger: logging.Logger) -> bool:
             logger.info(f"Created notes: {', '.join(results['notes_created'])}")
         if results["notes_updated"]:
             logger.info(f"Updated notes: {', '.join(results['notes_updated'])}")
+        for staged in results.get("notes_staged", []):
+            logger.warning("Note staged for review: %s (%s)", staged["pending_path"], staged["reason"])
         if results["errors"]:
             for err in results["errors"]:
                 logger.warning(f"Synthesis error: {err}")
@@ -203,6 +179,7 @@ def process_session(session_id: str, events: list, logger: logging.Logger) -> bo
                 for e in state.events
             )
             if not has_user_prompt:
+                session_tracker.save_session_state(state)
                 logger.debug(f"Session {session_id[:8]}: no user prompt, skipping")
                 return False
 
@@ -223,8 +200,27 @@ def process_session(session_id: str, events: list, logger: logging.Logger) -> bo
                 logger.debug(f"Session {session_id[:8]}: debounce not ready")
                 return False
 
+            # A proposal is durable work awaiting review, not a successful raw
+            # note write. New events may supersede it; idle polls do not recreate
+            # it or resynthesize a pack that already completed into proposals.
+            if state.note_pending_path and not new_events:
+                session_tracker.run_pending_synthesis(state, lambda s: run_synthesis(s, logger))
+                return False
+
             # Write the note
-            note_path = note_writer.update_session_note(state)
+            try:
+                note_path = note_writer.update_session_note(state)
+            except mutation.MutationConflict as conflict:
+                state.note_pending_path = str(conflict.result.staged_path)
+                state.note_pending_revision = conflict.result.revision or ""
+                if immediate:
+                    session_tracker.schedule_synthesis(state)
+                session_tracker.save_session_state(state)
+                logger.warning("Session note staged for review: %s", conflict.result.staged_path)
+                session_tracker.run_pending_synthesis(state, lambda s: run_synthesis(s, logger))
+                return False
+            state.note_pending_path = ""
+            state.note_pending_revision = ""
             logger.info(f"Wrote note: {note_path.name}")
 
             # Promote questions on Stop/SessionEnd
@@ -255,11 +251,11 @@ def poll_once(logger: logging.Logger) -> int:
     """
     # Group events by session
     sessions: dict[str, list] = {}
-    for event in queue_manager.read_all_events():
+    for event in queue_manager.read_pending_events():
         if event.session_id not in sessions:
             sessions[event.session_id] = []
         sessions[event.session_id].append(event)
-    for session_id in session_tracker.get_pending_synthesis_sessions():
+    for session_id in set(session_tracker.get_pending_synthesis_sessions() + session_tracker.get_sessions_ready_for_write()):
         sessions.setdefault(session_id, [])
 
     notes_written = 0

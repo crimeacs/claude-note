@@ -103,10 +103,18 @@ class FakeClient:
 
 
 class PushCarriesProvenanceTests(unittest.TestCase):
+    def setUp(self):
+        policy = mock.patch.object(push.egress, "policy", return_value={"default": ["host", "staging"]})
+        policy.start()
+        self.addCleanup(policy.stop)
+
     def test_metadata_has_assistant_and_author(self):
         with tempfile.TemporaryDirectory() as vault, tempfile.TemporaryDirectory() as state:
-            Path(vault, "a.md").write_text(f"---\ntype: pattern\nassistant: codex\n---\n\n{FILLER}\n")
-            Path(vault, "b.md").write_text(f"---\ntype: pattern\nassistant: not-a-thing\n---\n\n{FILLER}\n")
+            source = Path(state) / 'public-source.txt'
+            source.write_text('Public synthetic evidence')
+            origin = json.dumps(str(source.resolve()))
+            Path(vault, "a.md").write_text(f'---\ntype: pattern\nassistant: codex\nderivation_sources:\n  - {origin}\n---\n\n{FILLER}\n')
+            Path(vault, "b.md").write_text(f'---\ntype: pattern\nassistant: not-a-thing\nderivation_sources:\n  - {origin}\n---\n\n{FILLER}\n')
             client = FakeClient()
             with mock.patch.object(push, "STATE_FILE", Path(state) / "s.json"), \
                     mock.patch.object(push, "HEARTBEAT", Path(state) / "push.ok"), \
@@ -119,6 +127,22 @@ class PushCarriesProvenanceTests(unittest.TestCase):
 
 
 class HealthTests(unittest.TestCase):
+    def test_model_policy_pause_is_actionable_and_restrictions_are_not_grants(self):
+        with tempfile.TemporaryDirectory() as temporary, \
+                mock.patch.dict(os.environ, {"CLAUDE_NOTE_VAULT": temporary, "CLAUDE_NOTE_MODE": "route"}), \
+                mock.patch.object(health, "_notes", return_value={}), \
+                mock.patch.object(health, "_synthesis", return_value={}), \
+                mock.patch.object(health, "_launchd_loaded", return_value=False), \
+                mock.patch.object(health, "_which", return_value="/tool"):
+            for grant, restriction, expected_pause in ((False, False, True), (True, True, True), (True, False, False)):
+                policy = {"rules": [{"source": temporary + '/*', "audiences": ["model"] if grant else ["host"], "restrict": restriction}]}
+                with self.subTest(grant=grant, restriction=restriction), \
+                        mock.patch.object(health, "_config", return_value=(Path(temporary) / 'config.toml', {"egress": policy})):
+                    result = health.report()
+                self.assertEqual(any('external synthesis paused' in p for p in result['problems']), expected_pause)
+                if expected_pause:
+                    self.assertFalse(result['knowledge_loop_ready'])
+
     def test_synthesis_mode_env_matches_runtime_precedence(self):
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.dict(os.environ, {"CLAUDE_NOTE_VAULT": tmp}), \
@@ -150,7 +174,7 @@ class HealthTests(unittest.TestCase):
                     mock.patch.object(health, "_hooks_installed", return_value=False), \
                     mock.patch.object(health, "_notes", return_value={}), \
                     mock.patch.object(health, "_which", return_value="/tool"), \
-                    mock.patch.object(health, "_config", return_value=(root / "config.toml", {"synthesis": {"mode": "route"}})), \
+                    mock.patch.object(health, "_config", return_value=(root / "config.toml", {"synthesis": {"mode": "route"}, "egress": {"default": ["model"]}})), \
                     mock.patch.object(provenance, "author_email", return_value="me@example.com"):
                 out = health.report()
             self.assertFalse(out["push"]["agent_installed"])
@@ -214,7 +238,7 @@ class HealthTests(unittest.TestCase):
     def test_unconfigured_machine_reports_instead_of_exiting(self):
         with tempfile.TemporaryDirectory() as home:
             env = {"XDG_CONFIG_HOME": str(Path(home) / "xdg")}
-            with mock.patch.dict(os.environ, env), \
+            with mock.patch.dict(os.environ, env, clear=True), \
                     mock.patch.object(health, "HOME", Path(home)), \
                     mock.patch.object(health, "LOGS", Path(home) / "logs"), \
                     mock.patch.object(health, "STATE_DIR", Path(home) / "state"), \
@@ -246,7 +270,7 @@ class HealthTests(unittest.TestCase):
             vault = home / "vault"
             vault.mkdir()
             (home / "xdg/claude-note").mkdir(parents=True)
-            (home / "xdg/claude-note/config.toml").write_text(f'vault_root = "{vault}"\n[synthesis]\nmode = "{self.mode}"\n')
+            (home / "xdg/claude-note/config.toml").write_text(f'vault_root = "{vault}"\n[synthesis]\nmode = "{self.mode}"\n[egress]\ndefault = ["model"]\n')
             (home / "LaunchAgents").mkdir()
             (home / "LaunchAgents/com.claude-note.worker.plist").write_text("x")
             (home / "LaunchAgents/com.claude-note.push.plist").write_text("x")
@@ -256,7 +280,7 @@ class HealthTests(unittest.TestCase):
             (home / ".claude/settings.json").write_text(json.dumps({"hooks": {"Stop": [
                 {"hooks": [{"type": "command", "command": "/x/claude-note enqueue"}]}]}}))
             with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(home / "xdg"),
-                                              "CLAUDE_NOTE_VAULT_ROOT": str(vault)}), \
+                                              "CLAUDE_NOTE_VAULT_ROOT": str(vault)}, clear=True), \
                     mock.patch.object(health, "HOME", home), \
                     mock.patch.object(health, "LOGS", home / "logs"), \
                     mock.patch.object(health, "STATE_DIR", home / "state"), \

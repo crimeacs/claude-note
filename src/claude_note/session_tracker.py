@@ -3,6 +3,7 @@
 import fcntl
 import os
 import time
+import re
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -10,16 +11,23 @@ from typing import Callable, Iterator, Optional
 
 from . import config
 from . import models
+from .state_io import atomic_json, read_json, open_lock
+
+
+def _session_id(session_id):
+    if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", session_id):
+        raise ValueError("Invalid session identity")
+    return session_id
 
 
 def get_state_file(session_id: str) -> Path:
     """Get the state file path for a session."""
-    return config.STATE_DIR / f"{session_id}.json"
+    return config.STATE_DIR / f"{_session_id(session_id)}.json"
 
 
 def get_lock_file(session_id: str) -> Path:
     """Get the lock file path for a session."""
-    return config.STATE_DIR / f"{session_id}.lock"
+    return config.STATE_DIR / f"{_session_id(session_id)}.lock"
 
 
 @contextmanager
@@ -40,7 +48,7 @@ def session_lock(session_id: str, timeout: float = None) -> Iterator[bool]:
     start_time = time.time()
 
     try:
-        fd = os.open(str(lock_file), os.O_WRONLY | os.O_CREAT, 0o644)
+        fd = open_lock(lock_file)
 
         # Try to acquire lock with timeout
         while time.time() - start_time < timeout:
@@ -66,7 +74,7 @@ def load_session_state(session_id: str) -> Optional[models.SessionState]:
         return None
 
     try:
-        return models.SessionState.from_json(state_file.read_text())
+        return models.SessionState(**read_json(state_file))
     except Exception:
         return None
 
@@ -76,10 +84,8 @@ def save_session_state(state: models.SessionState) -> None:
     state_file = get_state_file(state.session_id)
     state_file.parent.mkdir(parents=True, exist_ok=True)
 
-    # Atomic write via temp file
-    temp_file = state_file.with_suffix(".tmp")
-    temp_file.write_text(state.to_json())
-    temp_file.rename(state_file)
+    import json
+    atomic_json(state_file, json.loads(state.to_json()))
 
 
 def is_recursive_event(event: models.QueuedEvent) -> bool:
@@ -207,6 +213,9 @@ def update_session_from_events(session_id: str, events: list) -> models.SessionS
 
         # Skip recursive events
         if is_recursive_event(event):
+            state.processed_event_ids.append(event.event_id)
+            processed_ids.add(event.event_id)
+            state.filtered_event_ids[event.event_id] = "recursion-policy"
             continue
 
         # Update state
@@ -274,10 +283,12 @@ def schedule_synthesis(state: models.SessionState) -> None:
     state.synthesis_pending = config.SYNTH_MODE != "log" and bool(state.transcript_path)
     state.synthesis_attempts = 0
     state.last_synthesis_attempt_ts = None
+    state.synthesis_parked = False
+    state.synthesis_park_reason = ""
 
 
 def synthesis_retry_due(state: models.SessionState) -> bool:
-    if not state.synthesis_pending:
+    if not state.synthesis_pending or state.synthesis_parked:
         return False
     if not state.last_synthesis_attempt_ts:
         return True
@@ -303,6 +314,13 @@ def run_pending_synthesis(state: models.SessionState, synthesize: Callable,
     save_session_state(state)
     success = bool(synthesize(state))
     state.synthesis_pending = not success
+    if not success and state.synthesis_attempts >= 8:
+        state.synthesis_parked = True
+        state.synthesis_park_reason = "retry-limit: inspect extraction/operation errors, then explicitly resynthesize"
+    if success and state.extraction_checkpoint:
+        # Do not read the live source here: a new turn may have arrived while
+        # the model was running and is not part of this extraction generation.
+        state.transcript_checkpoint = dict(state.extraction_checkpoint)
     save_session_state(state)
     return success
 
@@ -314,6 +332,6 @@ def get_pending_synthesis_sessions() -> list[str]:
     pending = []
     for path in config.STATE_DIR.glob("*.json"):
         state = load_session_state(path.stem)
-        if state and state.synthesis_pending:
+        if state and state.synthesis_pending and not state.synthesis_parked:
             pending.append(state.session_id)
     return pending

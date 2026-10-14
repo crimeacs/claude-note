@@ -1,83 +1,564 @@
-// claude-note recall server: QMD's search, kept warm.
-//
-// A recall hook runs on every prompt. Starting QMD per search meant ~1.5 s per process and up to a
-// dozen processes; loading the embedding model alone takes seconds. This keeps one QMD store and its
-// models loaded and answers on 127.0.0.1 only. It fetches; claude_note/recall.py fuses, gates and
-// presents (so the ranking logic stays in one tested place).
-//
-//   node recall_server.mjs <qmd-sdk-index.js> [port=8182] [index-db] [index-yml]
-//   GET  /health                    -> {ok, uptime_s, loaded_ms}
-//   POST /search {rungs: [str], question: str, lex_limit: 20, vec_limit: 40}
-//        -> {lex: [[{file, title, score}]], vec: [{file, title, score}], ms: {lex, vec}}
-//   POST /rerank {question, files: [str], chars: 2000}  -> {scores: {file: score}, ms}
-//
-// Requests are served one at a time (node-llama-cpp contexts are not safe to share concurrently).
+// QMD 2.8.3 adapter. Lexical reads run in a disposable, read-only SQLite worker;
+// native model calls stay serial. A timed-out model poisons this process until
+// its supervisor restarts it: returning a timeout must never admit another model
+// call while the first one still owns a llama.cpp context.
 import http from 'node:http';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, basename, resolve } from 'node:path';
+import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
+import { readFileSync, readdirSync, statSync, openSync, readSync, closeSync } from 'node:fs';
+import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 
-const [sdkPath, portArg, dbArg, ymlArg] = process.argv.slice(2);
-if (!sdkPath) { console.error('usage: node recall_server.mjs <qmd-sdk-index.js> [port] [db] [yml]'); process.exit(2); }
-const port = Number(portArg || 8182);
-const sdk = await import(pathToFileURL(sdkPath).href);
-const llmMod = await import(pathToFileURL(join(dirname(sdkPath), 'llm.js')).href);
-const cache = process.env.XDG_CACHE_HOME || join(homedir(), '.cache');
-const store = await sdk.createStore({
-  dbPath: dbArg || join(cache, 'qmd', 'index.sqlite'),
-  configPath: ymlArg || join(process.env.QMD_CONFIG_DIR || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'qmd'), 'index.yml'),
-});
-const llm = llmMod.getDefaultLlamaCpp();
-const started = Date.now();
-// Warm the embedding model before the first prompt pays for it.
-const t0 = performance.now();
-await store.searchVector('warm up', { limit: 1 }).catch(() => []);
-const loadedMs = Math.round(performance.now() - t0);
+const PIN = '2.8.3';
+const digest = value => createHash('sha256').update(value).digest('hex');
+const boundedInt = (value, fallback, max) => Math.max(1, Math.min(max, Number(value) || fallback));
+const err = (code, message) => Object.assign(new Error(message), { code });
+const collectionsOf = body => Array.isArray(body.collections)
+  ? [...new Set(body.collections.filter(c => typeof c === 'string' && c.length > 0 && c.length <= 200))].slice(0, 40) : [];
 
-const pick = (r) => ({ file: r.filepath ?? r.file, title: r.title, score: Math.round((r.score ?? 0) * 10000) / 10000,
-  snippet: String(r.snippet || r.body || '').slice(0, 600) });
-let queue = Promise.resolve();
-const serial = (fn) => (queue = queue.then(fn, fn));
-
-async function search(body) {
-  const t = performance.now();
-  const lex = [];
-  for (const rung of (body.rungs || []).slice(0, 8)) lex.push((await store.searchLex(String(rung), { limit: body.lex_limit || 20 })).map(pick));
-  const tl = performance.now();
-  const vec = body.question ? (await store.searchVector(String(body.question).slice(0, 2000), { limit: body.vec_limit || 40 })).map(pick) : [];
-  return { lex, vec, ms: { lex: Math.round(tl - t), vec: Math.round(performance.now() - tl) } };
+// Rungs are literal content terms, not SQL/FTS operators. Quoting protects both
+// identifiers and Unicode; the QMD tokenizer still supplies its own stemming.
+export function literalFTS(query) {
+  return (String(query).match(/[\p{L}\p{N}_]+/gu) || []).slice(0, 32)
+    .map(term => /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(term)
+      ? `"${term.replace(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu,
+        run => ` ${Array.from(run).join(' ')} `).trim()}"`
+      : `"${term.replaceAll('"', '""')}"*`).join(' AND ');
 }
 
-async function rerank(body) {
-  const t = performance.now();
-  const docs = [];
-  for (const f of (body.files || []).slice(0, 20)) {
-    const d = await store.get(String(f), { includeBody: true }).catch(() => null);
-    if (!d) continue;
-    let text = String(d.body || '');
-    // clean: the reranker reads only `text`, so lead with the title and drop YAML frontmatter
-    if (body.clean) text = `${d.title || ''}\n\n` + text.replace(/^---\n[\s\S]*?\n---\n/, '').trimStart();
-    docs.push({ file: String(f), title: d.title || '', text: text.slice(0, body.chars || 2000) });
-  }
-  const r = docs.length ? await llm.rerank(String(body.question || ''), docs) : { results: [] };
-  const scores = {};
-  for (const x of r.results || []) scores[x.file] = Math.round(x.score * 10000) / 10000;
-  return { scores, ms: Math.round(performance.now() - t) };
-}
-
-const server = http.createServer((req, res) => {
-  const send = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
-  if (req.method === 'GET' && req.url === '/health') return send(200, { ok: true, uptime_s: Math.round((Date.now() - started) / 1000), loaded_ms: loadedMs });
-  if (req.method !== 'POST' || !['/search', '/rerank'].includes(req.url)) return send(404, { error: 'not found' });
-  let raw = '';
-  req.on('data', (c) => { raw += c; if (raw.length > 1e6) req.destroy(); });
-  req.on('end', () => serial(async () => {
-    try {
-      const body = JSON.parse(raw || '{}');
-      send(200, req.url === '/search' ? await search(body) : await rerank(body));
-    } catch (e) {
-      send(500, { error: String(e && e.message || e).slice(0, 300) });
+export function passage(text, question, chars = 260) {
+  text = String(text || '');
+  chars = boundedInt(chars, 260, 4000);
+  const terms = new Set((String(question).toLocaleLowerCase().match(/[\p{L}\p{N}_]+/gu) || []).filter(t => t.length > 1));
+  let offset = 0, frontmatter = text.startsWith('---\n'), best = null;
+  const blocks = text.split(/(?<=\n)(?=\s*\n)/);
+  for (const block of blocks) {
+    const start = offset; offset += block.length;
+    let raw = block, begin = start;
+    if (frontmatter) {
+      const end = text.indexOf('\n---', 4);
+      if (end < 0 || offset <= end + 4) continue;
+      frontmatter = false;
+      begin = Math.max(start, end + 4); raw = text.slice(begin, offset);
     }
+    // Machine metadata is never a readable evidence passage.
+    raw = raw.replace(/^<!--[^\n]*-->[^\S\n]*$/gm, line => ' '.repeat(line.length));
+    const leading = raw.match(/^\s*/)[0].length;
+    begin += leading; raw = raw.slice(leading);
+    for (let i = 0; i < raw.length; i += Math.max(1, Math.floor(chars * .75))) {
+      const original = raw.slice(i, i + chars);
+      const value = original.replace(/^#+\s*/gm, '').replace(/\s+/g, ' ').trim();
+      if (value.length < 40) continue;
+      const words = new Set(value.toLocaleLowerCase().match(/[\p{L}\p{N}_]+/gu) || []);
+      const score = [...terms].filter(t => words.has(t)).reduce((n, t) => n + 1 + Math.min(t.length, 20) / 20, 0);
+      if (!best || score > best.score || (score === best.score && begin + i > best.anchor.start_char)) {
+        const a = begin + i, b = a + original.length;
+        best = { text: value, score, anchor: { start_char: a, end_char: b,
+          start_line: text.slice(0, a).split('\n').length, end_line: text.slice(0, b).split('\n').length } };
+      }
+    }
+  }
+  return best || { text: '', anchor: {} };
+}
+
+function pick(row, question, chars, lexical = false) {
+  const file = String(row.filepath || row.file || '');
+  const selected = passage(row.body || row.snippet || '', question, chars);
+  const revision = row.revision || (row.body ? digest(String(row.body)) : row.hash || '');
+  const source_id = row.source_id || file;
+  return { file, title: String(row.title || ''), score: Number(row.score) || 0,
+    source_id, revision, revision_kind: row.revision_kind || (row.body ? 'indexed_body_sha256' : 'qmd_content_sha256'),
+    snippet: selected.text, scored_text: selected.text, anchor: selected.anchor,
+    passage_id: digest(JSON.stringify([source_id, revision, selected.anchor, selected.text])), lexical_evidence: lexical,
+    has_machine_claims: /<!-- claude-note:claim /.test(String(row.body || '')) };
+}
+
+// Validate exactly the schema whose semantics were checked against QMD v2.8.3.
+// No HTTP body controls dbPath, SQLite module, schema, or SQL text.
+function openReadOnly({ dbPath, sqliteModule, version }) {
+  if (version !== PIN) throw err('unsupported_schema', 'Scoped adapter requires QMD 2.8.3');
+  const Database = createRequire(import.meta.url)(sqliteModule);
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true, timeout: 100 });
+  db.pragma('query_only = ON');
+  for (const [table, required] of Object.entries({ documents: ['id', 'collection', 'path', 'title', 'hash', 'active'],
+    content: ['hash', 'doc'], documents_fts: ['filepath', 'title', 'body'] })) {
+    const columns = new Set(db.pragma(`table_info(${table})`).map(c => c.name));
+    if (!required.every(c => columns.has(c))) { db.close(); throw err('unsupported_schema', `Unsupported ${table} schema`); }
+  }
+  const fts = db.prepare("SELECT sql FROM sqlite_master WHERE name='documents_fts'").get()?.sql || '';
+  if (!/USING fts5/i.test(fts)) { db.close(); throw err('unsupported_schema', 'Expected FTS5'); }
+  return db;
+}
+
+export function scopedLexical(db, query, collections, limit) {
+  const match = literalFTS(query);
+  if (!match) return [];
+  const filter = collections.length ? `AND collection IN (${collections.map(() => '?').join(',')})` : '';
+  // Materialize allowed IDs before rank/limit. This deliberately avoids QMD
+  // 2.8.3's global limit*10 CTE, which can starve a small requested collection.
+  const sql = `WITH allowed AS MATERIALIZED (
+      SELECT id FROM documents WHERE active=1 ${filter}
+    ), matches AS MATERIALIZED (
+      SELECT rowid, bm25(documents_fts,1.5,4.0,1.0) AS rank FROM documents_fts
+      WHERE documents_fts MATCH ? AND rowid IN (SELECT id FROM allowed)
+      ORDER BY rank ASC, rowid ASC LIMIT ?
+    ) SELECT 'qmd://' || d.collection || '/' || d.path AS filepath, d.title, d.hash,
+      content.doc AS body, matches.rank FROM matches
+      JOIN documents d ON d.id=matches.rowid JOIN content ON content.hash=d.hash
+      ORDER BY matches.rank ASC, d.collection ASC, d.path ASC`;
+  return db.prepare(sql).all(...collections, match, limit).map(row => ({ ...row,
+    score: Math.abs(row.rank) / (1 + Math.abs(row.rank)) }));
+}
+
+function indexMetadata(db) {
+  const hash = createHash('sha256'), scopes = new Map();
+  for (const row of db.prepare('SELECT collection,path,hash FROM documents WHERE active=1 ORDER BY collection,path').iterate()) {
+    hash.update(JSON.stringify(row) + '\n');
+    scopes.set(row.collection, (scopes.get(row.collection) || 0) + 1);
+  }
+  let vectorRows = 0, vectorModels = [], scopedVectors = [];
+  try {
+    const rows = db.prepare('SELECT model,COUNT(*) AS n FROM content_vectors GROUP BY model ORDER BY model').all();
+    vectorRows = rows.reduce((n, row) => n + row.n, 0); vectorModels = rows.map(row => row.model);
+    scopedVectors = db.prepare(`SELECT d.collection,COUNT(*) AS rows FROM content_vectors cv
+      JOIN documents d ON d.hash=cv.hash AND d.active=1 GROUP BY d.collection ORDER BY d.collection`).all();
+  } catch { /* A lexical-only schema is supported. */ }
+  const corpus_digest = hash.digest('hex');
+  return { corpus_digest, corpus_digest_kind: 'indexed_document_hashes', generation: digest(JSON.stringify([corpus_digest, vectorRows, vectorModels])),
+    collections: [...scopes].map(([name, documents]) => ({ name, documents,
+      vector_rows: scopedVectors.find(c => c.collection === name)?.rows || 0 })), vector_rows: vectorRows, vector_models: vectorModels };
+}
+
+if (!isMainThread && workerData?.kind === 'claude-note-scoped-fts') {
+  let db;
+  try { db = openReadOnly(workerData); }
+  catch (e) { parentPort.postMessage({ error: e.code || 'adapter_unavailable' }); }
+  if (db) parentPort.on('message', async msg => {
+    try {
+      db.exec('BEGIN');
+      const metadata = indexMetadata(db);
+      let rows = [];
+      if (msg.kind === 'search') rows = scopedLexical(db, msg.query, msg.collections, msg.limit);
+      else if (msg.kind === 'sdk_fallback') {
+        const sdkStore = await import(pathToFileURL(workerData.sdkStorePath).href);
+        rows = sdkStore.searchFTS(db, msg.query, msg.limit, msg.collections.length ? msg.collections : undefined);
+      }
+      db.exec('COMMIT');
+      parentPort.postMessage({ id: msg.id, rows, metadata });
+    } catch (e) {
+      try { db.exec('ROLLBACK'); } catch { /* closed connection */ }
+      parentPort.postMessage({ id: msg.id, error: e.code || 'adapter_query_failed' });
+    }
+  });
+}
+
+if (!isMainThread && workerData?.kind === 'claude-note-model-identity') {
+  let fd;
+  try {
+    fd = openSync(workerData.path, 'r');
+    const hash = createHash('sha256'), buffer = Buffer.alloc(1024 * 1024);
+    let count;
+    while ((count = readSync(fd, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, count));
+    parentPort.postMessage({ revision: hash.digest('hex'), revision_kind: 'model_file_sha256' });
+  } catch { parentPort.postMessage({ revision: 'unknown', revision_kind: 'unknown' }); }
+  finally { if (fd !== undefined) closeSync(fd); }
+}
+
+export async function modelFileIdentity(path, deadline = Date.now() + 3000) {
+  const worker = new Worker(new URL(import.meta.url), { workerData: { kind: 'claude-note-model-identity', path } });
+  return new Promise(resolveIdentity => {
+    const finish = value => { clearTimeout(timer); void worker.terminate(); resolveIdentity(value); };
+    const timer = setTimeout(() => finish({ revision: 'unknown', revision_kind: 'unknown' }), Math.max(1, deadline - Date.now()));
+    worker.once('message', finish); worker.once('error', () => finish({ revision: 'unknown', revision_kind: 'unknown' }));
+  });
+}
+
+export class ScopedLexicalWorker {
+  constructor(options) { this.options = options; this.worker = null; this.serial = 0; }
+  async request(message, deadline) {
+    if (deadline <= Date.now()) throw err('deadline', 'Lexical deadline expired');
+    if (!this.worker) this.worker = new Worker(new URL(import.meta.url), { workerData: { ...this.options, kind: 'claude-note-scoped-fts' } });
+    const worker = this.worker, id = ++this.serial;
+    return new Promise((accept, reject) => {
+      const cleanup = () => { clearTimeout(timer); worker.off('message', onMessage); worker.off('error', onError); worker.off('exit', onExit); };
+      const fail = e => { cleanup(); reject(e); };
+      const onError = e => { this.worker = null; fail(e); };
+      const onExit = () => { this.worker = null; fail(err('adapter_unavailable', 'Lexical worker exited')); };
+      const onMessage = response => {
+        if (response.id !== id && !response.error) return;
+        cleanup();
+        if (response.error) { this.close(); reject(err(response.error, 'Scoped lexical adapter unavailable')); }
+        else accept(response);
+      };
+      const timer = setTimeout(() => { this.close(); fail(err('deadline', 'Lexical worker deadline expired')); }, Math.max(1, deadline - Date.now()));
+      worker.on('message', onMessage); worker.once('error', onError); worker.once('exit', onExit);
+      worker.postMessage({ ...message, id });
+    });
+  }
+  close() { const worker = this.worker; this.worker = null; if (worker) void worker.terminate(); }
+}
+
+export function createRecallService({ store, llm, lexical, manifest = {}, queueLimit = 8, maxRequestMs = 8000,
+  modelAvailable = () => true, fallbackLexical, onFatal = () => {}, onJobStart = () => {}, now = Date.now }) {
+  const started = now(), waiting = [];
+  let active = false, poisoned = false, expired = 0, rejected = 0;
+  let metadata = {}, lexicalReady = false, vectorObserved = false, rerankObserved = false;
+  const degradation = new Set();
+  const capabilities = () => ({ ...manifest, protocol_version: 2, engine: 'qmd-sdk', ok: !poisoned,
+    index: { ...manifest.index, ...metadata,
+      generation: metadata.generation ? digest(JSON.stringify([metadata.generation, manifest.index?.config_revision,
+        manifest.models?.embed?.id, manifest.models?.embed?.revision, manifest.models?.rerank?.id, manifest.models?.rerank?.revision])) : undefined }, lexical_ready: lexicalReady && !poisoned,
+    vector_ready: vectorObserved && !poisoned, rerank_ready: rerankObserved && !poisoned,
+    models: { ...manifest.models, embed: { ...manifest.models?.embed, ready: vectorObserved && !poisoned },
+      rerank: { ...manifest.models?.rerank, ready: rerankObserved && !poisoned } },
+    degradation: [...degradation], queue: { active, pending: waiting.length, limit: queueLimit, expired, rejected },
+    uptime_s: Math.floor((now() - started) / 1000), loaded_ms: 0, asof_ms: now() });
+  function remaining(deadline) { if (now() >= deadline) throw err('deadline', 'Request deadline expired'); }
+  async function modelCall(fn, deadline) {
+    remaining(deadline);
+    if (poisoned) throw err('poisoned', 'Model worker requires restart');
+    let timer;
+    try {
+      return await Promise.race([Promise.resolve().then(fn), new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          poisoned = true; degradation.add('model_deadline_requires_restart');
+          lexical.close?.(); reject(err('deadline', 'Model deadline expired; restart required'));
+          onFatal();
+        }, Math.max(1, deadline - now()));
+      })]);
+    } finally { clearTimeout(timer); }
+  }
+  async function lexicalSearch(query, collections, limit, deadline) {
+    try {
+      const response = await lexical.request({ kind: 'search', query, collections, limit }, deadline);
+      metadata = response.metadata; lexicalReady = true;
+      return { rows: response.rows, coverage: 'complete_scoped_before_limit' };
+    } catch (e) {
+      if (e.code === 'deadline') throw e;
+      degradation.add(e.code || 'scoped_adapter_unavailable');
+      // Compatibility path is explicitly partial. Widening is bounded and can
+      // never prove that the SDK's global prefilter found every scoped match.
+      let rows = [];
+      for (const width of [...new Set([limit, Math.min(limit * 4, 200), Math.min(limit * 16, 800)])]) {
+        remaining(deadline);
+        const found = fallbackLexical ? await fallbackLexical(query, collections, width, deadline)
+          : await modelCall(() => store.searchLex(query, { limit: width, collection: collections.length ? collections : undefined }), deadline);
+        lexicalReady = true;
+        rows = found.filter(row => !collections.length || collections.includes(String(row.filepath || row.file).split('/')[2])).slice(0, limit);
+        if (rows.length >= limit) break;
+      }
+      return { rows, coverage: 'partial_bounded_sdk_overfetch' };
+    }
+  }
+  async function search(body, deadline) {
+    const t = performance.now(), collections = collectionsOf(body);
+    const lex = [], coverage = { lexical: 'complete_scoped_before_limit', semantic: 'disabled' };
+    for (const rung of (Array.isArray(body.rungs) ? body.rungs : []).slice(0, 8)) {
+      let got;
+      try { got = await lexicalSearch(String(rung).slice(0, 2000), collections, boundedInt(body.lex_limit, 20, 100), deadline); }
+      catch (e) { if (e.code !== 'deadline' || !lex.length) throw e; coverage.lexical = 'partial_deadline'; break; }
+      lex.push(got.rows.map(row => pick(row, body.question || rung, body.passage_chars, true)));
+      if (got.coverage.startsWith('partial')) coverage.lexical = got.coverage;
+    }
+    const tl = performance.now(); let vec = [];
+    if (body.question) {
+      if (modelAvailable('embed')) {
+        try {
+          const rows = await modelCall(() => store.searchVector(String(body.question).slice(0, 2400), {
+            limit: boundedInt(body.vec_limit, 40, 100), collection: collections.length ? collections : undefined }), deadline);
+          vec = rows.filter(row => !collections.length || collections.includes(String(row.filepath || row.file).split('/')[2]))
+            .map(row => pick(row, body.question, body.passage_chars));
+          vectorObserved = Boolean(llm?.embedContexts?.length || llm?.embedModel || rows.length)
+            && Boolean(metadata.vector_rows) && (!manifest.models?.embed?.id || metadata.vector_models?.includes(manifest.models.embed.id));
+          // QMD scopes exact vector scans through 20k rows, then uses capped ANN.
+          const exactScope = collections.length && collections.every(name => {
+            const count = metadata.collections?.find(c => c.name === name)?.vector_rows;
+            return Number.isFinite(count) && count <= 20000;
+          });
+          coverage.semantic = collections.length ? exactScope ? 'complete_scoped_exact_vectors' : 'partial_qmd_scoped_vector_ann_limit' : 'qmd_vector_topk';
+        } catch (e) {
+          if ((poisoned || e.code === 'deadline') && !lex.length) throw e;
+          coverage.semantic = e.code === 'deadline' ? 'partial_deadline' : 'unavailable'; degradation.add('vector_unavailable');
+        }
+      } else { coverage.semantic = 'model_cache_unavailable'; degradation.add('embed_model_cache_unavailable'); }
+    }
+    return { lex, vec, coverage, partial: Object.values(coverage).some(value => /partial|unavailable/.test(value)),
+      manifest: capabilities(), ms: { lex: Math.round(tl - t), vec: Math.round(performance.now() - tl) } };
+  }
+  async function rerank(body, deadline) {
+    if (!modelAvailable('rerank')) return { passage_scores: {}, scored_passage_ids: [], scores: {}, coverage: 'model_cache_unavailable', manifest: capabilities() };
+    const docs = [];
+    if (Array.isArray(body.passages)) {
+      for (const p of body.passages.slice(0, 20)) {
+        if (typeof p.text !== 'string' || Buffer.byteLength(p.text) > 16000 || !p.passage_id || !p.revision) throw err('invalid_passage', 'Bounded versioned passage required');
+        docs.push({ file: String(p.passage_id), title: String(p.title || '').slice(0, 160), text: p.text, original_file: String(p.file || '') });
+      }
+    } else {
+      // Legacy clients get a selected passage, never an unrelated fixed prefix.
+      for (const file of (body.files || []).slice(0, 20)) {
+        const d = await modelCall(() => store.get(String(file), { includeBody: true }), deadline);
+        if (!d) continue;
+        const p = pick({ ...d, file: String(file) }, body.question, body.chars);
+        if (p.scored_text) docs.push({ file: p.passage_id, title: p.title, text: p.scored_text, original_file: String(file) });
+      }
+    }
+    const t = performance.now();
+    const ranked = docs.length ? await modelCall(() => llm.rerank(String(body.question || '').slice(0, 2400), docs), deadline) : { results: [] };
+    const scores = {}, passage_scores = {};
+    for (const row of ranked.results || []) {
+      const doc = docs.find(d => d.file === row.file);
+      if (doc && Number.isFinite(row.score)) { passage_scores[doc.file] = row.score; scores[doc.original_file] = row.score; }
+    }
+    rerankObserved = Object.keys(passage_scores).length > 0;
+    if (docs.length && !rerankObserved) degradation.add('rerank_no_scores_observed');
+    return { scores, passage_scores, scored_passage_ids: Object.keys(passage_scores), coverage: 'exact_passage',
+      manifest: capabilities(), ms: Math.round(performance.now() - t) };
+  }
+  async function drain() {
+    if (active) return;
+    active = true;
+    while (waiting.length) {
+      const job = waiting.shift();
+      if (job.cancelled() || now() >= job.deadline) { expired++; job.reject(err('deadline', 'Queued request expired')); continue; }
+      if (poisoned) { job.reject(err('poisoned', 'Model worker requires restart')); continue; }
+      onJobStart(job.body.request_id);
+      try { job.resolve(await (job.route === '/search' ? search(job.body, job.deadline) : rerank(job.body, job.deadline))); }
+      catch (e) { job.reject(e); }
+    }
+    active = false;
+  }
+  return {
+    capabilities,
+    async refresh(deadline = now() + 300) {
+      // Do not send parallel commands into a lexical worker during a search.
+      if (active) return capabilities();
+      try { const response = await lexical.request({ kind: 'metadata' }, deadline); metadata = response.metadata; lexicalReady = true; }
+      catch (e) { degradation.add(e.code || 'index_metadata_unavailable'); }
+      return capabilities();
+    },
+    request(route, body, cancelled = () => false) {
+      if (!['/search', '/rerank'].includes(route)) return Promise.reject(err('not_found', 'Unknown route'));
+      if (body.index_id && body.index_id !== (manifest.index?.id || 'default')) return Promise.reject(err('index_mismatch', 'Index identity mismatch'));
+      if (poisoned) return Promise.reject(err('poisoned', 'Model worker requires restart'));
+      if (waiting.length >= queueLimit) { rejected++; return Promise.reject(err('queue_full', 'Recall queue full')); }
+      const deadline = Math.min(now() + maxRequestMs, Number(body.deadline_at_ms) || now() + maxRequestMs);
+      return new Promise((resolveJob, reject) => {
+        let job;
+        const timer = setTimeout(() => {
+          const i = waiting.indexOf(job);
+          if (i >= 0) { waiting.splice(i, 1); expired++; reject(err('deadline', 'Queued request expired')); }
+        }, Math.max(1, deadline - now()));
+        job = { route, body, deadline, cancelled, resolve: value => { clearTimeout(timer); resolveJob(value); },
+          reject: e => { clearTimeout(timer); reject(e); }, timer };
+        waiting.push(job);
+        void drain();
+      });
+    },
+    close() { lexical.close?.(); for (const job of waiting.splice(0)) job.reject(err('closed', 'Server closed')); },
+  };
+}
+
+export function createHttpServer(service) {
+  return http.createServer(async (req, res) => {
+    const send = (code, value) => { if (!res.destroyed) { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)); } };
+    if (!/^(?:127\.0\.0\.1|localhost)(?::\d+)?$/.test(req.headers.host || '')) return send(403, { error: 'loopback_host_required' });
+    if (req.headers.origin && ![`http://127.0.0.1:${req.socket.localPort}`, `http://localhost:${req.socket.localPort}`].includes(req.headers.origin))
+      return send(403, { error: 'loopback_origin_required' });
+    if (req.method === 'GET' && req.url === '/health') return send(200, await service.refresh());
+    if (req.method !== 'POST' || !['/search', '/rerank'].includes(req.url)) return send(404, { error: 'not found' });
+    let raw = '', bytes = 0;
+    req.on('data', chunk => { bytes += chunk.length; if (bytes > 1e6) req.destroy(); else raw += chunk; });
+    req.on('end', async () => {
+      try { send(200, await service.request(req.url, JSON.parse(raw || '{}'), () => res.destroyed)); }
+      catch (e) { send(e.code === 'deadline' ? 504 : e.code === 'queue_full' || e.code === 'poisoned' ? 503 : 400,
+        { error: e.code || 'request_failed', manifest: service.capabilities() }); }
+    });
+  });
+}
+
+function cachedModel(llm, kind) {
+  const uri = llm[`${kind}ModelName`];
+  let candidates = [];
+  if (uri && !uri.startsWith('hf:')) candidates = [uri];
+  else {
+    const cache = llm.modelCacheDir;
+    try { candidates = readdirSync(cache).filter(name => name.includes(basename(uri || '')) && name.endsWith('.gguf')).map(name => join(cache, name)); } catch { /* unavailable */ }
+  }
+  for (const path of candidates) {
+    let fd;
+    try {
+      fd = openSync(path, 'r'); const header = Buffer.alloc(4); readSync(fd, header, 0, 4, 0);
+      const stat = statSync(path);
+      if (header.toString() !== 'GGUF' || !stat.isFile() || stat.size < 1024) continue;
+      let revision = 'unknown';
+      try { revision = readFileSync(join(llm.modelCacheDir, `${basename(uri)}.etag`), 'utf8').trim() || 'unknown'; } catch { /* explicitly unknown */ }
+      return { id: uri, revision: 'unknown', revision_kind: 'unknown', upstream_revision: revision,
+        cached: true, path, size_bytes: stat.size };
+    } catch { /* invalid cache entry */ } finally { if (fd !== undefined) closeSync(fd); }
+  }
+  return { id: uri || 'unknown', revision: 'unknown', revision_kind: 'unknown', cached: false };
+}
+
+async function buildRuntime({ sdkPath, dbPath, configPath, indexId = 'default', onFatal = () => {}, onJobStart = () => {} }) {
+  const requireSDK = createRequire(pathToFileURL(resolve(sdkPath)));
+  const pkg = JSON.parse(readFileSync(join(dirname(sdkPath), '..', 'package.json'), 'utf8'));
+  if (pkg.version !== PIN) throw new Error(`QMD ${PIN} required; found ${pkg.version}`);
+  const sdk = await import(pathToFileURL(resolve(sdkPath)).href);
+  const store = await sdk.createStore({ dbPath, configPath });
+  const llm = store.internal.llm;
+  const loadRuntime = llm.loadLlamaRuntime.bind(llm);
+  llm.loadLlamaRuntime = () => loadRuntime(false); // pinned SDK: no native source download/build during recall
+  const models = { embed: cachedModel(llm, 'embed'), rerank: cachedModel(llm, 'rerank') };
+  await Promise.all(Object.values(models).filter(model => model.cached).map(async model => {
+    Object.assign(model, await modelFileIdentity(model.path));
   }));
-});
-server.listen(port, '127.0.0.1', () => console.error(`claude-note recall server on 127.0.0.1:${port} (models warm in ${loadedMs} ms)`));
+  // A pinned, inspected advanced adapter. No resolveModelFile()/network calls.
+  llm.resolveModel = async uri => {
+    const entry = Object.values(models).find(model => model.id === uri);
+    if (!entry?.cached) throw err('model_cache_unavailable', 'Model must be provisioned before recall');
+    return entry.path;
+  };
+  const lexical = new ScopedLexicalWorker({ dbPath: store.dbPath, sqliteModule: requireSDK.resolve('better-sqlite3'), version: pkg.version,
+    sdkStorePath: join(dirname(sdkPath), 'store.js') });
+  const service = createRecallService({ store, llm, lexical,
+    modelAvailable: kind => models[kind]?.cached,
+    fallbackLexical: async (query, collections, limit, deadline) => (await lexical.request({ kind: 'sdk_fallback', query, collections, limit }, deadline)).rows,
+    manifest: { index: { id: indexId, db_path: store.dbPath, config_path: configPath,
+      config_revision: digest(readFileSync(configPath)) },
+      qmd: { version: pkg.version, native_runtime_policy: 'existing_prebuilt_only', sdk_revision: digest(Buffer.concat(['index.js', 'store.js', 'llm.js']
+        .map(name => readFileSync(join(dirname(sdkPath), name))))), revision_kind: 'sdk_bundle_sha256' },
+      models: Object.fromEntries(Object.entries(models).map(([kind, { path, ...model }]) => [kind, model])) },
+    onFatal, onJobStart });
+  await service.refresh(Date.now() + 3000);
+  return service;
+}
+
+if (!isMainThread && workerData?.kind === 'claude-note-runtime') {
+  buildRuntime({ ...workerData, onFatal: () => parentPort.postMessage({ fatal: true }),
+    onJobStart: request_id => parentPort.postMessage({ started: request_id }) }).then(service => {
+    const cancelled = new Set(), requests = new Set();
+    parentPort.postMessage({ ready: true, manifest: service.capabilities() });
+    parentPort.on('message', async message => {
+      if (message.cancel_id) { if (requests.has(message.cancel_id)) cancelled.add(message.cancel_id); return; }
+      requests.add(String(message.id));
+      try {
+        const result = message.route === '/health' ? await service.refresh(message.deadline)
+          : await service.request(message.route, message.body, () => cancelled.has(String(message.id)));
+        parentPort.postMessage({ id: message.id, result, manifest: service.capabilities() });
+      } catch (e) { parentPort.postMessage({ id: message.id, error: e.code || 'request_failed', manifest: service.capabilities() }); }
+      finally { cancelled.delete(String(message.id)); requests.delete(String(message.id)); }
+    });
+  }).catch(e => parentPort.postMessage({ startup_error: String(e.message || e).slice(0, 300) }));
+}
+
+// The parent event loop performs no QMD/SQLite/model calls. It can therefore
+// enforce a deadline even when a native SDK call blocks the runtime's loop.
+export function createRuntimeProxy(worker, { onFatal = () => {}, startupMs = 15000, queueLimit = 8 } = {}) {
+  const pending = new Map(), expiredJobs = new Map();
+  let serial = 0, poisoned = false, manifest = { ok: false }, refreshPromise, expired = 0, rejected = 0;
+  function poison() {
+    if (poisoned) return;
+    poisoned = true;
+    void worker.terminate();
+    for (const [id, job] of pending) { clearTimeout(job.timer); job.reject(err('poisoned', 'Runtime requires restart')); pending.delete(id); }
+    expiredJobs.clear();
+    onFatal();
+  }
+  let acceptReady, rejectReady;
+  const ready = new Promise((accept, reject) => { acceptReady = accept; rejectReady = reject; });
+  const startupTimer = setTimeout(() => { rejectReady(err('deadline', 'Runtime startup deadline')); poison(); }, startupMs);
+  worker.on('message', message => {
+    if (message.manifest) manifest = message.manifest;
+    if (message.ready) { clearTimeout(startupTimer); acceptReady(); return; }
+    if (message.startup_error) { clearTimeout(startupTimer); rejectReady(err('startup', message.startup_error)); poison(); return; }
+    if (message.fatal) { poison(); return; }
+    if (message.started) {
+      const id = Number(message.started), job = pending.get(id);
+      if (expiredJobs.has(id)) poison();
+      else if (job) job.started = true;
+      return;
+    }
+    if (expiredJobs.has(message.id)) { expiredJobs.delete(message.id); return; }
+    const job = pending.get(message.id);
+    if (!job) return;
+    clearTimeout(job.timer); pending.delete(message.id);
+    if (message.error) job.reject(err(message.error, 'Runtime request failed'));
+    else job.resolve(message.result);
+  });
+  worker.on('error', error => { clearTimeout(startupTimer); rejectReady(error); poison(); });
+  worker.on('exit', () => { clearTimeout(startupTimer); rejectReady(err('closed', 'Runtime exited')); poison(); });
+  function dispatch(route, body, deadline, fatalOnTimeout) {
+    if (poisoned) return Promise.reject(err('poisoned', 'Runtime requires restart'));
+    const id = ++serial;
+    return new Promise((resolveJob, reject) => {
+      const timer = setTimeout(() => {
+        const job = pending.get(id);
+        pending.delete(id); expired++; reject(err('deadline', 'Runtime absolute deadline expired'));
+        if (fatalOnTimeout && job?.started) poison();
+        else if (fatalOnTimeout) {
+          // Keep a bounded tombstone until the runtime acknowledges/removes the
+          // job. A late started message closes the cancellation/start race.
+          expiredJobs.set(id, job);
+          worker.postMessage({ cancel_id: String(id) });
+        }
+      }, Math.max(1, deadline - Date.now()));
+      pending.set(id, { resolve: resolveJob, reject, timer, route, started: false });
+      worker.postMessage({ id, route, body: { ...body, request_id: String(id) }, deadline });
+    });
+  }
+  const capabilities = () => ({ ...manifest, ok: Boolean(manifest.ok) && !poisoned,
+    lexical_ready: Boolean(manifest.lexical_ready) && !poisoned,
+    vector_ready: Boolean(manifest.vector_ready) && !poisoned,
+    rerank_ready: Boolean(manifest.rerank_ready) && !poisoned,
+    models: { ...manifest.models, embed: { ...manifest.models?.embed, ready: Boolean(manifest.models?.embed?.ready) && !poisoned },
+      rerank: { ...manifest.models?.rerank, ready: Boolean(manifest.models?.rerank?.ready) && !poisoned } },
+    queue: { active: [...pending.values()].some(job => job.started),
+      pending: [...pending.values()].filter(job => job.route !== '/health' && !job.started).length + expiredJobs.size,
+      limit: queueLimit, expired, rejected },
+    degradation: [...(manifest.degradation || []), ...(poisoned ? ['runtime_deadline_requires_restart'] : [])] });
+  return {
+    ready, capabilities,
+    refresh(deadline = Date.now() + 300) {
+      if (poisoned) return Promise.resolve(capabilities());
+      refreshPromise ||= dispatch('/health', {}, deadline, false).then(() => capabilities()).catch(() => capabilities()).finally(() => { refreshPromise = null; });
+      return refreshPromise;
+    },
+    request(route, body, cancelled = () => false) {
+      if (cancelled()) return Promise.reject(err('deadline', 'Disconnected request'));
+      if ([...pending.values()].filter(job => job.route !== '/health').length + expiredJobs.size >= queueLimit + 1) {
+        rejected++;
+        return Promise.reject(err('queue_full', 'Recall queue full'));
+      }
+      const deadline = Math.min(Date.now() + 8000, Number(body.deadline_at_ms) || Date.now() + 8000);
+      if (deadline <= Date.now()) return Promise.reject(err('deadline', 'Request already expired'));
+      return dispatch(route, { ...body, deadline_at_ms: deadline }, deadline, true);
+    },
+    close() {
+      clearTimeout(startupTimer); poisoned = true; void worker.terminate();
+      for (const job of pending.values()) { clearTimeout(job.timer); job.reject(err('closed', 'Runtime closed')); }
+      pending.clear(); expiredJobs.clear();
+    },
+  };
+}
+
+async function main() {
+  const [sdkPath, portArg, dbArg, ymlArg] = process.argv.slice(2);
+  if (!sdkPath) throw new Error('usage: node recall_server.mjs <qmd-sdk-index.js> [port=8182] [index-db] [index-yml]');
+  const dbPath = dbArg || join(process.env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'qmd', 'index.sqlite');
+  const configPath = ymlArg || join(process.env.QMD_CONFIG_DIR || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'qmd'), 'index.yml');
+  const worker = new Worker(new URL(import.meta.url), { workerData: { kind: 'claude-note-runtime', sdkPath, dbPath,
+    configPath, indexId: process.env.CLAUDE_NOTE_INDEX_ID || 'default' } });
+  let fatalTimer;
+  const service = createRuntimeProxy(worker, { onFatal: () => { fatalTimer ||= setTimeout(() => process.exit(75), 100); } });
+  await service.ready;
+  const server = createHttpServer(service);
+  server.requestTimeout = 10000; server.headersTimeout = 10000;
+  server.listen(Number(portArg || 8182), '127.0.0.1', () => console.error(`claude-note recall server on 127.0.0.1:${server.address().port} (QMD ${PIN}; models load from existing cache on demand)`));
+  process.once('SIGTERM', () => { service.close(); server.close(); process.exit(0); });
+}
+
+if (isMainThread && process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch(e => { console.error(String(e.message || e)); process.exitCode = 2; });
+}

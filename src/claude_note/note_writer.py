@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import config
 from . import models
+from . import mutation
 from . import provenance
 
 
@@ -293,18 +294,16 @@ def write_session_note(state: models.SessionState) -> Path:
     """
     Write session note to vault.
 
-    Uses atomic write (temp file + rename) to prevent corruption.
-    Returns the path to the written note.
+    Uses the confined writer and raises MutationConflict when review is needed.
+    Returns the path only after an applied or already-applied effect.
     """
     note_path = get_note_path(state)
-    note_path.parent.mkdir(parents=True, exist_ok=True)
     content = generate_note_content(state)
-
-    # Atomic write
-    temp_path = note_path.with_suffix(".tmp")
-    temp_path.write_text(content)
-    temp_path.rename(note_path)
-
+    result = mutation.mutate(note_path, lambda existing: content,
+                             vault_root=config.VAULT_ROOT, allow_protected=True,
+                             operation_id=mutation.operation_id('session-create', state.session_id, content))
+    if not result.applied:
+        raise mutation.MutationConflict(result)
     return note_path
 
 
@@ -312,60 +311,29 @@ def update_session_note(state: models.SessionState) -> Path:
     """
     Update existing session note or create new one.
 
-    If note exists, preserves user-edited sections while updating timeline.
+    Generated-owned notes update in place; human edits stage a review proposal.
     """
     note_path = get_note_path(state)
 
-    if not note_path.exists():
-        return write_session_note(state)
-
-    # Read existing content
-    existing = note_path.read_text()
-
-    # Parse and update only the Timeline section
-    # This preserves any manual edits to Summary, Decisions, etc.
-    lines = existing.split("\n")
-    new_lines = []
-    in_timeline = False
-    timeline_replaced = False
-
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-
-        if line.strip() == "## Timeline":
-            in_timeline = True
+    def update(existing):
+        if existing is None:
+            return generate_note_content(state)
+        lines = existing.split("\n")
+        new_lines = []
+        index = 0
+        while index < len(lines):
+            line = lines[index]
             new_lines.append(line)
-            new_lines.append("")
-            new_lines.append(format_timeline(state.events))
-            new_lines.append("")
-            i += 1
-            # Skip old timeline content until next section
-            while i < len(lines) and not lines[i].startswith("## "):
-                i += 1
-            timeline_replaced = True
-            continue
-
-        if in_timeline and line.startswith("## "):
-            in_timeline = False
-
-        new_lines.append(line)
-        i += 1
-
-    # Also update duration in header
-    new_content = "\n".join(new_lines)
-    duration = calculate_duration(state)
-
-    # Update duration line if present
-    new_content = re.sub(
-        r"\*\*Duration:\*\* .+",
-        f"**Duration:** {duration}",
-        new_content
-    )
-
-    # Atomic write
-    temp_path = note_path.with_suffix(".tmp")
-    temp_path.write_text(new_content)
-    temp_path.rename(note_path)
-
+            index += 1
+            if line.strip() == "## Timeline":
+                new_lines.extend(["", format_timeline(state.events), ""])
+                while index < len(lines) and not lines[index].startswith("## "):
+                    index += 1
+        return re.sub(r"\*\*Duration:\*\* .+", f"**Duration:** {calculate_duration(state)}",
+                      "\n".join(new_lines))
+    result = mutation.mutate(note_path, update, vault_root=config.VAULT_ROOT,
+                             allow_protected=True,
+                             operation_id=mutation.operation_id('session-timeline', state.session_id, state.events, state.last_event_ts))
+    if not result.applied:
+        raise mutation.MutationConflict(result)
     return note_path

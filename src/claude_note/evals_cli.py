@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 import webbrowser
 from pathlib import Path
@@ -61,6 +62,27 @@ def add_parser(sub) -> None:
     n = es.add_parser("nightly", help="Run the evals the same way every night; exit 3 on a regression")
     n.add_argument("--heartbeat", help="Also touch this file when the run completes (for an absence alert)")
     n.add_argument("--json", action="store_true")
+    n.add_argument("--private-probes", action="store_true", help="Explicitly include saved private-vault probes")
+    tasks = es.add_parser("tasks", help="Offline policy contracts or captured executable-task traces")
+    tasks.add_argument("--trace", help="JSON {suite,task_ids,baselines,records}; verifiers run externally")
+    tasks.add_argument("--json", action="store_true")
+    tasks.add_argument("--no-save", action="store_true")
+    agent = es.add_parser("agent-tasks", help="Plan or execute isolated synthetic coding-agent outcomes")
+    agent.add_argument("--execute", action="store_true", help="Invoke the configured model within the explicit budget")
+    agent.add_argument("--model", default="")
+    agent.add_argument("--budget-usd", type=float, default=1.0)
+    agent.add_argument("--per-attempt-usd", type=float, default=.25)
+    agent.add_argument("--timeout", type=int, default=90)
+    agent.add_argument("--split", choices=["dev", "holdout", "all"], default="dev")
+    agent.add_argument("--cases", type=int, default=4)
+    agent.add_argument("--seed", type=int, default=17)
+    agent.add_argument("--baselines", default="no_memory,static_instructions,scoped_lexical,current_hybrid,corrected_hybrid,bounded_history")
+    agent.add_argument("--embed-model", help="Absolute existing local GGUF; never downloaded by harness")
+    agent.add_argument("--rerank-model", help="Absolute existing local GGUF; never downloaded by harness")
+    agent.add_argument("--baseline-checkout", help="Read-only checkout pinned at5c1ec7e for the old hybrid baseline")
+    agent.add_argument("--prepare-retrieval", help="Write public synthetic corpora/config into an empty output directory; no indexing/model call")
+    agent.add_argument("--out", default=str(evals.EVAL_DIR / "last-agent-tasks.json"))
+    agent.add_argument("--json", action="store_true")
     d = es.add_parser("dashboard", help="Write the HTML dashboard (and open it)")
     d.add_argument("--out", default=str(evals.EVAL_DIR / "dashboard.html"))
     d.add_argument("--no-open", action="store_true")
@@ -133,7 +155,8 @@ def _print_metrics(run: dict) -> None:
         if "hit_at_k" in m:
             line.append(f"right note injected {m['hit_at_k']:.0%} (first {m['hit_at_1']:.0%}, MRR {m['mrr']:.2f})")
             line.append(f"found nothing {m['miss_rate']:.0%}")
-            line.append(f"plain search {m['baseline_hit_at_k']:.0%}")
+            line.append(f"raw search reference {m['baseline_hit_at_k']:.0%}")
+            line.append(f"scoped lexical {m.get('scoped_lexical_hit_at_k', 0):.0%}")
         if "false_injection_rate" in m:
             line.append(f"off-topic injected {m['false_injection_rate']:.0%}")
         if "p95_ms" in m:
@@ -155,6 +178,43 @@ def _latest(kind: str) -> dict | None:
 
 def main(args) -> int:
     cmd = args.eval_command
+    if cmd == "agent-tasks":
+        from . import agent_tasks
+        if args.prepare_retrieval:
+            out = agent_tasks.prepare_retrieval_fixture(Path(args.prepare_retrieval), embed_model=args.embed_model or "",
+                                                       rerank_model=args.rerank_model or "")
+            print(json.dumps(out, indent=2))
+            return 0
+        baselines = tuple(b.strip() for b in args.baselines.split(",") if b.strip())
+        cases = [c for c in agent_tasks.fixtures() if args.split == "all" or c["split"] == args.split][:args.cases]
+        if not args.execute:
+            print(json.dumps({"mode": "plan_no_model_calls", "suite": agent_tasks.SUITE, "tasks": [c["id"] for c in cases],
+                              "baselines": baselines, "scheduled_attempts": len(cases) * len(baselines),
+                              "budget_usd": args.budget_usd, "model": args.model or "required for --execute"}, indent=2))
+            return 0
+        out = run_agent_tasks(vars(args))
+        target = Path(args.out).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(out, indent=2))
+        print(json.dumps(out, indent=2) if args.json else json.dumps({"measurement": out["measurement"], "metrics": out["metrics"],
+              "model_calls": out["model_calls"], "reserved_budget_usd": out["reserved_budget_usd"], "out": str(target)}, indent=2))
+        return 0 if out.get("model_responses") else 1
+    if cmd == "tasks":
+        if args.trace:
+            payload = json.loads(Path(args.trace).expanduser().read_text())
+            out = evals.score_task_traces(payload["records"], payload["task_ids"], payload["baselines"], suite=payload["suite"])
+        else:
+            out = evals.run_policy_contracts()
+        if not args.no_save:
+            evals.EVAL_DIR.mkdir(parents=True, exist_ok=True)
+            (evals.EVAL_DIR / "last-tasks.json").write_text(json.dumps(out, indent=2))
+        if args.json:
+            print(json.dumps(out, indent=2))
+        else:
+            print(out.get("measurement") or out["verification"])
+            for baseline, metrics in out["metrics"].items():
+                print(f"{baseline}: {json.dumps(metrics, sort_keys=True)}")
+        return 0
     if cmd == "run":
         cases = _cases(args)
         if cases is None:
@@ -185,7 +245,7 @@ def main(args) -> int:
         try:
             probes = evals.build_probes(args.n, args.seed, model=args.model, settings=_settings(args),
                                         progress=lambda m: print(m, file=sys.stderr))
-        except RuntimeError as exc:
+        except (RuntimeError, ValueError) as exc:
             print(str(exc), file=sys.stderr)
             return 1
         path = evals.save_probes(probes)
@@ -202,19 +262,29 @@ def main(args) -> int:
             print("Needs probes: `claude-note eval probes` first.", file=sys.stderr)
             return 2
         probes = [json.loads(l) for l in evals.PROBES.read_text().splitlines() if l.strip()]
-        out = evals.run_answers(probes, args.n, model=args.model, judge_model=args.judge_model,
-                                progress=lambda m: print(m, file=sys.stderr))
+        try:
+            out = evals.run_answers(probes, args.n, model=args.model, judge_model=args.judge_model,
+                                    progress=lambda m: print(m, file=sys.stderr))
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
         evals.EVAL_DIR.mkdir(parents=True, exist_ok=True)
         ANSWERS_LAST.write_text(json.dumps(out, indent=1))
         with open(evals.RUNS, "a") as fh:
             fh.write(json.dumps({k: v for k, v in out.items() if k != "rows"}) + "\n")
         if args.json:
             print(json.dumps(out, indent=1))
-        elif out.get("n"):
-            print(f"{out['n']} questions · answer follows the team's note: with recall {out['with_follows']:.0%}, "
-                  f"without {out['without_follows']:.0%} · judge control {out.get('control_neither_rate', 0):.0%} 'neither'")
         else:
-            print("No question could be judged (no decision/gotcha probes in the test split, or the CLI failed).")
+            print(f"{out['attempted']} attempted · {out['judged']} judged · {out['unjudged']} unjudged")
+            if out['attempted']:
+                print(f"Across all attempted questions, answer follows the team's note: with recall {out['with_follows']:.0%}, "
+                      f"without {out['without_follows']:.0%}")
+            if out['judged'] and out['unjudged']:
+                print(f"Among judged pairs only: with recall {out['judged_with_follows']:.0%}, "
+                      f"without {out['judged_without_follows']:.0%}")
+            if out['control_attempted']:
+                print(f"Judge control: {out['control_judged']}/{out['control_attempted']} judged · "
+                      f"{out['control_neither_rate']:.0%} 'neither' across attempted controls")
         return 0
     if cmd == "report":
         last, live = _latest("retrieval"), evals.live(30)
@@ -235,7 +305,7 @@ def main(args) -> int:
     if cmd == "dashboard":
         from .evals_dashboard import render
         last, live = _latest("retrieval"), evals.live(30)
-        page = render(evals.load_runs(), last, live, _latest("answers"), evals.advice(last, live))
+        page = render(evals.trend_history(last, evals.load_runs()), last, live, _latest("answers"), evals.advice(last, live))
         out = Path(args.out).expanduser()
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(page)
@@ -245,6 +315,50 @@ def main(args) -> int:
         return 0
     print("usage: claude-note eval {run,probes,live,answers,report,dashboard}", file=sys.stderr)
     return 2
+
+
+def run_agent_tasks(options: dict) -> dict:
+    from . import agent_tasks
+    from contextlib import ExitStack, nullcontext
+    baseline_names = options.get("baselines", ",".join(agent_tasks.BASELINES))
+    baselines = tuple(b.strip() for b in baseline_names.split(",") if b.strip()) if isinstance(baseline_names, str) else tuple(baseline_names)
+    paths = [options.get(k) for k in ("embed_model", "rerank_model", "baseline_checkout")]
+    if any(paths) and not all(paths):
+        raise ValueError("embed_model, rerank_model and baseline_checkout must be provided together")
+    context = agent_tasks.isolated_hybrid_backends(embed_model=Path(paths[0]), rerank_model=Path(paths[1]), baseline_checkout=Path(paths[2])) if all(paths) else nullcontext({})
+    with ExitStack() as stack:
+        setup_error = ""
+        try:
+            retrievers = stack.enter_context(context)
+        except (RuntimeError, ValueError, OSError) as exc:
+            setup_error = f"{type(exc).__name__}: {exc}"[:300]
+            def unavailable(case):
+                return {"available": False, "reason": setup_error, "synthetic_corpus": True,
+                        "code_revision": "setup-unavailable"}
+            retrievers = {name: unavailable for name in ("current_hybrid", "corrected_hybrid")}
+        result = agent_tasks.run(model=options.get("model", ""), budget_usd=options.get("budget_usd", 1.0),
+            per_attempt_usd=options.get("per_attempt_usd", .25), timeout=options.get("timeout", 90),
+            split=options.get("split", "dev"), max_cases=options.get("cases", 4), seed=options.get("seed", 17),
+            baselines=baselines, retrievers=retrievers)
+        if setup_error:
+            result["retrieval_setup_error"] = setup_error
+        return result
+
+
+def agent_task_regressions(run: dict, history: list[dict]) -> list[str]:
+    """Compare only complete fixed-model/fixture/config identities, retaining failed attempts."""
+    from statistics import median
+    same = [old for old in history if old.get("comparable") and run.get("comparable")
+            and old.get("fingerprint") == run.get("fingerprint") and old.get("t") != run.get("t")][-3:]
+    if len(same) < 3:
+        return []
+    findings = []
+    for baseline, metrics in run["metrics"].items():
+        prior = [old["metrics"][baseline]["success_rate"] for old in same]
+        threshold = max(.10, 1 / max(1, metrics["scheduled"]))
+        if median(prior) - metrics["success_rate"] >= threshold - 1e-9:
+            findings.append(f"agent tasks {baseline}: success {metrics['success_rate']:.0%} vs prior median {median(prior):.0%} ({metrics['scheduled']} scheduled)")
+    return findings
 
 
 def _live_text(out: dict) -> str:
@@ -266,25 +380,79 @@ def nightly(args) -> int:
     evals.EVAL_DIR.mkdir(parents=True, exist_ok=True)
     status = {"t": evals._now(), "ok": False}
     try:
-        if not evals.PROBES.exists():
-            status.update(ok=True, skipped="no probe set yet: run `claude-note eval probes`")
+        from dataclasses import replace
+        from . import setup_recall
+        contracts = evals.run_policy_contracts()
+        (evals.EVAL_DIR / "last-policy-contracts.json").write_text(json.dumps(contracts, indent=2))
+        found = []
+        policy = contracts["metrics"].get("verified_policy", {})
+        if policy.get("contract_pass_rate") != 1 or policy.get("harmful_actions"):
+            found.append("offline verified-policy contract regression")
+        status["policy_contracts"] = {k: v for k, v in contracts.items() if k != "rows"}
+        agent_config = (recall_mod._load_toml().get("eval", {}) or {}).get("agent_tasks", {}) or {}
+        if recall_mod._as_bool(agent_config.get("enabled"), False):
+            # Real model calls are opt-in and require an explicit recurring budget.
+            if not agent_config.get("model") or "budget_usd" not in agent_config:
+                raise ValueError("[eval.agent_tasks] requires model and budget_usd when enabled")
+            history_path = evals.EVAL_DIR / "agent-task-runs.jsonl"
+            history = [json.loads(line) for line in history_path.read_text().splitlines() if line.strip()] if history_path.exists() else []
+            outcome = run_agent_tasks(agent_config)
+            (evals.EVAL_DIR / "last-agent-tasks.json").write_text(json.dumps(outcome, indent=2))
+            compact = {k: v for k, v in outcome.items() if k not in ("rows", "records")}
+            with history_path.open("a") as stream:
+                stream.write(json.dumps(compact) + "\n")
+            agent_findings = agent_task_regressions(outcome, history)
+            if not outcome["model_responses"]:
+                agent_findings.append("agent tasks enabled but no model response arrived; no executable outcomes")
+            if any("unavailable" in record.get("error", "") for record in outcome["records"]):
+                agent_findings.append("agent task baseline unavailable; see all-attempt denominators")
+            found += agent_findings
+            status["agent_tasks"] = {**compact, "regressions": agent_findings}
+        else:
+            status["agent_tasks"] = {"skipped": "real-model task evaluation requires explicit [eval.agent_tasks] enabled/model/budget_usd"}
+        settings = recall_mod.Settings.load()
+        public_registered = setup_recall.PUBLIC_CANARY_COLLECTION in recall_mod._collection_dirs("")
+        public_run = None
+        if public_registered:
+            capabilities = setup_recall.probe_default_server(settings)
+            status["default_server"] = capabilities
+            if not capabilities["ok"]:
+                found.append("default-server public canary/capability probe failed")
+            public = replace(settings, engine="server", index="", collections=[setup_recall.PUBLIC_CANARY_COLLECTION],
+                             memory_collections=[], log=False)
+            source = f"qmd://{setup_recall.PUBLIC_CANARY_COLLECTION}/doctor-canary.md"
+            case = evals.Case("public-payment-retry", "Why are customers charged twice when a payment request is retried?",
+                              [source], source="public-canary", expected_sources=[{"source_id": source,
+                              "revision": hashlib.sha256(setup_recall.CANARY.encode()).hexdigest()}])
+            history = evals.load_runs()
+            public_run = evals.run_retrieval([case], public, label="nightly-public")
+            evals.save_run(public_run)
+            found += evals.regressions(public_run, history)
+            status.update(set=public_run["set"], metrics=public_run["metrics"],
+                          compared_with=len(evals.comparable(public_run, history)))
+        else:
+            status["default_server"] = {"ok": False, "skipped": "public canary not registered; run setup and refresh"}
+        opt_in = getattr(args, "private_probes", False) is True or recall_mod._as_bool(
+            (recall_mod._load_toml().get("eval", {}) or {}).get("private_probes"), False)
+        if not opt_in or not evals.PROBES.exists():
+            status["skipped"] = "private probe set not enabled/present; opt in with --private-probes or [eval] private_probes=true"
         else:
             cases = evals.load_cases(evals.PROBES) + evals.load_cases(evals.FIXTURE.parent / "offtopic.jsonl")
-            settings = recall_mod.Settings.load()
             if not recall_mod.qmd_executable(settings):
                 raise RuntimeError("qmd is not installed")
             history = evals.load_runs()
-            run = evals.run_retrieval(cases, settings, label="nightly")
+            run = evals.run_retrieval(cases, settings, label="nightly-private-opt-in")
             evals.save_run(run)
-            found = evals.regressions(run, history)
+            private_findings = evals.regressions(run, history)
+            found += private_findings
             live = evals.live(30)
-            page = render(evals.load_runs(), run, live, _latest("answers"), evals.advice(run, live))
+            page = render(evals.trend_history(run, evals.load_runs()), run, live, _latest("answers"), evals.advice(run, live))
             (evals.EVAL_DIR / "dashboard.html").write_text(page)
-            status.update(ok=not found, regressions=found, set=run["set"],
-                          metrics={k: run["metrics"][k] for k in ("test", "dev", "all") if k in run["metrics"]},
-                          compared_with=len(evals.comparable(run, history)),
-                          live={k: live.get(k) for k in ("prompts", "miss_rate", "opened_rate", "p95_ms")},
-                          advice=evals.advice(run, live))
+            status["private_probes"] = {"set": run["set"], "metrics": run["metrics"],
+                                       "compared_with": len(evals.comparable(run, history)), "regressions": private_findings}
+            if public_run is None:
+                status["metrics"] = run["metrics"]
+        status.update(ok=not found, regressions=found)
     except Exception as exc:  # noqa: BLE001 - recorded, not raised: the status file is the report
         status.update(ok=False, error=f"{type(exc).__name__}: {exc}"[:300])
         evals.NIGHTLY.write_text(json.dumps(status, indent=1))
@@ -298,11 +466,11 @@ def nightly(args) -> int:
     if args.json:
         print(json.dumps(status, indent=1))
     elif status.get("skipped"):
-        print(f"nightly: {status['skipped']}")
+        print(f"nightly: policy contracts complete; {status['skipped']}"
+              + ("" if status["ok"] else " · REGRESSION: " + "; ".join(status["regressions"])))
     else:
         m = status["metrics"].get("test") or status["metrics"]["all"]
         print(f"nightly: right note injected {m.get('hit_at_k', 0):.0%} (test) · "
               f"off-topic {status['metrics']['all'].get('false_injection_rate', 0):.0%} · p95 {m.get('p95_ms')} ms"
               + ("" if status["ok"] else " · REGRESSION: " + "; ".join(status["regressions"])))
     return 0 if status["ok"] else 3
-

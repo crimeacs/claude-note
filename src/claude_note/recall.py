@@ -22,8 +22,8 @@ missed real knowledge in that system:
 * Hyphenated compounds are split: BM25 keeps "task-backed" as one literal token.
 * Session transcripts and the inbox are skipped: they dominate the index by count
   and their snippets are frontmatter.
-* Append-log notes show their *newest* managed block, labelled, because BM25
-  serves the snippet from wherever the query matched (usually the oldest text).
+* Rank and deliver the same source-versioned passage. A newer unrelated block
+  must never replace the evidence that matched the question.
 * A miss is announced, never silent. A hook that prints nothing on a miss is
   indistinguishable from one that never ran, and agents read silence as "the
   vault has nothing on this".
@@ -40,6 +40,8 @@ import hashlib
 import json
 import os
 import re
+import selectors
+import signal
 import subprocess
 import sys
 import threading
@@ -96,9 +98,16 @@ class Settings:
     search_n: int = 10
     timeout: float = 6.0          # per qmd call, wall clock (subprocess.run)
     budget: float = 8.0           # whole recall, wall clock
-    min_prompt: int = 15
+    min_prompt: int = 15          # legacy setting; meaningful short prompts remain searchable
     max_terms: int = 10
     snippet_chars: int = 260
+    context_token_budget: int = 4096  # conservative UTF-8 byte upper bound; no tokenizer dependency
+    packet_bytes: int = 8192
+    source_bytes: int = 1_000_000
+    resolve_scan_limit: int = 1000
+    repository: str = ""
+    environment: str = ""
+    audiences: list[str] = field(default_factory=lambda: ["host"])
     index: str = ""               # qmd --index name; "" = default index
     skip_paths: list[str] = field(default_factory=lambda: [
         r"/sessions/", r"/claude-session-", r"/claude-note-inbox\.md$"])
@@ -110,11 +119,11 @@ class Settings:
     server_url: str = "http://127.0.0.1:8182"
     vector: bool = True           # search the whole question by meaning
     vector_weight: float = 2.0    # weight of the meaning list against each keyword rung (RRF)
-    vector_gate: float = 0.40     # inject nothing unless the closest note by meaning scores this high
+    vector_gate: float = 0.40     # floor for semantic-only candidates; lexical evidence is independent
     rerank: bool = True           # rerank the fused top `rerank_top` with QMD's reranker
     rerank_top: int = 12
-    rerank_chars: int = 1200      # the reranker reads this much of each note (title first when clean)
-    rerank_clean: bool = True     # give the reranker "title + body without frontmatter" instead of the raw file
+    rerank_chars: int = 1200      # upper bound on the exact passage ranked and delivered
+    rerank_clean: bool = True     # retained for config compatibility; passages always exclude metadata
     rerank_blend: float = 0.0     # 0 = order by the reranker alone; >0 also keeps some of the fusion order
     rerank_command: str = ""      # optional external relevance judge
     rerank_timeout: float = 2.5
@@ -131,7 +140,11 @@ class Settings:
             s.enabled = False
         s.collections = _as_list(raw.get("collections", []))
         s.memory_collections = _as_list(raw.get("memory_collections", []))
-        for name in ("inject", "memory_slots", "search_n", "min_prompt", "max_terms", "snippet_chars"):
+        s.repository = str(raw.get("repository", "") or "")
+        s.environment = str(raw.get("environment", "") or "")
+        s.audiences = _as_list(raw.get("audiences", ["host"]))
+        for name in ("inject", "memory_slots", "search_n", "min_prompt", "max_terms", "snippet_chars",
+                     "context_token_budget", "packet_bytes", "source_bytes", "resolve_scan_limit"):
             if name in raw:
                 setattr(s, name, int(raw[name]))
         for name in ("timeout", "budget", "rerank_timeout"):
@@ -174,12 +187,12 @@ only or other our out over own please same she should so some such than that
 the their them then there these they this those through to too under until up
 us use used using very want was way we were what when where which while who
 whom why will with would you your
-lets need really maybe sure find best thing things stuff bit lot ok okay
+lets need really maybe sure find best thing things stuff bit lot ok okay thanks hello
 summarise summarize explain describe review look looking stands status
 evaluate integrate produce define assess explore create draft build wire ship
 """.split())
 
-WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
+WORD = re.compile(r"[^\W_][\w./-]*", re.UNICODE)
 PATHISH = re.compile(r"^(https?:|/|~|\.{1,2}/)|/")
 DATEISH = re.compile(r"^(?:19|20)\d\d(?:[-_/.]\d\d?(?:[-_/.]\d\d?)?)?$|^\d{1,2}[-/]\d{1,2}(?:[-/]\d{2,4})?$")
 HYPHENATED = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+")
@@ -215,8 +228,11 @@ def content_terms(text: str, max_terms: int = 10) -> list[str]:
             continue
         seen.add(lw)
         terms.append(w)
-        if len(terms) >= max_terms:
-            break
+    if len(terms) > max_terms:
+        # The decisive correction often comes last. Keep both ends rather than
+        # silently discarding every term after the first ten.
+        head = max_terms // 2
+        return terms[:head] + terms[-(max_terms - head):]
     return terms
 
 
@@ -236,8 +252,22 @@ def query_ladder(terms: list[str], first_word: str = "") -> list[list[str]]:
         keep = set(ranked[:k])
         return [t for t in terms if t in keep]
 
+    if len(terms) == 1:
+        return [terms]
     ladder = [rung for rung in (terms, top(5), top(3), top(2)) if len(rung) >= 2]
     return [r for i, r in enumerate(ladder) if i == 0 or r != ladder[i - 1]]
+
+
+def semantic_intent(prompt: str, limit: int = 2000) -> tuple[str, bool]:
+    """Raw Unicode intent, independently of lexical eligibility; disclose sampling."""
+    if len(prompt) <= limit:
+        return prompt, False
+    # Retain both the opening task and the final correction. Include identifiers
+    # from the middle rather than blindly truncating the first 2,000 characters.
+    identifiers = re.findall(r"\b(?:[A-Z][A-Z0-9_]{3,}|[\w]+[._][\w._]+)\b", prompt[:100_000] + prompt[-100_000:])
+    middle = " ".join(dict.fromkeys(identifiers))[-300:]
+    head = max(0, (limit - len(middle) - 48) // 2)
+    return (prompt[:head] + "\n[omitted middle; identifiers: " + middle + "]\n" + prompt[-head:])[:limit], True
 
 
 # --------------------------------------------------------------------------- #
@@ -258,25 +288,116 @@ def qmd_executable(settings: Settings) -> Optional[str]:
 
 
 Runner = Callable[[list[str], float], Optional[list]]
+_READ_SLOTS = threading.BoundedSemaphore(8)
+
+
+def _bounded(call, deadline: float):
+    """Bound optional filesystem/adapter work, including a misbehaving custom runner.
+
+    Abandoned reads cannot mutate the returned Result. A fixed slot count bounds
+    stranded daemon threads if an OS filesystem operation cannot be cancelled.
+    """
+    left = deadline - time.monotonic()
+    if left <= 0 or not _READ_SLOTS.acquire(blocking=False):
+        raise TimeoutError("recall deadline or read capacity exhausted")
+    done, box = threading.Event(), {}
+    def work():
+        try:
+            box["value"] = call()
+        except BaseException as exc:
+            box["error"] = exc
+        finally:
+            _READ_SLOTS.release()
+            done.set()
+    threading.Thread(target=work, daemon=True).start()
+    if not done.wait(max(0, deadline - time.monotonic())):
+        raise TimeoutError("recall absolute deadline exhausted")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
+def _process(cmd, timeout: float, payload: str = "", shell: bool = False, env=None):
+    """Kill the entire process group on expiry, with bounded captured output."""
+    if timeout <= 0:
+        raise TimeoutError("no subprocess budget remains")
+    deadline = time.monotonic() + timeout
+    proc = subprocess.Popen(cmd, shell=shell, stdin=subprocess.PIPE if payload else subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            start_new_session=(os.name == "posix"), env=env)
+    output = bytearray()
+    pending = memoryview(payload.encode())
+    stderr_bytes = 0
+    try:
+        with selectors.DefaultSelector() as selector:
+            for stream, name in ((proc.stdout, "out"), (proc.stderr, "err")):
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, name)
+            if proc.stdin:
+                os.set_blocking(proc.stdin.fileno(), False)
+                selector.register(proc.stdin, selectors.EVENT_WRITE, "in")
+            while selector.get_map():
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+                for key, _ in selector.select(left):
+                    if key.data == "in":
+                        try:
+                            written = os.write(key.fd, pending[:16384])
+                            pending = pending[written:]
+                        except BrokenPipeError:
+                            pending = pending[:0]
+                        if not pending:
+                            selector.unregister(key.fileobj)
+                            key.fileobj.close()
+                    else:
+                        data = os.read(key.fd, 65536)
+                        if not data:
+                            selector.unregister(key.fileobj)
+                            continue
+                        if key.data == "out":
+                            output.extend(data)
+                        else:
+                            stderr_bytes += len(data)
+                        if len(output) > 4_000_000 or stderr_bytes > 256_000:
+                            raise ValueError("recall adapter output exceeds bound")
+            proc.wait(timeout=max(.001, deadline - time.monotonic()))
+        return proc.returncode, output.decode("utf-8", "replace")
+    finally:
+        # Even a successful shell may have left a child running after closing
+        # its pipes. This per-call session has no work beyond this response.
+        if os.name == "posix":
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        elif proc.poll() is None:
+            proc.kill()
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream and not stream.closed:
+                stream.close()
+        try:
+            proc.wait(timeout=.2)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def _run_qmd(cmd: list[str], timeout: float) -> Optional[list]:
     """None = qmd unavailable/failed/hung; [] = ran and found nothing."""
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                              stdin=subprocess.DEVNULL)
+        returncode, output = _process(cmd, timeout)
     except Exception:
         return None
-    if proc.returncode != 0:
+    if returncode != 0:
         # qmd prints "No results found." (exit 0) on a miss; non-zero is a failure.
         return None
-    out = proc.stdout.strip()
+    out = output.strip()
     if not out:
         return []
     try:
         data = json.loads(out)
     except ValueError:
-        return []
+        return None
     if isinstance(data, dict):
         data = data.get("results", [])
     return data if isinstance(data, list) else []
@@ -287,42 +408,59 @@ def server_post(settings: "Settings", path: str, body: dict, deadline: float) ->
 
     The bound is wall clock: the request runs on a daemon thread and is abandoned at the
     deadline (a socket timeout bounds inactivity, not elapsed time)."""
-    import threading
     import urllib.request
-    box: dict = {}
-
+    import urllib.error
+    expires = time.monotonic() + max(0, deadline)
+    payload = dict(body)
+    payload["deadline_at_ms"] = min(payload.get("deadline_at_ms", float("inf")), int((time.time() + max(0, deadline)) * 1000))
+    payload.setdefault("request_id", hashlib.sha256(os.urandom(16)).hexdigest()[:24])
     def call():
+        req = urllib.request.Request(settings.server_url + path, data=json.dumps(payload).encode(),
+                                     headers={"content-type": "application/json"})
         try:
-            req = urllib.request.Request(settings.server_url + path, data=json.dumps(body).encode(),
-                                         headers={"content-type": "application/json"})
-            with urllib.request.urlopen(req, timeout=max(0.5, deadline)) as r:
-                box["data"] = json.loads(r.read().decode("utf-8", "ignore"))
-        except Exception as exc:  # noqa: BLE001 - the caller falls back
-            box["error"] = type(exc).__name__
-    t = threading.Thread(target=call, daemon=True)
-    t.start()
-    t.join(max(0.1, deadline))
-    data = box.get("data")
-    return data if (not t.is_alive() and isinstance(data, dict) and "error" not in data) else None
+            response = urllib.request.urlopen(req, timeout=max(0.001, expires - time.monotonic()))
+        except urllib.error.HTTPError as exc:
+            response = exc  # preserve structured queue/deadline/index errors
+        with response:
+            raw = response.read(4_000_001)
+            if len(raw) > 4_000_000:
+                raise ValueError("server response exceeds bound")
+            return json.loads(raw.decode("utf-8", "ignore"))
+    try:
+        data = _bounded(call, expires)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
 
 
 def server_alive(settings: "Settings", timeout: float = 0.4) -> bool:
+    return bool(server_capabilities(settings, timeout).get("ok"))
+
+
+def server_capabilities(settings: "Settings", timeout: float = 0.4) -> dict:
+    """Read-only, absolute-deadline capability receipt; never writes an index."""
     import urllib.request
+    expires = time.monotonic() + max(0, timeout)
+    def get():
+        with urllib.request.urlopen(settings.server_url + "/health", timeout=max(0.001, expires - time.monotonic())) as response:
+            return json.loads(response.read(256_000).decode())
     try:
-        with urllib.request.urlopen(settings.server_url + "/health", timeout=timeout) as r:
-            return r.status == 200
+        value = _bounded(get, expires)
+        return value if isinstance(value, dict) else {}
     except Exception:
-        return False
+        return {}
 
 
-def _title_key(t: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", (t or "").lower())
+def _source_key(item: dict) -> tuple[str, str]:
+    """Only a declared source ID AND revision establish a mirror equivalence."""
+    revision = str(item.get("revision") or item.get("hash") or "")
+    source = str(item.get("source_id") or "") if revision else ""
+    return source or str(item.get("file") or item.get("path") or ""), revision
 
 
 def fuse(lex: list[list[dict]], vec: list[dict], settings: "Settings") -> tuple[list[dict], float]:
     """Reciprocal-rank fusion of the keyword rungs and the meaning list (weight `vector_weight`),
-    within the configured collections, skipping session logs; pushed copies of one note (same
-    title) count once. Returns the fused list and the best meaning score among kept results."""
+    within configured collections. Equal titles are never identity evidence."""
     # `collections = []` means every collection. The memory collections only widen an explicit
     # list; they must never narrow "everything" down to themselves.
     cols = set(settings.collections or [])
@@ -334,100 +472,137 @@ def fuse(lex: list[list[dict]], vec: list[dict], settings: "Settings") -> tuple[
         f = h.get("file") or ""
         c = (re.match(r"qmd://([^/]+)/", f) or [None, ""])[1]
         return bool(f) and (not cols or c in cols) and not any(p.search(f) for p in skip)
-    score: dict[str, float] = {}
-    meta: dict[str, dict] = {}
+    score: dict[tuple, float] = {}
+    meta: dict[tuple, dict] = {}
     for ri, rung in enumerate(lex):
         for pos, h in enumerate(x for x in rung if keep(x)):
-            score[h["file"]] = score.get(h["file"], 0.0) + 1 / (60 + pos + 3 * ri)
-            meta[h["file"]] = h
+            key = _source_key(h)
+            score[key] = score.get(key, 0.0) + 1 / (60 + pos + 3 * ri)
+            old = meta.get(key, {})
+            meta[key] = {**h, "lexical_votes": old.get("lexical_votes", 0) + 1}
     kept_vec = [h for h in vec if keep(h)]
     for pos, h in enumerate(kept_vec):
-        score[h["file"]] = score.get(h["file"], 0.0) + settings.vector_weight / (60 + pos)
-        meta.setdefault(h["file"], h)
-    out, seen = [], set()
-    for f, _ in sorted(score.items(), key=lambda kv: -kv[1]):
-        t = _title_key(meta[f].get("title", ""))
-        if t and t in seen:
-            continue
-        seen.add(t)
-        out.append(meta[f])
-    return out, (kept_vec[0].get("score", 0.0) if kept_vec else 0.0)
+        key = _source_key(h)
+        score[key] = score.get(key, 0.0) + settings.vector_weight / (60 + pos)
+        meta.setdefault(key, dict(h))
+        meta[key]["vector_score"] = max(float(h.get("score") or 0), float(meta[key].get("vector_score") or 0))
+    out = [meta[key] for key, _ in sorted(score.items(), key=lambda kv: -kv[1])]
+    return out, max((float(h.get("score") or 0) for h in kept_vec), default=0.0)
 
 
 def _server_pool(prompt: str, ladder: list[list[str]], settings: "Settings", started: float,
                  result: "Result") -> Optional[dict]:
     left = lambda: settings.budget - (time.monotonic() - started)
+    question, query_partial = semantic_intent(prompt)
+    cols = list(dict.fromkeys(settings.collections + settings.memory_collections)) if settings.collections else []
     got = server_post(settings, "/search", {"rungs": [" ".join(r) for r in ladder],
-                                             "question": prompt[:2000] if settings.vector else ""},
+                      "question": question if settings.vector else "", "collections": cols,
+                      "index_id": settings.index or "default", "passage_chars": settings.snippet_chars,
+                      "lex_limit": settings.search_n, "vec_limit": max(settings.search_n, settings.rerank_top)},
                       min(left(), settings.timeout))
     if got is None:
         return None
+    result.manifest = got.get("manifest") or {}
+    if got.get("error"):
+        result.coverage = {"search": str(got["error"])[:80]}
+        result.reason = f"recall server unavailable ({str(got['error'])[:80]})"
+        return None
+    result.coverage = {**(got.get("coverage") or {"lexical": "unknown_legacy_server"}),
+                       "query": "sampled_head_tail_identifiers" if query_partial else "complete"}
+    if result.manifest.get("index", {}).get("id", settings.index or "default") != (settings.index or "default"):
+        result.reason = "server index identity does not match request"
+        return None
     fused, best_vec = fuse(got.get("lex") or [], got.get("vec") or [], settings)
-    if settings.vector and best_vec < settings.vector_gate:
-        result.reason = f"nothing close enough in meaning (best {best_vec:.2f} < {settings.vector_gate})"
-        return {}
-    top = fused[: max(settings.rerank_top, settings.inject)]
-    if settings.rerank and len(top) > 1 and left() > 1.0:
-        body = {"question": prompt[:2000], "files": [h["file"] for h in top], "chars": settings.rerank_chars}
-        if settings.rerank_clean:
-            body["clean"] = True
-        rr = server_post(settings, "/rerank", body, left() - 0.5)
-        scores = (rr or {}).get("scores") or {}
-        if scores:
-            fused_pos = {h["file"]: i for i, h in enumerate(top)}
-            b = settings.rerank_blend
-            # the reranker's 0..1 relevance, plus (optionally) a share of the fusion order
-            top = sorted(top, key=lambda h: -(scores.get(h["file"], 0.0) + b / (1 + fused_pos[h["file"]])))
-            result.reranked = True
+    top = []
+    query_terms = {x.casefold() for x in content_terms(prompt, 64)}
+    for h in fused:
+        text_terms = {x.casefold() for x in WORD.findall(str(h.get("title", "")) + " " + str(h.get("snippet", "")) + " " + str(h.get("scored_text", "")))}
+        lexical = h.get("lexical_votes", 0) and (h.get("lexical_evidence") or bool(query_terms & text_terms))
+        if not settings.vector or lexical or h.get("vector_score", 0) >= settings.vector_gate:
+            top.append(h)
+    if not top and fused:
+        result.reason = f"no admissible lexical evidence or close meaning (best {best_vec:.2f} < {settings.vector_gate})"
     pool: dict[str, dict] = {}
     for pos, h in enumerate(top):
         coll = (re.match(r"qmd://([^/]+)/", h["file"]) or [None, ""])[1]
-        pool[h["file"]] = {"item": {"file": h["file"], "title": h.get("title", ""), "snippet": h.get("snippet", ""),
-                                    "score": h.get("score", 0.0)},
+        pool[h["file"]] = {"item": h,
                            "votes": 1, "best": pos, "memory": coll in settings.memory_collections}
     return pool
 
 
 def _collection_dirs(index: str = "") -> dict[str, Path]:
     """Collection name -> directory, read from QMD's own config."""
-    # QMD reads ~/.config/qmd even when XDG_CONFIG_HOME points elsewhere; try both.
     name = f"{index or 'index'}.yml"
-    candidates = [Path(os.environ["XDG_CONFIG_HOME"]) / "qmd" / name] if os.environ.get("XDG_CONFIG_HOME") else []
-    candidates.append(HOME / ".config" / "qmd" / name)
+    # Explicit configuration is an isolation boundary, not a hint to fall back
+    # to the user's unrelated default index.
+    if os.environ.get("QMD_CONFIG_DIR"):
+        candidates = [Path(os.environ["QMD_CONFIG_DIR"]) / name]
+    elif os.environ.get("XDG_CONFIG_HOME"):
+        candidates = [Path(os.environ["XDG_CONFIG_HOME"]) / "qmd" / name]
+    else:
+        candidates = [HOME / ".config" / "qmd" / name]
     dirs: dict[str, Path] = {}
     text = ""
     for cfg in candidates:
         try:
-            text = cfg.read_text()
+            with cfg.open(encoding="utf-8") as fh:
+                text = fh.read(256_000)
             break
         except OSError:
             continue
+    # QMD accepts JSON as YAML. Synthetic fixtures and generated configs use
+    # that form; failing to parse it would silently lose real source anchors.
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = None
+    if isinstance(data, dict) and isinstance(data.get("collections"), dict):
+        for name, value in data["collections"].items():
+            if isinstance(value, dict) and isinstance(value.get("path"), str):
+                dirs[str(name)] = Path(value["path"]).expanduser()
+        return dirs
     for m in re.finditer(r"^  ([A-Za-z0-9_.-]+):\s*\n\s+path:\s*[\"']?([^\"'\n]+)", text, re.M):
         dirs[m.group(1)] = Path(m.group(2).strip()).expanduser()
     return dirs
 
 
-def local_path(uri: str, index: str = "") -> Optional[Path]:
+def local_path(uri: str, index: str = "", *, deadline: float = float("inf"), scan_limit: int = 1000) -> Optional[Path]:
     """The file behind a qmd:// URI, if it lives inside its collection directory."""
+    from urllib.parse import unquote, urlsplit
+    parsed = urlsplit(uri or "")
+    if parsed.query or parsed.fragment:
+        return None
     m = re.match(r"qmd://([^/]+)/(.+)$", uri or "")
     if not m:
         p = Path(uri)
-        return p if p.is_absolute() and p.is_file() else None
+        if not p.is_absolute() or not p.is_file():
+            return None
+        for root in _collection_dirs(index).values():
+            try:
+                p.resolve().relative_to(root.resolve())
+                return p.resolve()
+            except (ValueError, OSError):
+                continue
+        return None
     base = _collection_dirs(index).get(m.group(1))
     if not base:
         return None
     try:
         root = base.resolve()
-        cand = (base / m.group(2)).resolve()
+        cand = (base / unquote(m.group(2))).resolve()
         cand.relative_to(root)
     except (OSError, ValueError):
         return None
     if cand.is_file():
         return cand
     # QMD lower-cases and slugs paths in URIs; fall back to a case-insensitive match.
-    want = m.group(2).lower()
+    want = unquote(m.group(2)).lower()
     try:
-        for p in root.rglob("*.md"):
+        for i, p in enumerate(root.rglob("*.md")):
+            if i >= scan_limit or time.monotonic() >= deadline:
+                return None
+            if p.is_symlink():
+                continue
             rel = str(p.relative_to(root)).lower().replace(" ", "-")
             if rel == want:
                 return p
@@ -486,6 +661,63 @@ def body_excerpt(text: str, limit: int) -> str:
     return clean("\n".join(lines), limit)
 
 
+def select_passage(text: str, prompt: str, limit: int = 260, *, deadline: float = float("inf")) -> dict:
+    """Select a bounded matching passage with stable source offsets, never newest-by-date.
+
+    The exact cleaned text returned here is both ranked and delivered. Anchors
+    refer to the original source span, even when Markdown markers are omitted.
+    """
+    limit = max(40, min(int(limit), 4000))
+    terms = {w.casefold() for w in content_terms(prompt, 64)}
+    candidates, start, offset, current = [], 0, 0, []
+    in_frontmatter = text.startswith("---\n")
+    for line_no, line in enumerate(text.splitlines(keepends=True), 1):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("passage selection deadline")
+        begin = offset
+        offset += len(line)
+        if in_frontmatter:
+            if line_no > 1 and line.strip() == "---":
+                in_frontmatter = False
+            continue
+        if not line.strip() or line.lstrip().startswith("<!--"):
+            if current:
+                candidates.append((start, begin, "".join(current)))
+                current = []
+            continue
+        if not current:
+            start = begin
+        current.append(line)
+    if current:
+        candidates.append((start, len(text), "".join(current)))
+    windows = []
+    stride = max(20, limit * 3 // 4)
+    for begin, end, paragraph in candidates:
+        for position in range(0, max(1, len(paragraph)), stride):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("passage window deadline")
+            raw = paragraph[position:position + limit]
+            cleaned = clean(raw, limit)
+            if len(cleaned) < 40 or FRONTMATTER_ONLY.match(cleaned):
+                continue
+            words = {w.casefold() for w in content_terms(raw, 128)}
+            overlap = terms & words
+            score = sum(1 + min(len(w), 20) / 20 for w in overlap)
+            # Later *matching* evidence can contain a correction. Date/recency
+            # alone never substitutes an unrelated passage.
+            windows.append((score, begin + position, cleaned, min(end, begin + position + limit)))
+    if not windows:
+        return {}
+    score, begin, excerpt, end = max(windows, key=lambda row: (row[0], row[1]))
+    return {"text": excerpt, "anchor": {"start_char": begin, "end_char": end,
+            "start_line": text.count("\n", 0, begin) + 1, "end_line": text.count("\n", 0, end) + 1},
+            "lexical_overlap": score > 0, "lexical_score": score}
+
+
+def _passage_identity(source_id: str, revision: str, anchor: dict, text: str) -> str:
+    return hashlib.sha256(json.dumps([source_id, revision, anchor, text], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
 def note_type(text: str) -> str:
     head = text[:1500]
     if not head.lstrip().startswith("---"):
@@ -511,6 +743,13 @@ class Hit:
     fresh_label: str = ""
     path: str = ""                 # local file, when it resolves: readable without qmd
     score: float = 0.0             # the engine's own score (QMD), for fitting a floor offline
+    source_id: str = ""
+    revision: str = ""
+    revision_kind: str = ""
+    anchor: dict = field(default_factory=dict)
+    passage_id: str = ""
+    scored_text: str = ""
+    packet: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items() if v not in ("", None)}
@@ -528,14 +767,25 @@ class Result:
     candidates: list[str] = field(default_factory=list)   # usable matches before the inject cut (evals)
     engine: str = "cli"
     reranked: bool = False
+    coverage: dict = field(default_factory=dict)
+    manifest: dict = field(default_factory=dict)
+    deadline_exhausted: bool = False
+    evidence_tokens: int = 0
+    context_tokens: int = 0
+    token_count_method: str = "utf8_bytes_upper_bound"
 
     def to_dict(self) -> dict:
         return {"status": self.status, "reason": self.reason, "query": " ".join(self.query),
                 "narrowed": " ".join(self.narrowed), "pool": self.pool, "ms": self.ms,
-                "hits": [h.to_dict() for h in self.hits]}
+                "hits": [h.to_dict() for h in self.hits], "engine": self.engine,
+                "candidates": self.candidates, "reranked": self.reranked,
+                "coverage": self.coverage, "manifest": self.manifest,
+                "deadline_exhausted": self.deadline_exhausted,
+                "evidence_tokens": self.evidence_tokens, "context_tokens": self.context_tokens,
+                "token_count_method": self.token_count_method}
 
 
-def _rerank(prompt: str, hits: list[Hit], settings: Settings) -> Optional[list[Hit]]:
+def _rerank(prompt: str, hits: list[Hit], settings: Settings, deadline: float = float("inf"), result=None) -> Optional[list[Hit]]:
     """Optional external judge: JSON on stdin -> {"keep": [ids, best first]}.
 
     None means "judge unavailable, keep pool order": a judge must never be able to
@@ -543,188 +793,381 @@ def _rerank(prompt: str, hits: list[Hit], settings: Settings) -> Optional[list[H
     """
     if not settings.rerank_command or not hits:
         return None
-    payload = json.dumps({"request": prompt[:600], "candidates": [
-        {"id": f"c{i}", "title": h.title[:120], "excerpt": h.snippet[:360], "uri": h.uri}
+    if any(hit.packet.get("source_private") for hit in hits):
+        if result is not None:
+            result.coverage["external_judge"] = "private_source_denied"
+        return None
+    if any("model" not in claim.get("audiences", ["host"]) for hit in hits
+           for claim in hit.packet.get("applicability", [])):
+        if result is not None:
+            result.coverage["external_judge"] = "claim_audience_denied"
+        return None
+    payload = json.dumps({"request": semantic_intent(prompt)[0], "candidates": [
+        {"id": f"c{i}", "title": h.title[:160], "excerpt": h.scored_text or h.snippet, "uri": h.uri,
+         "passage_id": h.passage_id, "revision": h.revision, "anchor": h.anchor}
         for i, h in enumerate(hits)]})
-    box: dict = {}
-
-    def call():
-        try:
-            proc = subprocess.run(settings.rerank_command, shell=True, input=payload,
-                                  capture_output=True, text=True, timeout=settings.rerank_timeout)
-            if proc.returncode == 0:
-                box["keep"] = json.loads(proc.stdout).get("keep")
-        except Exception as exc:  # noqa: BLE001 - judge failures are optional
-            box["err"] = exc
-
-    t = threading.Thread(target=call, daemon=True)
-    t.start()
-    t.join(settings.rerank_timeout + 0.5)  # a real deadline, not a socket timeout
-    keep = box.get("keep")
-    if t.is_alive() or not isinstance(keep, list):
+    try:
+        from .egress import prepare, model_env, EgressDenied
+        prepared = _bounded(lambda: prepare(payload, audience="model", sources=[h.path or h.uri for h in hits]), deadline)
+        if prepared != payload:
+            if result is not None:
+                result.coverage["external_judge"] = "redacted_payload_requires_separate_passage"
+            return None
+        code, output = _process(settings.rerank_command,
+                                min(settings.rerank_timeout, max(0, deadline - time.monotonic())), payload, shell=True,
+                                env=model_env())
+        keep = json.loads(output).get("keep") if code == 0 else None
+    except EgressDenied:
+        if result is not None:
+            result.coverage["external_judge"] = "source_policy_denied"
+        return None
+    except Exception:
+        return None
+    if not isinstance(keep, list):
         return None
     by_id = {f"c{i}": h for i, h in enumerate(hits)}
-    return [by_id[k] for k in keep if k in by_id]
+    return [by_id[k] for k in dict.fromkeys(k for k in keep if isinstance(k, str)) if k in by_id]
 
 
 def recall(prompt: str, settings: Optional[Settings] = None, runner: Runner = _run_qmd,
-           *, prefer_types: tuple[str, ...] = (), extra_rungs: Optional[list[list[str]]] = None) -> Result:
+           *, prefer_types: tuple[str, ...] = (), extra_rungs: Optional[list[list[str]]] = None,
+           _started: Optional[float] = None) -> Result:
     """Search the index for prior knowledge about `prompt`. Never raises."""
-    settings = settings or Settings.load()
-    started = time.monotonic()
+    started = time.monotonic() if _started is None else _started
     result = Result(status="skipped")
     try:
+        settings = settings or _bounded(Settings.load, started + 8.0)
         _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs or [])
+    except TimeoutError:
+        result.deadline_exhausted = True
+        result.coverage["deadline"] = "exhausted"
+        if not result.hits:
+            result.status, result.reason = "unavailable", "recall absolute deadline exhausted"
     except Exception as exc:  # noqa: BLE001 - recall fails open
         result.status, result.reason = "unavailable", f"recall error: {type(exc).__name__}"
     result.ms = int((time.monotonic() - started) * 1000)
     return result
 
 
+def _claim_view(text: str, collection: str, settings: Settings, deadline: float) -> tuple[str, dict]:
+    """Claims require detached authority; authored status never grants trust."""
+    marker_pattern = re.compile(r"(?m)^<!-- claude-note:claim (\{[^\n]*\}) -->[^\S\n]*$")
+    markers = marker_pattern.findall(text)
+    if not markers:
+        return text, {}
+    try:
+        from .verified_claims import applicability
+        roots = _bounded(lambda: _collection_dirs(settings.index), deadline)
+        root = roots.get(collection)
+        if not root:
+            raise ValueError("claim collection root unavailable")
+        view = _bounded(lambda: applicability(text, vault_root=root, repository=settings.repository,
+                         environment=settings.environment, audiences=tuple(settings.audiences)), deadline)
+    except TimeoutError:
+        raise
+    except Exception:
+        # Preserve legacy prose, but remove machine claims we cannot validate.
+        claims = []
+        for raw in markers:
+            try:
+                claims.append(json.loads(raw))
+            except ValueError:
+                pass
+        view = {"accepted": [], "observed": [], "proposed": [],
+                "denied": [{**c, "reason_codes": ["claim_validation_unavailable"]} for c in claims]}
+    protected = {str(c.get("text") or "") for c in view.get("accepted", [])}
+    # Preserve character/line coordinates while excluding machine metadata from
+    # ordinary prose. Applicable claims are rendered separately from parsed JSON.
+    blank = lambda value: "".join("\n" if c == "\n" else " " for c in value)
+    filtered = marker_pattern.sub(lambda match: blank(match[0]), text)
+    for claim in view.get("denied", []):
+        value = str(claim.get("text") or "")
+        if value and value not in protected:
+            filtered = filtered.replace(value, blank(value))
+    return filtered, view
+
+
+def _claim_passages(text: str, view: dict, prompt: str, limit: int, deadline: float) -> list[dict]:
+    from .verified_claims import Claim
+    records = {}
+    for kind in ("accepted", "observed", "proposed"):
+        for record in view.get(kind, []):
+            try:
+                claim = Claim(**{key: record[key] for key in Claim.__dataclass_fields__ if key in record}).validate()
+                records[(claim.claim_id, claim.digest())] = record
+            except (ValueError, TypeError):
+                continue
+    out = []
+    for match in re.finditer(r"(?m)^<!-- claude-note:claim (\{[^\n]*\}) -->[^\S\n]*$", text):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("claim passage deadline")
+        try:
+            claim = Claim(**json.loads(match[1])).validate()
+            record = records.get((claim.claim_id, claim.digest()))
+        except (ValueError, TypeError):
+            continue
+        if not record:
+            continue
+        selected = select_passage(record["text"], prompt, limit, deadline=deadline)
+        if selected:
+            selected["anchor"] = {"kind": "claim_json", "claim_id": record["claim_id"],
+                                  "start_char": match.start(), "end_char": match.end(),
+                                  "start_line": text.count("\n", 0, match.start()) + 1,
+                                  "end_line": text.count("\n", 0, match.end()) + 1,
+                                  "claim_text_start_char": selected["anchor"]["start_char"],
+                                  "claim_text_end_char": selected["anchor"]["end_char"]}
+            selected["claim_record"] = record
+            out.append(selected)
+    return out
+
+
+def _prepare_hit(item: dict, c: dict, prompt: str, settings: Settings, deadline: float) -> Optional[Hit]:
+    uri = item.get("file") or item.get("path")
+    if not isinstance(uri, str) or len(uri.encode()) > 4096:
+        return None
+    collection = (re.match(r"qmd://([^/]+)/", uri) or [None, ""])[1]
+    cols = set(settings.collections) | set(settings.memory_collections)
+    if settings.collections and collection not in cols:
+        return None
+    hit = Hit(uri=uri, title=str(item.get("title") or Path(uri).stem)[:160], snippet="", collection=collection,
+              memory=c["memory"], votes=c["votes"], score=float(item.get("score") or 0.0),
+              source_id=str(item.get("source_id") or uri), revision=str(item.get("revision") or ""),
+              revision_kind=str(item.get("revision_kind") or "qmd_content_sha256"))
+    passage = {"text": item.get("scored_text") or clean(item.get("snippet", ""), settings.snippet_chars),
+               "anchor": item.get("anchor") or {}}
+    path = _bounded(lambda: local_path(uri, settings.index, deadline=deadline,
+                                      scan_limit=settings.resolve_scan_limit), deadline)
+    claims, source_private, stale_index = {}, False, False
+    if path:
+        def read():
+            with path.open("rb") as fh:
+                return fh.read(settings.source_bytes + 1)
+        raw = _bounded(read, deadline)
+        if len(raw) > settings.source_bytes:
+            return None  # partial source cannot impersonate a complete revision
+        text = raw.decode("utf-8", "replace")
+        hit.path = str(path)
+        hit.revision = hashlib.sha256(raw).hexdigest()
+        indexed_revision = str(item.get("revision") or "")
+        stale_index = bool(indexed_revision and item.get("revision_kind") in {"source_file_sha256", "indexed_body_sha256"}
+                           and indexed_revision != hit.revision)
+        hit.revision_kind = "source_file_sha256"
+        hit.type = note_type(text)
+        from .egress import external_allowed
+        source_private = not external_allowed(text)
+        filtered, claims = _claim_view(text, collection, settings, deadline)
+        limit = min(settings.snippet_chars, settings.rerank_chars)
+        ordinary = select_passage(filtered, prompt, limit, deadline=deadline)
+        passages = ([ordinary] if ordinary else []) + _claim_passages(text, claims, prompt, limit, deadline)
+        passage = max(passages, key=lambda p: (p.get("lexical_score", 0), p["anchor"].get("start_char", 0)), default={})
+        if claims and not passage.get("lexical_overlap") and float(item.get("vector_score") or 0) < settings.vector_gate:
+            return None  # JSON status/scope/provenance alone is not lexical evidence
+        if stale_index and not passage.get("lexical_overlap"):
+            return None  # an old vector score cannot admit an unrelated new version
+    elif item.get("has_machine_claims"):
+        return None  # applicability needs the actual source and detached receipts
+    elif not hit.revision:
+        # Legacy adapters offer only a snippet; retain its limitation explicitly.
+        hit.revision = hashlib.sha256(str(passage["text"]).encode()).hexdigest()
+        hit.revision_kind = "snippet_sha256"
+    if hit.type == "session" or len(passage.get("text", "")) < 40 or FRONTMATTER_ONLY.match(passage.get("text", "")):
+        return None
+    hit.snippet = hit.scored_text = str(passage["text"])
+    allowed_anchor = {"start_char", "end_char", "start_line", "end_line", "claim_text_start_char", "claim_text_end_char", "kind", "claim_id"}
+    hit.anchor = {key: value for key, value in (passage.get("anchor") or {}).items() if key in allowed_anchor and
+                  ((isinstance(value, int) and 0 <= value <= settings.source_bytes) or (isinstance(value, str) and len(value) <= 128))}
+    hit.anchor = hit.anchor or {"kind": "adapter_excerpt_unanchored"}
+    hit.passage_id = _passage_identity(hit.source_id, hit.revision, hit.anchor, hit.scored_text)
+    selected_claims = [passage["claim_record"]] if passage.get("claim_record") else [c for kind in ("accepted", "observed", "proposed") for c in claims.get(kind, [])
+                       if c.get("text") and str(c["text"]) in hit.scored_text]
+    hit.packet = {"claim": hit.scored_text, "verification": "unverified", "scope": {"collection": collection},
+                  "source_private": source_private,
+                  "index_version_changed": stale_index,
+                  "source": {"id": hit.source_id, "revision": hit.revision, "revision_kind": hit.revision_kind,
+                             "anchor": hit.anchor}, "applicability": selected_claims,
+                  "denied_claims": [{"claim_id": x.get("claim_id"), "reason_codes": x.get("reason_codes", [])}
+                                    for x in claims.get("denied", [])]}
+    if passage.get("claim_record") in claims.get("accepted", []):
+        hit.packet["verification"] = "receipt_verified_claim"
+    # Packets include detached authority/provenance, but cannot smuggle an
+    # unbounded source span or JSON metadata blob around the context budget.
+    if len(json.dumps(hit.packet, ensure_ascii=False).encode()) > max(0, settings.packet_bytes):
+        hit.packet["applicability"] = [{**{key: record.get(key) for key in
+            ("claim_id", "verification", "status", "valid_from", "valid_until", "source_revision")},
+            "scope": {key: str(value)[:160] for key, value in record.get("scope", {}).items()
+                      if key in {"repository", "environment"}},
+            "audiences": [str(value)[:40] for value in record.get("audiences", [])[:8]]}
+            for record in selected_claims[:1]]
+        hit.packet["denied_claims"] = hit.packet["denied_claims"][:8]
+        hit.packet["metadata_partial"] = True
+        if len(json.dumps(hit.packet, ensure_ascii=False).encode()) > max(0, settings.packet_bytes):
+            return None
+    return hit
+
+
+def _rank_passages(prompt: str, candidates: list[Hit], settings: Settings, result: Result, deadline: float) -> list[Hit]:
+    if result.engine != "server" or not settings.rerank or len(candidates) < 2:
+        return candidates
+    if deadline - time.monotonic() <= 0.05:
+        result.coverage["rerank"] = "deadline_skipped"
+        return candidates
+    top, tail = candidates[:settings.rerank_top], candidates[settings.rerank_top:]
+    body = {"question": semantic_intent(prompt)[0], "index_id": settings.index or "default",
+            "collections": list(dict.fromkeys(settings.collections + settings.memory_collections)) if settings.collections else [],
+            "passages": [{"file": h.uri, "source_id": h.source_id, "revision": h.revision,
+                          "passage_id": h.passage_id, "anchor": h.anchor, "title": h.title,
+                          "text": h.scored_text} for h in top]}
+    rr = _bounded(lambda: server_post(settings, "/rerank", body, max(0, deadline - time.monotonic())), deadline)
+    scores = (rr or {}).get("passage_scores") or {}
+    confirmed = set((rr or {}).get("scored_passage_ids") or [])
+    if scores and all(h.passage_id in confirmed for h in top):
+        positions = {h.passage_id: i for i, h in enumerate(top)}
+        top.sort(key=lambda h: -(float(scores.get(h.passage_id, 0)) + settings.rerank_blend / (1 + positions[h.passage_id])))
+        result.reranked = True
+        result.coverage["rerank"] = "exact_passage"
+    else:
+        result.coverage["rerank"] = "unavailable_or_unverified_passage"
+    return top + tail
+
+
 def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs):
+    deadline = started + max(0, settings.budget)
     if not settings.enabled:
         result.reason = "recall disabled"
         return
-    prompt = (prompt or "").strip()
+    prompt = prompt or ""
+    raw_partial = len(prompt) > 200_000
+    if raw_partial:
+        prompt = prompt[:100_000] + "\n[omitted source middle]\n" + prompt[-100_000:]
+    prompt = prompt.strip()
     if AUTOMATED_EVENT.search(prompt):
         result.reason = "automated event"
         return
     prompt = WRAPPER_TAG.sub(" ", prompt).strip()
-    if len(prompt) < settings.min_prompt or prompt.startswith("/"):
+    if not prompt or re.match(r"^/[A-Za-z][\w-]*(?:\s|$)", prompt):
         result.reason = "prompt too short or a slash command"
         return
-    terms = content_terms(prompt, settings.max_terms)
-    if len(terms) < 2 and not extra_rungs:
-        result.reason = "fewer than two content words"
+    # Bound lexical CPU as well as semantic input. Huge wrappers cannot consume
+    # the entire hook budget before the first deadline check.
+    terms = _bounded(lambda: content_terms(prompt, max(1, settings.max_terms)), deadline)
+    meaningful = any(w.casefold() not in STOPWORDS and not DATEISH.match(w)
+                     for w in WORD.findall(prompt))
+    if not terms and not extra_rungs and not meaningful:
+        result.reason = "no lexical or semantic intent"
         return
     first = (WORD.findall(prompt) or [""])[0]
-    ladder = query_ladder(terms, first) if len(terms) >= 2 else []
-    # Callers may add rungs, e.g. single error identifiers, which are specific alone.
+    ladder = query_ladder(terms, first)
     ladder += [r for r in extra_rungs if r and r not in ladder]
-    if not ladder:
-        result.reason = "nothing searchable"
-        return
-    result.query, result.narrowed = ladder[0], ladder[-1]
-
-    exe = qmd_executable(settings)
-    if not exe:
-        result.status, result.reason = "unavailable", "qmd is not installed"
-        return
-    base = [exe] + (["--index", settings.index] if settings.index else [])
-    scopes: list[tuple[Optional[str], bool]] = [(c, False) for c in settings.collections] or [(None, False)]
-    scopes += [(c, True) for c in settings.memory_collections]
-
-    pool: dict[str, dict] = {}
-    ran = False
-    # The warm server searches the default index only. In auto mode a request for another index
-    # (doctor's throwaway canary, an eval fixture) goes to the CLI, which honours --index.
+    result.query = ladder[0] if ladder else ["[semantic-only]"]
+    result.narrowed = ladder[-1] if ladder else []
+    result.coverage = {"local_resolution": "bounded", "lexical": "not_run"}
+    if raw_partial:
+        result.coverage["raw_prompt"] = "sampled_head_tail"
+    pool, ran = {}, False
     use_server = settings.engine == "server" or (settings.engine == "auto" and not settings.index)
     if use_server and not extra_rungs:
-        got = _server_pool(prompt, ladder, settings, started, result)
+        server_result = Result(status="skipped")
+        got = _bounded(lambda: _server_pool(prompt, ladder, settings, started, server_result), deadline)
+        result.manifest, result.coverage = server_result.manifest, server_result.coverage or result.coverage
+        if raw_partial:
+            result.coverage["raw_prompt"] = "sampled_head_tail"
+        result.reason = server_result.reason
         if got is not None:
-            pool, ran = got, True
-            result.engine = "server"
+            pool, ran, result.engine = got, True, "server"
         elif settings.engine == "server":
-            result.status, result.reason = "unavailable", "the recall server did not answer"
+            result.status, result.reason = "unavailable", result.reason or "the recall server did not answer"
             return
-    for scope, is_memory in ([] if ran else scopes):
-        for rung_i, rung in enumerate(ladder):
-            if time.monotonic() - started > settings.budget:
-                break
-            cmd = base + ["search", " ".join(rung), "-n", str(settings.search_n), "--json"]
-            if scope:
-                cmd += ["-c", scope]
-            got = runner(cmd, settings.timeout)
-            if got is None:
-                continue
-            ran = True
-            for pos, item in enumerate(got):
-                if not isinstance(item, dict):
-                    continue
-                uri = item.get("file") or item.get("path")
-                if not isinstance(uri, str) or not uri:
-                    continue
-                c = pool.setdefault(uri, {"item": item, "votes": 0, "best": 1e9, "memory": False})
-                c["votes"] += 1
-                c["best"] = min(c["best"], pos + 3 * rung_i)
-                c["memory"] = c["memory"] or is_memory
-    if not pool and ran and settings.single_term_fallback:
-        # Every rung asked for all its words. One mis-guessed word ("generated" for a note that
-        # says "minted") still zeroes the narrowest rung, so try its two words one at a time.
-        for rung_i, word in enumerate(ladder[-1][:2], start=len(ladder)):
-            if time.monotonic() - started > settings.budget:
-                break
-            for scope, is_memory in scopes:
-                cmd = base + ["search", word, "-n", str(settings.search_n), "--json"]
+    if not ran:
+        exe = _bounded(lambda: qmd_executable(settings), deadline)
+        if not exe:
+            result.status, result.reason = "unavailable", "qmd is not installed"
+            return
+        base = [exe] + (["--index", settings.index] if settings.index else [])
+        scopes = [(c, c in settings.memory_collections) for c in dict.fromkeys(settings.collections + settings.memory_collections)] if settings.collections else [(None, False)] + [(c, True) for c in settings.memory_collections]
+        cli_rungs = list(ladder)
+        if settings.single_term_fallback and ladder:
+            cli_rungs += [[word] for word in ladder[-1][:2] if [word] not in cli_rungs]
+        result.coverage.update(lexical="partial_scoped_cli_sdk_overfetch" if settings.collections or settings.memory_collections
+                               else "cli_topk", semantic="unavailable_cli")
+        for scope, is_memory in scopes:
+            for rung_i, rung in enumerate(cli_rungs):
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    result.deadline_exhausted = True
+                    break
+                cmd = base + ["search", " ".join(rung), "-n", str(settings.search_n), "--json"]
                 if scope:
                     cmd += ["-c", scope]
-                for pos, item in enumerate(runner(cmd, settings.timeout) or []):
-                    uri = isinstance(item, dict) and (item.get("file") or item.get("path"))
-                    if isinstance(uri, str) and uri:
-                        c = pool.setdefault(uri, {"item": item, "votes": 0, "best": 1e9, "memory": False})
-                        c["votes"] += 1
-                        c["best"] = min(c["best"], pos + 3 * rung_i)
-                        c["memory"] = c["memory"] or is_memory
+                got = _bounded(lambda cmd=cmd, left=left: runner(cmd, min(settings.timeout, left)), deadline)
+                if got is None:
+                    continue
+                ran = True
+                for pos, item in enumerate(got[:max(1, settings.search_n)]):
+                    if not isinstance(item, dict):
+                        continue
+                    uri = item.get("file") or item.get("path")
+                    if not isinstance(uri, str) or not uri:
+                        continue
+                    c = pool.setdefault(uri, {"item": item, "votes": 0, "best": 1e9, "memory": False})
+                    c["votes"] += 1
+                    c["best"] = min(c["best"], pos + 3 * rung_i)
+                    c["memory"] |= is_memory
     if not ran:
         result.status, result.reason = "unavailable", "qmd failed, hung, or its index was locked"
         return
     result.pool = len(pool)
     if not pool:
-        result.status, result.reason = "miss", result.reason or "no keyword match on any rung of the query"
+        result.status, result.reason = "miss", result.reason or "no keyword or semantic match"
         return
-
     skip = [re.compile(p) for p in settings.skip_paths]
-    ordered = sorted(pool.values(), key=lambda c: (-c["votes"], c["best"]))
-    candidates: list[Hit] = []
-    for c in ordered:
-        item, uri = c["item"], c["item"].get("file") or c["item"].get("path")
-        if any(p.search(uri) for p in skip):
+    candidates = []
+    for c in sorted(pool.values(), key=lambda x: (-x["votes"], x["best"])):
+        item = c["item"]
+        uri = item.get("file") or item.get("path")
+        if not isinstance(uri, str) or any(p.search(uri) for p in skip):
             continue
-        body = clean(item.get("snippet", ""), settings.snippet_chars)
-        hit = Hit(uri=uri, title=str(item.get("title") or Path(uri).stem), snippet=body,
-                  collection=(re.match(r"qmd://([^/]+)/", uri) or [None, ""])[1],
-                  memory=c["memory"], votes=c["votes"], score=float(item.get("score") or 0.0))
-        path = local_path(uri, settings.index)
-        if path:
-            hit.path = str(path)
-            try:
-                text = path.read_text(encoding="utf-8", errors="ignore")
-                hit.type = note_type(text)
-                fresh = freshest_block(text, settings.snippet_chars)
-                if fresh:
-                    hit.fresh_label, hit.snippet = fresh
-                elif len(hit.snippet) < 40:
-                    # The match was in the frontmatter or a heading; show the prose.
-                    hit.snippet = body_excerpt(text, settings.snippet_chars)
-            except OSError:
-                pass
-        if hit.type == "session":
-            continue
-        if len(hit.snippet) < 40 or FRONTMATTER_ONLY.match(hit.snippet):
-            continue
-        candidates.append(hit)
+        try:
+            hit = _prepare_hit(item, c, prompt, settings, deadline)
+        except TimeoutError:
+            result.deadline_exhausted = True
+            break
+        if hit:
+            candidates.append(hit)
         if len(candidates) >= 16:
             break
     if prefer_types:
-        candidates.sort(key=lambda h: h.type not in prefer_types)  # stable: keeps vote order
+        candidates.sort(key=lambda h: h.type not in prefer_types)
     result.candidates = [h.path or h.uri for h in candidates]
-
-    judged = _rerank(prompt, candidates, settings)
-    if judged is not None:
-        if not judged:
-            result.status, result.reason = "miss", "candidates were found but the relevance judge kept none"
-            return
-        candidates = judged
-
-    # Reserve slots for hand-written memories: short, so BM25 under-ranks them,
-    # and the highest-signal entries in the index.
-    memories = [h for h in candidates if h.memory][: settings.memory_slots]
-    rest = [h for h in candidates if h not in memories]
-    picked = (memories + rest)[: settings.inject] if memories else rest[: settings.inject]
-    if not picked:
-        result.status, result.reason = "miss", "matches were all session records or bare frontmatter"
+    try:
+        candidates = _rank_passages(prompt, candidates, settings, result, deadline)
+        # The external judge sees these same anchored texts, not another prefix.
+        judge_result = Result(status="skipped")
+        judged = _bounded(lambda: _rerank(prompt, candidates, settings, deadline, judge_result), deadline) if settings.rerank_command else None
+        result.coverage.update(judge_result.coverage)
+        if judged is not None:
+            candidates = judged
+    except TimeoutError:
+        result.deadline_exhausted = True
+    if not candidates:
+        result.status, result.reason = "miss", "no eligible evidence passages"
         return
-    result.status, result.hits = "hit", picked
+    result.candidates = [h.path or h.uri for h in candidates]
+    memories = [h for h in candidates if h.memory][:max(0, settings.memory_slots)]
+    ordered = memories + [h for h in candidates if h not in memories]
+    result.status, result.hits = "hit", []
+    for hit in ordered:
+        if len(result.hits) >= max(0, settings.inject):
+            break
+        result.hits.append(hit)
+        # A UTF-8 byte count is a conservative token upper bound, including the
+        # rendered instructions, source anchors and evidence labels.
+        if len(format_context(result).encode()) > max(0, settings.context_token_budget):
+            result.hits.pop()
+            result.coverage["context"] = "token_budget_limited"
+    if not result.hits:
+        result.status, result.reason = "miss", "evidence exceeds configured context token budget"
+    result.evidence_tokens = sum(len(h.scored_text.encode()) for h in result.hits)
+    result.context_tokens = len(format_context(result).encode()) if result.hits else 0
 
 
 # --------------------------------------------------------------------------- #
@@ -735,7 +1178,7 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
 def format_context(result: Result) -> str:
     if result.status == "hit":
         lines = [
-            "claude-note recall: possibly relevant prior knowledge (keyword matches, NOT verified answers).",
+            "claude-note recall: source-linked evidence; legacy prose and proposals are UNVERIFIED leads.",
             "Open a note before relying on it (read the file shown), check that it still applies, then act.",
             "If none fit, this lookup missed; it does not mean nothing is known. Search yourself with",
             "other words (`claude-note recall \"<content words>\"` or `qmd vsearch \"<question>\"`).",
@@ -744,7 +1187,11 @@ def format_context(result: Result) -> str:
         for h in result.hits:
             meta = ", ".join(x for x in (h.type, "memory" if h.memory else "") if x)
             lines.append(f"- {h.title}" + (f" ({meta})" if meta else "") + f"  [{h.path or h.uri}]")
+            anchor = f"lines {h.anchor.get('start_line')}–{h.anchor.get('end_line')}" if h.anchor.get("start_line") else "unanchored adapter excerpt"
+            lines.append(f"    Evidence: {h.packet.get('verification', 'unverified')}; {anchor}; revision {h.revision[:16]} ({h.revision_kind}).")
             lines.append(f"    {(h.fresh_label + ' ') if h.fresh_label else ''}{h.snippet}")
+        if result.coverage.get("partial") or any("partial" in str(v) for v in result.coverage.values()):
+            lines.append("Coverage is partial; missing candidates are not evidence that nothing is known.")
         lines += ["", "If this task teaches something durable, write it back: "
                       "`claude-note remember --type gotcha \"<what broke, why, the fix>\"`."]
         return "\n".join(lines)
@@ -771,6 +1218,7 @@ def format_terminal(result: Result) -> str:
         tag = f"[{h.type}]" if h.type else ""
         out.append(f"{i}. {h.title} {tag}{'  memory' if h.memory else ''}")
         out.append(f"   {h.path or h.uri}")
+        out.append(f"   Evidence: {h.packet.get('verification', 'unverified')}; revision {h.revision[:16]} ({h.revision_kind or 'unknown'})")
         if h.fresh_label:
             out.append(f"   {h.fresh_label}")
         out.append(f"   {h.snippet}")
@@ -883,13 +1331,26 @@ def hook_main(stdin=None) -> int:
     except Exception:
         return 0
     event = payload.get("hook_event_name") or "UserPromptSubmit"
-    settings = Settings.load()
-    result = recall(payload.get("prompt") or "", settings)
+    started = time.monotonic()
+    try:
+        settings = _bounded(Settings.load, started + 8.0)
+    except Exception:
+        emit(event, format_context(Result(status="unavailable", reason="configuration unavailable within hook deadline")))
+        return 0
+    deadline = started + settings.budget
+    result = recall(payload.get("prompt") or "", settings, _started=started)
     if settings.log and result.status != "skipped":
         # Session and file paths let `eval live` check whether the agent opened what it was shown.
-        log_event("prompt", result, {"session": payload.get("session_id") or "",
-                                     "transcript": payload.get("transcript_path") or "",
-                                     "paths": [h.path for h in result.hits if h.path]})
-    warning = memory_md_warning(payload.get("cwd") or "")
+        try:
+            _bounded(lambda: log_event("prompt", result, {"session": payload.get("session_id") or "",
+                     "transcript": payload.get("transcript_path") or "", "paths": [h.path for h in result.hits if h.path]}), deadline)
+        except TimeoutError:
+            pass
+    try:
+        warning = _bounded(lambda: memory_md_warning(payload.get("cwd") or ""), deadline)
+    except TimeoutError:
+        warning = ""
+    if len((warning + format_context(result)).encode()) > settings.context_token_budget:
+        warning = ""
     emit(event, warning + format_context(result))
     return 0

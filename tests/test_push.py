@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 os.environ.setdefault("CLAUDE_NOTE_VAULT_ROOT", tempfile.mkdtemp())
 
@@ -54,6 +55,9 @@ class RedactTests(unittest.TestCase):
 
 class PushTests(unittest.TestCase):
     def setUp(self):
+        policy = mock.patch.object(push.egress, "policy", return_value={"default": ["local", "host", "staging"]})
+        policy.start()
+        self.addCleanup(policy.stop)
         self.vault = Path(tempfile.mkdtemp())
         tmp = Path(tempfile.mkdtemp())
         push.STATE_FILE = tmp / "state.json"
@@ -84,7 +88,7 @@ class PushTests(unittest.TestCase):
         sent = {c[2]["source_path"]: c for c in client.calls}
         self.assertNotIn(AWS, sent["pattern-a.md"][1])
         meta = sent["pattern-a.md"][2]
-        self.assertEqual(set(meta), {"source", "author", "assistant", "laptop", "source_path", "content_sha256", "note_type", "redactions"})
+        self.assertEqual(set(meta), {"source", "author", "assistant", "laptop", "source_path", "content_sha256", "note_type", "redactions", "operation_id"})
         self.assertEqual((meta["source"], meta["note_type"], meta["redactions"]), ("claude-note", "pattern", 1))
 
         # Second run: nothing changed, so no request at all.

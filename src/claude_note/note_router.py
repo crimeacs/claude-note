@@ -7,9 +7,7 @@ Applies note operations from KnowledgePack to the vault.
 import hashlib
 import json
 import logging
-import os
 import re
-import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -18,6 +16,7 @@ from . import managed_blocks
 from . import knowledge_pack
 from . import qmd_search
 from . import provenance
+from . import mutation
 
 
 NOTE_TYPES = knowledge_pack.NOTE_TYPES
@@ -44,187 +43,67 @@ def with_type(fm: dict) -> dict:
 
 
 def resolve_note_path(path: str, vault_root: Path) -> Path:
-    """Resolve an untrusted Markdown route within the vault's knowledge area.
-
-    A model route must never reach outside the vault or mutate its settings,
-    templates, capture logs, or agent instructions.
-    """
-    if not isinstance(path, str) or not path.strip():
-        raise ValueError("Note path must be a non-empty relative Markdown path")
-    if path != path.strip() or "\\" in path or ":" in path or any(ord(c) < 32 for c in path):
-        raise ValueError(f"Invalid note path: {path!r}")
-    candidate = Path(path)
-    if candidate.is_absolute() or any(p in (".", "..") or p.startswith(".") for p in path.split("/")):
-        raise ValueError(f"Note path must stay inside the vault: {path!r}")
-    if not candidate.suffix:
-        candidate = candidate.with_suffix(".md")
-    elif candidate.suffix.lower() != ".md":
-        raise ValueError(f"Note path must use the .md extension: {path!r}")
-    legacy_session = re.fullmatch(r"claude-session-\d{4}-\d{2}-\d{2}-.+\.md", candidate.name, re.IGNORECASE)
-    if (candidate.parts[0].lower() in ("templates", "sessions")
-            or candidate.name.lower() in ("claude.md", "agents.md") or legacy_session):
-        raise ValueError(f"Note path targets a protected vault file: {path!r}")
-    root = Path(vault_root).resolve()
-    target = root / candidate
-    if not target.resolve().is_relative_to(root):
-        raise ValueError(f"Note path escapes the vault: {path!r}")
-    for part in (target, *target.parents):
-        if part == root:
-            break
-        if part.is_symlink():
-            raise ValueError(f"Note path traverses a symlink: {path!r}")
-    return target
+    return mutation.resolve_note_path(path, vault_root)
 
 
 def _format_frontmatter(fm: dict) -> str:
-    """Format frontmatter dict as YAML."""
-    lines = ["---"]
-
-    for key, value in fm.items():
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", key):
-            raise ValueError(f"Invalid frontmatter key: {key!r}")
-        if isinstance(value, list):
-            lines.append(f"{key}:")
-            for item in value:
-                lines.append(f"  - {json.dumps(str(item), ensure_ascii=False)}")
-        elif isinstance(value, bool):
-            lines.append(f"{key}: {'true' if value else 'false'}")
-        elif isinstance(value, (int, float)):
-            lines.append(f"{key}: {value}")
-        else:
-            # JSON strings are YAML-compatible and safely quote newlines,
-            # colons, quotes and values YAML would otherwise coerce.
-            lines.append(f"{key}: {json.dumps(str(value), ensure_ascii=False)}")
-
-    lines.append("---")
-    return "\n".join(lines)
+    return mutation.serialize_frontmatter(fm)
 
 
-def create_note(
-    path: str,
-    frontmatter: dict,
-    body_markdown: str,
-    vault_root: Path = None,
-) -> Path:
-    """
-    Create a new note in the vault.
+def create_note(path: str, frontmatter: dict, body_markdown: str, vault_root: Path = None) -> Path:
+    vault_root = vault_root or config.VAULT_ROOT
+    target = resolve_note_path(path, vault_root)
+    content = f"{_format_frontmatter(with_type(frontmatter))}\n\n{body_markdown}"
+    return mutation.create_note(target, content, vault_root=vault_root).path
 
-    Args:
-        path: Note filename (e.g., "my-note.md")
-        frontmatter: Frontmatter dict
-        body_markdown: Body content
-        vault_root: Override vault root
 
-    Returns:
-        Path to created note
-
-    Raises:
-        FileExistsError: If note already exists
-    """
-    if vault_root is None:
-        vault_root = config.VAULT_ROOT
-
-    note_path = resolve_note_path(path, vault_root)
-
-    if note_path.exists():
-        raise FileExistsError(f"Note already exists: {note_path}")
-
-    # Build content
-    fm_str = _format_frontmatter(with_type(frontmatter))
-    content = f"{fm_str}\n\n{body_markdown}"
-
-    note_path.parent.mkdir(parents=True, exist_ok=True)
-    # Use a private temporary file and an exclusive link: concurrent creates
-    # must never overwrite an existing, potentially human-edited note.
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=note_path.parent,
-                                     prefix=".claude-note-", delete=False) as temp:
-        temp_path = Path(temp.name)
-        temp.write(content)
+def _apply_note_op_result(op, vault_root=None, session_id=None, assistant=''):
+    vault_root = vault_root or config.VAULT_ROOT
     try:
-        os.link(temp_path, note_path)
-    finally:
-        temp_path.unlink(missing_ok=True)
-
-    return note_path
+        target = resolve_note_path(op.path, vault_root)
+    except ValueError as exc:
+        logger.warning("Rejected note operation: %s", exc)
+        return None
+    if op.managed_block_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", op.managed_block_id):
+        logger.warning("Rejected invalid managed block ID: %r", op.managed_block_id)
+        return None
+    expected = getattr(op, 'expected_revision', None)
+    if op.op == 'create':
+        block_id = op.managed_block_id or 'synth-' + hashlib.sha256((session_id or op.body_markdown).encode()).hexdigest()[:32]
+        identity = getattr(op, 'operation_id', '') or mutation.operation_id('create', session_id, target.name, block_id, op.body_markdown)
+        if not target.exists():
+            frontmatter = provenance.stamp(with_type(op.frontmatter or {'tags': ['claude-note']}), assistant)
+            block = f"{managed_blocks._make_start_marker(block_id)}\n{op.body_markdown}\n{managed_blocks._make_end_marker(block_id)}"
+            content = f"{_format_frontmatter(frontmatter)}\n\n{block}"
+            try:
+                return mutation.create_note(target, content, vault_root=vault_root, operation_id=identity)
+            except FileExistsError:
+                pass  # Another writer won the exclusive create; inspect under its lock.
+        return managed_blocks.write_managed_block_result(target, block_id, op.body_markdown, True,
+                    vault_root=vault_root, expected_revision=expected, operation_id=identity)
+    if op.op == 'upsert_block':
+        if not target.exists(): return None
+        return managed_blocks.write_managed_block_result(target, op.managed_block_id or 'synth',
+                    op.body_markdown, True, vault_root=vault_root, expected_revision=expected,
+                    operation_id=getattr(op, 'operation_id', '') or None)
+    if op.op == 'append':
+        if not target.exists(): return None
+        section = op.section or '## Synthesized'
+        identity = getattr(op, 'operation_id', '') or mutation.operation_id('append', session_id, target.relative_to(Path(vault_root).resolve()).as_posix(), section, op.body_markdown)
+        block_id = 'append-' + identity[:48]
+        content = f"{managed_blocks._make_start_marker(block_id)}\n{op.body_markdown}\n{managed_blocks._make_end_marker(block_id)}"
+        return managed_blocks.append_to_section_result(target, section, content, True,
+                                                       vault_root=vault_root, operation_id=identity)
+    return None
 
 
 def apply_note_op(op: knowledge_pack.NoteOp, vault_root: Path = None, session_id: str = None,
-                  assistant: str = "") -> bool:
-    """
-    Apply a single note operation.
-
-    Args:
-        op: NoteOp object
-        vault_root: Override vault root
-        session_id: Session ID for auto-generating block IDs
-        assistant: Which assistant the session came from (stamped on new notes)
-
-    Returns:
-        True if operation succeeded
-    """
-    if vault_root is None:
-        vault_root = config.VAULT_ROOT
-
-    try:
-        note_path = resolve_note_path(op.path, vault_root)
-    except ValueError as exc:
-        logger.warning("Rejected note operation: %s", exc)
-        return False
-    if op.managed_block_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", op.managed_block_id):
-        logger.warning("Rejected invalid managed block ID: %r", op.managed_block_id)
-        return False
-
-    if op.op == "create":
-        block_id = op.managed_block_id
-        if not block_id:
-            identity = session_id or op.body_markdown
-            block_id = "synth-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
-        if note_path.exists():
-            # Note exists - use managed block for clean updates
-            return managed_blocks.write_managed_block(
-                note_path,
-                block_id,
-                op.body_markdown,
-                create_if_missing=True,
-            )
-
-        frontmatter = provenance.stamp(with_type(op.frontmatter or {"tags": ["claude-note"]}), assistant)
-        content = (managed_blocks._make_start_marker(block_id) + "\n" + op.body_markdown
-                   + "\n" + managed_blocks._make_end_marker(block_id))
-        create_note(op.path, frontmatter, content, vault_root)
-        return True
-
-    elif op.op == "upsert_block":
-        if not note_path.exists():
-            return False
-
-        block_id = op.managed_block_id or "synth"
-        return managed_blocks.write_managed_block(
-            note_path,
-            block_id,
-            op.body_markdown,
-            create_if_missing=True,
-        )
-
-    elif op.op == "append":
-        if not note_path.exists():
-            return False
-
-        section = op.section or "## Synthesized"
-        identity = json.dumps([session_id or "", op.path, section, op.body_markdown], ensure_ascii=False)
-        block_id = "append-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
-        if managed_blocks.read_managed_block(note_path, block_id) is not None:
-            return True
-        content = (managed_blocks._make_start_marker(block_id) + "\n" + op.body_markdown
-                   + "\n" + managed_blocks._make_end_marker(block_id))
-        return managed_blocks.append_to_section(
-            note_path,
-            section,
-            content,
-            create_section=True,
-        )
-
-    return False
+                  assistant: str = '') -> bool:
+    """Legacy boolean API: staged proposals are NOT reported as applied writes."""
+    result = _apply_note_op_result(op, vault_root, session_id, assistant)
+    if result is not None and not result.applied:
+        logger.warning("Note operation staged: %s (%s)", result.staged_path, result.reason)
+    return result is not None and result.applied
 
 
 def _enhance_concept_links(pack: knowledge_pack.KnowledgePack, min_score: float = 0.4) -> None:
@@ -300,9 +179,13 @@ def _enhance_concept_links(pack: knowledge_pack.KnowledgePack, min_score: float 
 
 def _extraction_fingerprint(pack: knowledge_pack.KnowledgePack) -> str:
     """Identify exact extraction content, never merely a similar subject."""
+    if pack.generation and pack.source_revision:
+        return mutation.operation_id('extraction-generation', pack.session_id, pack.generation, pack.source_revision)
     content = pack.to_dict()
     for key in ("session_id", "date", "time", "title", "assistant"):
         content.pop(key, None)
+    for concept in content.get('concepts', []):
+        concept.pop('links_suggested', None)  # post-extraction routing enrichment
     payload = json.dumps(content, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -390,37 +273,13 @@ def format_inbox_entry(pack: knowledge_pack.KnowledgePack) -> str:
     return "\n".join(lines)
 
 
-def append_to_inbox(pack: knowledge_pack.KnowledgePack, inbox_path: Path = None, skip_dedup: bool = False) -> Optional[Path]:
-    """
-    Append a KnowledgePack to the inbox file.
-
-    Creates the inbox if it doesn't exist.
-    Skips append only when the exact extracted content was already captured.
-    Related topics and corrections remain independent evidence.
-
-    Args:
-        pack: KnowledgePack object
-        inbox_path: Override inbox path
-        skip_dedup: If True, skip deduplication check
-
-    Returns:
-        Path to inbox file, or None if skipped due to duplicate
-    """
-    if inbox_path is None:
-        inbox_path = config.INBOX_PATH
-
-    # Check for duplicates if enabled
-    if not skip_dedup and config.INBOX_DEDUP_ENABLED:
-        marker = f"<!-- claude-note:extraction:{_extraction_fingerprint(pack)} -->"
-        if inbox_path.exists() and marker in inbox_path.read_text(encoding="utf-8"):
-            logger.info("Skipping exact duplicate inbox extraction: %s", pack.title)
-            return None
-
+def append_to_inbox(pack: knowledge_pack.KnowledgePack, inbox_path: Path = None,
+                    skip_dedup: bool = False, *, vault_root: Path = None) -> Optional[Path]:
+    inbox_path = inbox_path or config.INBOX_PATH
+    vault_root = vault_root or config.VAULT_ROOT
+    marker = f"<!-- claude-note:extraction:{_extraction_fingerprint(pack)} -->"
     entry = format_inbox_entry(pack)
-
-    if not inbox_path.exists():
-        # Create new inbox
-        header = """---
+    header = """---
 type: meta
 tags:
   - log
@@ -435,43 +294,26 @@ Synthesized knowledge from Claude sessions. Review and promote to permanent note
 ---
 
 """
-        inbox_path.write_text(header + entry, encoding="utf-8")
-    else:
-        # Prepend to existing (after header)
-        current = inbox_path.read_text(encoding="utf-8")
-
-        # Find end of header (after the "---" separator following description)
-        # The pattern \n---\n\n appears twice: after frontmatter AND after header description
-        # We want the SECOND occurrence (after the description, before entries)
-        header_end_marker = "\n---\n\n"
-        first_match = current.find(header_end_marker)
-
-        # Look for second occurrence (the header separator, not frontmatter end)
-        if first_match != -1:
-            header_end = current.find(header_end_marker, first_match + 1)
-        else:
-            header_end = -1
-
-        if header_end != -1:
-            # Insert after header separator
-            insert_pos = header_end + len(header_end_marker)
-            new_content = current[:insert_pos] + entry + current[insert_pos:]
-        else:
-            # Fallback: prepend after frontmatter
-            if current.startswith("---"):
-                # Find end of frontmatter
-                fm_end = current.find("\n---\n", 3)
-                if fm_end != -1:
-                    insert_pos = fm_end + 5  # After "\n---\n"
-                    new_content = current[:insert_pos] + "\n" + entry + current[insert_pos:]
-                else:
-                    new_content = current + "\n" + entry
-            else:
-                new_content = entry + current
-
-        inbox_path.write_text(new_content, encoding="utf-8")
-
-    return inbox_path
+    def transform(current):
+        if not skip_dedup and config.INBOX_DEDUP_ENABLED and current and marker in current:
+            return None
+        if current is None: return header + entry
+        separator = "\n---\n\n"
+        first = current.find(separator)
+        second = current.find(separator, first + 1) if first >= 0 else -1
+        if second >= 0:
+            position = second + len(separator)
+            return current[:position] + entry + current[position:]
+        if current.startswith('---'):
+            end = current.find('\n---\n', 3)
+            if end >= 0: return current[:end + 5] + '\n' + entry + current[end + 5:]
+        return entry + current
+    identity = mutation.operation_id('inbox', _extraction_fingerprint(pack)) if not skip_dedup else None
+    result = mutation.mutate(inbox_path, transform, vault_root=vault_root,
+                             operation_id=identity, allow_protected=True)
+    if not result.applied:
+        raise mutation.MutationConflict(result)
+    return None if result.status == 'unchanged' else result.path
 
 
 def apply_note_ops(pack: knowledge_pack.KnowledgePack, mode: str = "inbox", vault_root: Path = None) -> dict:
@@ -499,6 +341,7 @@ def apply_note_ops(pack: knowledge_pack.KnowledgePack, mode: str = "inbox", vaul
         "inbox_updated": False,
         "notes_created": [],
         "notes_updated": [],
+        "notes_staged": [],
         "errors": [],
     }
 
@@ -518,10 +361,12 @@ def apply_note_ops(pack: knowledge_pack.KnowledgePack, mode: str = "inbox", vaul
                 inbox_relative = config.INBOX_PATH.relative_to(config.VAULT_ROOT)
             except ValueError:
                 inbox_relative = Path(config.INBOX_PATH.name)
-            inbox_result = append_to_inbox(pack, Path(vault_root) / inbox_relative)
+            inbox_result = append_to_inbox(pack, Path(vault_root) / inbox_relative, vault_root=vault_root)
             if inbox_result is not None:
                 results["inbox_updated"] = True
             # If None, it was skipped due to deduplication (not an error)
+        except mutation.MutationConflict as exc:
+            results['notes_staged'].append({'path': str(exc.result.path), 'pending_path': str(exc.result.staged_path), 'reason': exc.result.reason})
         except Exception as e:
             results["errors"].append(f"Inbox update failed: {e}")
 
@@ -531,13 +376,31 @@ def apply_note_ops(pack: knowledge_pack.KnowledgePack, mode: str = "inbox", vaul
 
     # In route mode, apply note_ops
     if mode == "route":
+        for claim in pack.claims:
+            try:
+                claim.validate()
+                path = Path("claims") / (claim.claim_id + ".md")
+                content = (mutation.serialize_frontmatter({"type": "reference", "verification": "proposed",
+                    "source_revision": claim.source_revision}) + "\n\n# " + claim.claim_id
+                    + "\n\n" + claim.marker() + "\n")
+                outcome = mutation.mutate(path, lambda previous: content, vault_root=vault_root,
+                    operation_id=mutation.operation_id("claim", claim.claim_id, claim.digest()))
+                if outcome.applied:
+                    if outcome.status == "created":
+                        results["notes_created"].append(str(path))
+                else:
+                    results["notes_staged"].append({"path": str(path), "pending_path": str(outcome.staged_path), "reason": outcome.reason})
+            except Exception as exc:
+                results["errors"].append(f"Claim persistence failed: {exc}")
         for op in pack.note_ops:
             try:
                 existed = resolve_note_path(op.path, vault_root).exists()
                 # Pass session_id for auto-generating managed block IDs
-                success = apply_note_op(op, vault_root, session_id=pack.session_id,
-                                        assistant=pack.assistant)
-                if success:
+                outcome = _apply_note_op_result(op, vault_root, session_id=pack.session_id,
+                                                assistant=pack.assistant)
+                if outcome is not None and not outcome.applied:
+                    results['notes_staged'].append({'path': op.path, 'pending_path': str(outcome.staged_path), 'reason': outcome.reason})
+                elif outcome is not None:
                     if op.op == "create" and not existed:
                         results["notes_created"].append(op.path)
                     else:

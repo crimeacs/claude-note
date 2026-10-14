@@ -76,7 +76,7 @@ class CodexTranscriptTests(unittest.TestCase):
         self.assertEqual(content.errors, ["Bash: check failed"])
         self.assertFalse(content.tool_uses[0].success)
         self.assertEqual(content.tool_uses[0].output_summary, "check failed")
-        self.assertEqual(content.tool_uses[1].output_summary, "(2 lines)")
+        self.assertEqual(content.tool_uses[1].output_summary, "line 1\nline 2")
 
     def test_codex_xml_request_is_kept_and_fork_metadata_does_not_change_identity(self):
         path = _write([

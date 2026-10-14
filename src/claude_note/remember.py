@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import recall as recall_mod
+from . import mutation
 
 TYPES = ("gotcha", "pattern", "decision", "reference", "feedback", "project")
 
@@ -47,13 +48,15 @@ def derive_title(text: str) -> str:
 
 
 def _yaml_str(value: str) -> str:
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    import json
+    return json.dumps(value, ensure_ascii=False)
 
 
-def write_note(vault: Path, text: str, *, note_type: str = "gotcha", title: str = "",
-               tags: Optional[list[str]] = None, why: str = "", how: str = "",
-               folder: str = "", assistant: str = "", now: Optional[datetime] = None) -> tuple[Path, bool]:
-    """Create or append. Returns (path, created)."""
+def write_note_result(vault: Path, text: str, *, note_type: str = "gotcha", title: str = "",
+                      tags: Optional[list[str]] = None, why: str = "", how: str = "",
+                      folder: str = "", assistant: str = "", now: Optional[datetime] = None,
+                      operation_id: str | None = None) -> mutation.MutationResult:
+    """Record a lesson through the common confined, physical-append writer."""
     if note_type not in TYPES:
         raise ValueError(f"type must be one of: {', '.join(TYPES)}")
     if not text.strip():
@@ -62,47 +65,61 @@ def write_note(vault: Path, text: str, *, note_type: str = "gotcha", title: str 
     title = title.strip() or derive_title(text)
     tags = [t.strip().lstrip("#") for t in (tags or []) if t.strip()]
     assistant = assistant or detect_assistant()
-    root = vault.resolve()
-    target_dir = (root / folder).resolve() if folder else root
-    target_dir.relative_to(root)  # ValueError on traversal
-    if any(part.startswith(".") for part in target_dir.relative_to(root).parts):
-        raise ValueError("refusing to write into a hidden folder")
-    path = target_dir / f"{slugify(title)}.md"
-
+    relative = (Path(folder) / f"{slugify(title)}.md").as_posix()
+    # Do not resolve parent symlinks away before validating the lexical route.
+    path = mutation.resolve_note_path(relative, vault)
+    relative = path.relative_to(mutation._vault(vault)).as_posix()
     body = [text.strip()]
-    if why.strip():
-        body += ["", f"**Why:** {why.strip()}"]
-    if how.strip():
-        body += ["", f"**How to apply:** {how.strip()}"]
+    if why.strip(): body += ["", f"**Why:** {why.strip()}"]
+    if how.strip(): body += ["", f"**How to apply:** {how.strip()}"]
     stamp = now.strftime("%Y-%m-%d")
-    block_id = f"remember-{now.strftime('%Y-%m-%d-%H%M%S')}"
-
-    if path.exists():
-        existing = path.read_text(encoding="utf-8")
-        block = "\n".join([
-            "", f"<!-- claude-note:{block_id}:start -->",
-            f"## Update {stamp} ({assistant})", "", *body,
-            f"<!-- claude-note:{block_id}:end -->", ""])
-        path.write_text(existing.rstrip("\n") + "\n" + block, encoding="utf-8")
-        return path, False
-
+    op_id = operation_id or mutation.operation_id('remember', relative, note_type, title, tags, body, assistant)
+    block_id = 'remember-' + op_id[:48]
+    marker = f"<!-- claude-note:{block_id}:start -->"
     try:
         from .provenance import author_email
         author = author_email()
     except Exception:
-        author = ""
-    fm = ["---", f"title: {_yaml_str(title)}", f"type: {note_type}", f"created: {stamp}",
-          f"assistant: {assistant}"]
-    if author:
-        fm.append(f"author: {author}")
-    if tags:
-        fm.append("tags: [" + ", ".join(tags) + "]")
-    fm.append("---")
-    content = "\n".join(fm + ["", f"# {title}", "", *body, ""])
-    target_dir.mkdir(parents=True, exist_ok=True)
-    with open(path, "x", encoding="utf-8") as fh:  # exclusive: never clobber a race
-        fh.write(content)
-    return path, True
+        author = ''
+    fm = {'title': title, 'type': note_type, 'created': stamp, 'assistant': assistant}
+    if author: fm['author'] = author
+    if tags: fm['tags'] = tags
+    frontmatter = mutation.serialize_frontmatter(fm, plain_keys=('type', 'created', 'assistant', 'author'))
+    # The initial lesson also carries an identity, allowing recovery after a
+    # note commit followed by a crash before its separate effect receipt.
+    initial = '\n'.join([frontmatter, '', f'# {title}', '', marker, *body,
+                         f'<!-- claude-note:{block_id}:end -->', ''])
+    addition = '\n'.join(['', marker, f'## Update {stamp} ({assistant})', '', *body,
+                          f'<!-- claude-note:{block_id}:end -->', ''])
+    from . import managed_blocks
+    managed_blocks._validate_layout(initial)
+    managed_blocks._validate_layout(addition)
+    body_text = '\n'.join(body).strip()
+    def transform(existing):
+        if existing is None: return initial
+        candidate = existing + ('' if existing.endswith('\n') else '\n') + addition
+        try:
+            managed_blocks._validate_layout(existing)
+            located = managed_blocks._locate(existing, block_id)
+        except ValueError as error:
+            return mutation.MutationProposal(candidate, str(error) + '; review required')
+        if located:
+            block_body = located[2]
+            appended = re.fullmatch(r'## Update \d{4}-\d{2}-\d{2} \(' + re.escape(assistant)
+                                    + r'\)\n\n' + re.escape(body_text), block_body)
+            if block_body == body_text or appended:
+                return None
+            return mutation.MutationProposal(candidate, 'Remember identity has changed content; review required')
+        return candidate
+    return mutation.mutate(path, transform, vault_root=vault, operation_id=op_id)
+
+
+def write_note(vault: Path, text: str, **kwargs) -> tuple[Path, bool]:
+    """Backward-compatible (path, created), with explicit staged conflicts."""
+    result = write_note_result(vault, text, **kwargs)
+    if not result.applied:
+        raise mutation.MutationConflict(result)
+    return result.path, result.status == 'created'
 
 
 def reindex(index: str = "", timeout: float = 120.0) -> tuple[bool, float]:
@@ -128,15 +145,20 @@ def cmd_remember(args) -> int:
         import sys
         text = sys.stdin.read()
     try:
-        path, created = write_note(
+        result = write_note_result(
             config.VAULT_ROOT, text, note_type=args.type, title=args.title or "",
             tags=(args.tags.split(",") if args.tags else []), why=args.why or "",
             how=args.how or "", folder=args.folder or "")
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, mutation.MutationConflict) as exc:
         print(f"claude-note remember: {exc}")
         return 1
+    if not result.applied:
+        print(f"Staged for review: {result.staged_path} ({result.reason})")
+        return 2
+    path = result.path
     rel = path.relative_to(config.VAULT_ROOT.resolve()) if path.is_relative_to(config.VAULT_ROOT.resolve()) else path
-    print(f"{'Created' if created else 'Appended to'} {rel}  (type: {args.type})")
+    verb = {'created': 'Created', 'updated': 'Appended to', 'unchanged': 'Already recorded in'}[result.status]
+    print(f"{verb} {rel}  (type: {args.type})")
     if args.no_index:
         print("Not reindexed (--no-index); recall finds it after the next `qmd update`.")
         return 0

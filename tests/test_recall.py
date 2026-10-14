@@ -117,14 +117,22 @@ class RecallTests(unittest.TestCase):
         self.assertEqual(seen[0][-2:], ["-c", "notes"])
 
     def test_rerank_command_filters_and_failure_keeps_order(self):
-        got = [item("qmd://notes/a.md", "A"), item("qmd://notes/b.md", "B")]
         keep_b = 'python3 -c \'print("{\\"keep\\": [\\"c1\\"]}")\''
-        r = recall.recall("retry idempotency duplicate payment", settings(rerank_command=keep_b),
-                          lambda c, t: got)
-        self.assertEqual([h.title for h in r.hits], ["B"])
-        r = recall.recall("retry idempotency duplicate payment", settings(rerank_command="exit 3"),
-                          lambda c, t: got)
-        self.assertEqual([h.title for h in r.hits], ["A", "B"])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            got = [item("qmd://notes/a.md", "A", "Retry idempotency prevents a duplicate payment: synthetic lesson A."),
+                   item("qmd://notes/b.md", "B", "Retry idempotency prevents a duplicate payment: synthetic lesson B.")]
+            for row in got:
+                root.joinpath(row["file"].rsplit("/", 1)[-1]).write_text(row["snippet"])
+            rules = {"rules": [{"source": str(root / "*.md"), "audiences": ["host", "model"]}]}
+            with mock.patch("claude_note.egress.policy", return_value=rules), \
+                    mock.patch.object(recall, "local_path", side_effect=lambda uri, *args, **kwargs: root / uri.rsplit("/", 1)[-1]):
+                r = recall.recall("retry idempotency duplicate payment", settings(rerank_command=keep_b),
+                                  lambda c, t: got)
+                self.assertEqual([h.title for h in r.hits], ["B"])
+                r = recall.recall("retry idempotency duplicate payment", settings(rerank_command="exit 3"),
+                                  lambda c, t: got)
+                self.assertEqual([h.title for h in r.hits], ["A", "B"])
 
     def test_freshest_block_shows_newest_update(self):
         text = ("intro\n<!-- claude-note:synth-2026-01-01:start -->\n## Old\nold text here\n"
@@ -296,6 +304,11 @@ class ServerEngineTests(unittest.TestCase):
         lex = [[{"file": "qmd://notes/a.md", "title": "A", "score": 0.9, "snippet": body}, {"file": "qmd://notes/b.md", "title": "B", "score": 0.5, "snippet": body}]]
         vec = [{"file": "qmd://notes/b.md", "title": "B", "score": 0.62, "snippet": body}, {"file": "qmd://foresyn/inbox/x/b-copy.md", "title": "B", "score": 0.6, "snippet": body},
                {"file": "qmd://notes/c.md", "title": "C", "score": 0.55, "snippet": body}]
+        # Mirrors require explicit source/version equality; a matching title
+        # alone is not a source identity.
+        for row in lex[0] + vec:
+            if row["title"] == "B":
+                row.update(source_id="source:b", revision="b" * 64)
         return lex, vec
 
     def test_fusion_weights_meaning_and_merges_pushed_copies(self):
@@ -310,15 +323,19 @@ class ServerEngineTests(unittest.TestCase):
         with mock.patch.object(recall, "server_post", return_value={"lex": lex, "vec": vec}):
             res = recall.recall("How do I keep basil alive on a windowsill in winter?", settings(engine="server", rerank=False))
         self.assertEqual(res.status, "miss")
-        self.assertIn("close enough in meaning", res.reason)
+        self.assertIn("no admissible lexical evidence or close meaning", res.reason)
 
     def test_rerank_orders_the_injected_notes(self):
         lex, vec = self.lists()
+        for row in lex[0]:
+            row["lexical_evidence"] = True
 
         def post(s_, path, body, deadline):
             if path == "/search":
                 return {"lex": lex, "vec": vec}
-            return {"scores": {"qmd://notes/a.md": 0.9, "qmd://notes/b.md": 0.1, "qmd://notes/c.md": 0.5}}
+            scores = {"qmd://notes/a.md": 0.9, "qmd://notes/b.md": 0.1, "qmd://notes/c.md": 0.5}
+            return {"passage_scores": {p["passage_id"]: scores[p["file"]] for p in body["passages"]},
+                    "scored_passage_ids": [p["passage_id"] for p in body["passages"]]}
         with mock.patch.object(recall, "server_post", side_effect=post), \
                 mock.patch.object(recall, "local_path", return_value=None):
             res = recall.recall("Can I just run npm run build on the 4 GB box?", settings(engine="server"))
@@ -399,4 +416,3 @@ class ServerIndexTests(unittest.TestCase):
 
     def test_explicit_server_engine_is_honoured(self):
         self.assertTrue(self._run("cn-demo2", "server"))
-
