@@ -5,8 +5,10 @@ Parses Claude Code transcript JSONL and extracts content for synthesis.
 """
 
 import json
+import hashlib
+import io
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional, Union
 
@@ -17,7 +19,35 @@ class ToolUse:
     name: str
     input: dict
     output_summary: Optional[str] = None
-    success: bool = True
+    success: Optional[bool] = None
+    call_id: str = ""
+    output: str = ""                 # lossless local evidence, not an implicit egress grant
+    source_span: str = ""
+
+    @property
+    def outcome(self) -> str:
+        return "unknown" if self.success is None else "success" if self.success else "failure"
+
+
+@dataclass
+class SourceEvent:
+    """Immutable source anchor; the original JSONL remains the payload store."""
+    event_id: str
+    source: str
+    revision: str
+    line: int
+    observed_at: str
+    parent_id: str
+    kind: str
+    payload_digest: str
+    origin_source: str = ""
+    origin_revision: str = ""
+    ingested_at: str = ""
+    origin_line: int = 0
+
+    @property
+    def anchor(self) -> str:
+        return f"{self.source}#L{self.line}@{self.revision}"
 
 
 @dataclass
@@ -30,6 +60,12 @@ class TranscriptContent:
     files_touched: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     thinking_snippets: list[str] = field(default_factory=list)
+    source_events: list[SourceEvent] = field(default_factory=list)
+    source_revision: str = ""
+    source_path: str = ""
+    coverage: dict = field(default_factory=dict)
+    context_sources: list[str] = field(default_factory=list)
+    snapshot_path: str = ""
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -43,12 +79,21 @@ class TranscriptContent:
                     "input": t.input,
                     "output_summary": t.output_summary,
                     "success": t.success,
+                    "outcome": t.outcome,
+                    "call_id": t.call_id,
+                    "source_span": t.source_span,
+                    "output": t.output,
                 }
                 for t in self.tool_uses
             ],
             "files_touched": self.files_touched,
             "errors": self.errors,
             "thinking_snippets": self.thinking_snippets,
+            "source_events": [asdict(e) for e in self.source_events],
+            "source_revision": self.source_revision,
+            "source_path": self.source_path,
+            "coverage": self.coverage,
+            "snapshot_path": self.snapshot_path,
         }
 
 
@@ -75,30 +120,14 @@ def _extract_file_paths(tool_name: str, tool_input: dict) -> list[str]:
     return paths
 
 
-def _summarize_tool_output(tool_name: str, output: str, max_len: int = 200) -> str:
-    """Create a brief summary of tool output."""
+def _summarize_tool_output(tool_name: str, output: str, max_len: int = 4000) -> str:
+    """Bound the model view, keeping the payload available at its source anchor."""
     if not output:
         return ""
 
-    # For file reads, just note the length
-    if tool_name == "Read":
-        lines = output.count("\n") + 1
-        return f"({lines} lines)"
-
-    # For search tools, count matches
-    if tool_name in ("Glob", "Grep"):
-        matches = output.count("\n") + 1 if output.strip() else 0
-        return f"({matches} matches)"
-
-    # For bash, truncate output
-    if tool_name == "Bash":
-        if len(output) > max_len:
-            return output[:max_len] + "..."
-        return output
-
-    # Default: truncate
     if len(output) > max_len:
-        return output[:max_len] + "..."
+        half = max_len // 2
+        return output[:half] + "\n[... view clipped; full output in source ...]\n" + output[-half:]
     return output
 
 
@@ -107,16 +136,20 @@ def _summarize_tool_output(tool_name: str, output: str, max_len: int = 200) -> s
 _CODEX_INJECTED_PREFIXES = (
     "<environment_context>", "<external_codex_apps_open_page>",
     "<codex_internal_context", "<heartbeat>",
-    "# AGENTS.md instructions", "# Files mentioned by the user",
+    "# AGENTS.md instructions",
 )
 
 
 _CODEX_PATCH_FILE = re.compile(r"\*\*\* (?:Update|Add|Delete) File: ([^\n\\\"'`]+)")
 
 
-def _is_codex_transcript(transcript_path: Path) -> bool:
+def _stream(path, raw=None):
+    return open(path, encoding="utf-8", errors="replace") if raw is None else io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8", errors="replace")
+
+
+def _is_codex_transcript(transcript_path: Path, raw=None) -> bool:
     """Codex rollouts are JSONL whose records carry a `payload` object."""
-    with open(transcript_path, encoding="utf-8", errors="replace") as f:
+    with _stream(transcript_path, raw) as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -131,12 +164,12 @@ def _is_codex_transcript(transcript_path: Path) -> bool:
     return False
 
 
-def codex_session_meta(transcript_path) -> dict:
+def codex_session_meta(transcript_path, raw=None) -> dict:
     """First-record metadata of a Codex rollout: id, cwd, and whether it is a
     background run (a subagent thread, or `codex exec` automation) that should
     not become a note of its own. Empty dict if not a Codex rollout."""
     try:
-        with open(transcript_path, encoding="utf-8", errors="replace") as f:
+        with _stream(transcript_path, raw) as f:
             entry = json.loads(f.readline())
     except (OSError, ValueError):
         return {}
@@ -170,27 +203,39 @@ def _tool_output_text(output) -> str:
         return "\n".join(block["text"] for block in output
                          if isinstance(block, dict) and isinstance(block.get("text"), str))
     if isinstance(output, dict):
+        if "stdout" in output or "stderr" in output:
+            return "\n".join(str(output[k]) for k in ("stdout", "stderr") if output.get(k))
         return _tool_output_text(output.get("content", output.get("output", "")))
     return ""
 
 
 def _apply_tool_result(content: TranscriptContent, calls: dict, tool_id, output,
-                       is_error: bool = False) -> None:
+                       is_error: bool = False, source_span: str = "") -> None:
     tool = calls.get(tool_id)
     if tool is None:
         return
     text = _tool_output_text(output)
-    if is_error:
+    tool.output = text
+    tool.source_span = source_span or tool.source_span
+    # Codex's shell wrapper carries the exit code in its output. Arbitrary
+    # words such as "success" or "error" are not outcome evidence.
+    exit_match = re.search(r"(?m)^Process exited with code (-?\d+)\s*$", text)
+    code = output.get("exit_code") if isinstance(output, dict) else None
+    if code is None and exit_match:
+        code = int(exit_match[1])
+    if is_error or (isinstance(code, int) and code != 0):
         tool.success = False
         if text:
             content.errors.append(f"{tool.name}: {text[:200]}")
+    elif isinstance(code, int) or (isinstance(output, dict) and output.get("is_error") is False):
+        tool.success = True
     if text:
         tool.output_summary = _summarize_tool_output(tool.name, text)
 
 
-def _read_codex_transcript(transcript_path: Path) -> TranscriptContent:
+def _read_codex_transcript(transcript_path: Path, raw=None) -> TranscriptContent:
     """Parse a Codex rollout (`~/.codex/sessions/**/rollout-*.jsonl`)."""
-    meta = codex_session_meta(transcript_path)
+    meta = codex_session_meta(transcript_path, raw)
     content = TranscriptContent(session_id=meta.get("id") or transcript_path.stem)
     files_seen = set()
     calls = {}
@@ -206,7 +251,7 @@ def _read_codex_transcript(transcript_path: Path) -> TranscriptContent:
                 content.files_touched.append(path)
                 files_seen.add(path)
 
-    with open(transcript_path, encoding="utf-8", errors="replace") as f:
+    with _stream(transcript_path, raw) as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -231,7 +276,11 @@ def _read_codex_transcript(transcript_path: Path) -> TranscriptContent:
                 continue
             elif ptype == "message" and payload.get("role") == "user":
                 for text in _codex_texts(payload.get("content"), ("input_text", "text")):
-                    if not text.startswith(_CODEX_INJECTED_PREFIXES):
+                    # Attachment/context wrappers and the actual request may
+                    # arrive in one message. Keep the explicit request intact.
+                    if "## My request:" in text:
+                        text = text.split("## My request:", 1)[1].strip()
+                    if text and not text.startswith(_CODEX_INJECTED_PREFIXES):
                         content.user_prompts.append(text)
             elif ptype == "message" and payload.get("role") == "assistant":
                 content.assistant_texts.extend(_codex_texts(payload.get("content"), ("output_text", "text")))
@@ -246,7 +295,7 @@ def _read_codex_transcript(transcript_path: Path) -> TranscriptContent:
                         tool_input = {"arguments": tool_input}
                 else:
                     tool_input = {"input": payload.get("input", "")}
-                tool_use = ToolUse(name=name, input=tool_input)
+                tool_use = ToolUse(name=name, input=tool_input, call_id=payload.get("call_id", ""))
                 content.tool_uses.append(tool_use)
                 if payload.get("call_id"):
                     calls[payload["call_id"]] = tool_use
@@ -281,8 +330,16 @@ def read_transcript(transcript_path: Union[str, Path]) -> TranscriptContent:
     if not transcript_path.exists():
         raise FileNotFoundError(f"Transcript not found: {transcript_path}")
 
-    if _is_codex_transcript(transcript_path):
-        return _read_codex_transcript(transcript_path)
+    with transcript_path.open("rb") as source:
+        captured = source.read(256 * 1024 * 1024 + 1)
+    if len(captured) > 256 * 1024 * 1024:
+        raise ValueError("Transcript exceeds 256 MB; split or compact the source explicitly")
+    complete = captured.rfind(b"\n") + 1
+    raw = captured[:complete]
+    trailing_bytes = len(captured) - complete
+    if _is_codex_transcript(transcript_path, raw):
+        content = _read_codex_transcript(transcript_path, raw)
+        return _attach_sources(content, transcript_path, raw, trailing_bytes)
 
     # Extract session_id from path (last component before .jsonl)
     session_id = transcript_path.stem
@@ -291,7 +348,7 @@ def read_transcript(transcript_path: Union[str, Path]) -> TranscriptContent:
     files_seen = set()
     current_tool_uses = {}  # Track tool uses by id for matching with results
 
-    with open(transcript_path, encoding="utf-8", errors="replace") as f:
+    with _stream(transcript_path, raw) as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -352,6 +409,7 @@ def read_transcript(transcript_path: Union[str, Path]) -> TranscriptContent:
                             tool_use = ToolUse(
                                 name=tool_name,
                                 input=tool_input,
+                                call_id=tool_id,
                             )
                             content.tool_uses.append(tool_use)
 
@@ -389,9 +447,74 @@ def read_transcript(transcript_path: Union[str, Path]) -> TranscriptContent:
                 content_data = entry.get("content", "")
                 is_error = entry.get("is_error", False)
 
-                _apply_tool_result(content, current_tool_uses, tool_use_id, content_data, is_error)
+                _apply_tool_result(content, current_tool_uses, tool_use_id,
+                                   {"content": content_data, "exit_code": entry.get("exit_code")}, is_error)
 
+    return _attach_sources(content, transcript_path, raw, trailing_bytes)
+
+
+def _attach_sources(content: TranscriptContent, path: Path, raw=None, trailing_bytes=0) -> TranscriptContent:
+    """Bind parsed views to exact original records without inventing timestamps."""
+    raw = path.read_bytes() if raw is None else raw
+    content._source_bytes = raw  # one immutable snapshot for parsing/checkpoint identity
+    content.source_revision = hashlib.sha256(raw).hexdigest()
+    content.source_path = str(path.absolute())
+    malformed = 0
+    calls = {tool.call_id: tool for tool in content.tool_uses if tool.call_id}
+    for number, line in enumerate(raw.splitlines(), 1):
+        try:
+            record = json.loads(line)
+        except (ValueError, UnicodeError):
+            malformed += 1
+            continue
+        if not isinstance(record, dict):
+            malformed += 1
+            continue
+        origins = record.get('derivation_sources')
+        if isinstance(origins, list) and all(isinstance(item, str) for item in origins):
+            content.context_sources.extend(item for item in origins if item not in content.context_sources)
+        elif record.get('source') in {'claude-ai', 'chatgpt', 'cursor'}:
+            content.context_sources.append('unknown-import-origin')
+        payload = record.get("payload", record)
+        if not isinstance(payload, dict):
+            continue
+        message = payload.get("message") or {}
+        event_id = str(payload.get("id") or record.get("uuid") or message.get("id")
+                       or hashlib.sha256(content.source_path.encode() + str(number).encode() + line).hexdigest()[:24])
+        event = SourceEvent(event_id, content.source_path, content.source_revision, number,
+                            str(record.get("timestamp") or payload.get("timestamp") or ""),
+                            str(record.get("parentUuid") or payload.get("parent_id") or ""),
+                            str(payload.get("type") or record.get("type") or "unknown"),
+                            hashlib.sha256(line).hexdigest(),
+                            str(record.get("source", "")) + (":" + str(record["source_id"]) if record.get("source_id") else ""),
+                            str(record.get("source_revision", "")), str(record.get("ingested_at", "")))
+        content.source_events.append(event)
+        call_id = payload.get("call_id") or payload.get("tool_use_id")
+        if call_id in calls:
+            calls[call_id].source_span = event.anchor
+        for block in message.get("content", []) if isinstance(message.get("content"), list) else []:
+            if isinstance(block, dict):
+                call_id = block.get("tool_use_id") or block.get("id")
+                if call_id in calls:
+                    calls[call_id].source_span = event.anchor
+    content.coverage = {"records": len(content.source_events), "malformed_records": malformed,
+                        "payloads": "original-jsonl", "outcomes_unknown": sum(t.success is None for t in content.tool_uses),
+                        "snapshot_bytes": len(raw), "snapshot_lines": len(raw.splitlines()), "snapshot_revision": content.source_revision}
+    content.coverage["incomplete_trailing_bytes"] = trailing_bytes
     return content
+
+
+def derivation_sources(content, cwd=""):
+    """Source policy follows evidence inputs, not just their transcript envelope."""
+    paths = {content.source_path or "unknown-transcript", *content.context_sources}
+    if cwd and Path(cwd).is_absolute():
+        paths.add(str(Path(cwd).absolute()))
+    for tool in content.tool_uses:
+        for key in ("file_path", "path", "filename", "source_path"):
+            value = tool.input.get(key) if isinstance(tool.input, dict) else None
+            if isinstance(value, str) and value and not value.startswith(("http:", "https:")):
+                paths.add(str(Path(cwd) / value) if cwd and not Path(value).is_absolute() else value)
+    return sorted(paths)
 
 
 def read_transcript_from_state(state) -> TranscriptContent:
@@ -407,7 +530,68 @@ def read_transcript_from_state(state) -> TranscriptContent:
     if not state.transcript_path:
         raise ValueError("Session state has no transcript_path")
 
-    return read_transcript(state.transcript_path)
+    content = read_transcript(state.transcript_path)
+    checkpoint = getattr(state, "transcript_checkpoint", {}) or {}
+    size, start = checkpoint.get("bytes", 0), checkpoint.get("lines", 0)
+    if not size or not start:
+        return _snapshot(content, content._source_bytes)
+    raw = content._source_bytes
+    if size > len(raw) or hashlib.sha256(raw[:size]).hexdigest() != checkpoint.get("revision"):
+        content.coverage["checkpoint"] = "source-changed-full-replay"
+        return _snapshot(content, raw)
+    # Parse locally once for relationship resolution, but extract only new
+    # records. A result for a tool started before the checkpoint retains its
+    # call input because matching occurred before this view was selected.
+    content.source_events = [e for e in content.source_events if e.line > start]
+    content.tool_uses = [t for t in content.tool_uses if t.source_span and
+                        int(t.source_span.rsplit("#L", 1)[1].split("@", 1)[0]) > start]
+    content.errors = [f"{t.name}: {t.output[:200]}" for t in content.tool_uses if t.success is False]
+    content.user_prompts, content.assistant_texts, content.thinking_snippets = [], [], []
+    for line in raw.splitlines()[start:]:
+        try:
+            entry = json.loads(line)
+        except (ValueError, UnicodeError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        payload = entry.get("payload", entry)
+        if not isinstance(payload, dict):
+            continue
+        message = payload.get("message") or payload
+        role = message.get("role") or entry.get("type")
+        texts = _codex_texts(message.get("content"), ("input_text", "output_text", "text"))
+        for text in texts:
+            if "## My request:" in text:
+                text = text.split("## My request:", 1)[1].strip()
+            if role == "user" and text and not text.startswith(_CODEX_INJECTED_PREFIXES):
+                content.user_prompts.append(text)
+            elif role == "assistant":
+                content.assistant_texts.append(text)
+    content.coverage.update({"checkpoint": "append-only-delta", "start_line": start + 1,
+                             "base_revision": checkpoint["revision"], "records": len(content.source_events)})
+    return _snapshot(content, raw[size:], start)
+
+
+def _snapshot(content, raw, start=0):
+    """Keep immutable appended evidence without copying every earlier turn."""
+    from . import config
+    from .state_io import create_bytes
+    digest = hashlib.sha256(raw).hexdigest()
+    snapshot = config.STATE_DIR / "sources" / (digest + ".jsonl")
+    create_bytes(snapshot, raw)
+    content.snapshot_path = str(snapshot.resolve())
+    for event in content.source_events:
+        event.origin_source = event.origin_source or content.source_path
+        event.origin_revision = event.origin_revision or content.source_revision
+        event.origin_line = event.line
+        event.source, event.revision, event.line = content.snapshot_path, digest, event.line - start
+    for tool in content.tool_uses:
+        if tool.source_span:
+            line = int(tool.source_span.rsplit("#L", 1)[1].split("@", 1)[0]) - start
+            tool.source_span = f"{content.snapshot_path}#L{line}@{digest}"
+    content.coverage["evidence_snapshot_revision"] = digest
+    content.coverage["evidence_snapshot_bytes"] = len(raw)
+    return content
 
 
 def get_transcript_summary(content: TranscriptContent) -> dict:

@@ -61,10 +61,8 @@ def _load_seen() -> dict:
 
 
 def _save_seen(seen: dict) -> None:
-    SEEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = SEEN_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(seen, indent=1, sort_keys=True))
-    tmp.replace(SEEN_FILE)
+    from .state_io import atomic_json
+    atomic_json(SEEN_FILE, seen)
 
 
 def _since(seen: dict, since: Optional[datetime]) -> float:
@@ -88,7 +86,7 @@ def _enqueue(session_id: str, transcript_path: Path, cwd: str, prompt: str, sour
         }))
 
 
-def write_session(seen: dict, source: str, conv_id: str, messages: list, cwd: str = "") -> bool:
+def write_session(seen: dict, source: str, conv_id: str, messages: list, cwd: str = "", *, origin_sources=()) -> bool:
     """Write one conversation as a transcript and queue it, unless unchanged.
 
     `messages` are dicts: {"role": "user"|"assistant", "text": str,
@@ -106,33 +104,43 @@ def write_session(seen: dict, source: str, conv_id: str, messages: list, cwd: st
     session_id = hashlib.sha256(f"{source}:{conv_id}".encode()).hexdigest()[:32]
     digest = hashlib.sha256(json.dumps(messages, sort_keys=True, default=str).encode()).hexdigest()
     key = f"{source}:{session_id}"
+    path = TRANSCRIPTS_DIR / source / f"{session_id}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    origins = sorted({str(Path(item).absolute()) for item in origin_sources}) or ['unknown-import-origin']
+    # Retain restrictive origins even for unchanged conversations encountered
+    # in another export. Authored JSONL metadata alone is not a durable boundary.
+    from .egress import record_derivation
+    record_derivation(path, '---\nderivation_sources: ' + json.dumps(origins) + '\n---\n', vault_root=TRANSCRIPTS_DIR)
     legacy_id = re.sub(r"[^A-Za-z0-9_-]", "", conv_id)[:80] or hashlib.sha256(conv_id.encode()).hexdigest()[:32]
     if seen.get(key) == digest or seen.get(f"{source}:{legacy_id}") == digest:
         seen[key] = digest  # migrate the watermark without reimporting history
         return False
 
-    path = TRANSCRIPTS_DIR / source / f"{session_id}.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
     lines = []
     for n, m in enumerate(messages):
+        metadata = {"uuid": m.get("id") or hashlib.sha256(f"{source}:{conv_id}:{n}".encode()).hexdigest()[:24],
+                    "timestamp": m.get("timestamp", ""), "parentUuid": m.get("parent_id", ""),
+                    "source": source, "source_id": conv_id, "source_revision": digest,
+                    "derivation_sources": origins}
         if m["role"] == "user":
-            lines.append({"type": "user", "message": {"content": m.get("text", "")}})
+            lines.append({**metadata, "type": "user", "message": {"content": m.get("text", "")}})
             continue
         blocks = [{"type": "thinking", "thinking": t} for t in m.get("thinking") or [] if t]
         if (m.get("text") or "").strip():
             blocks.append({"type": "text", "text": m["text"]})
         results = []
         for i, tool in enumerate(m.get("tools") or []):
-            tool_id = f"t{n}-{i}"
+            tool_id = tool.get("id") or f"t{n}-{i}"
             tool_input = tool.get("input") if isinstance(tool.get("input"), dict) else {"input": tool.get("input")}
             blocks.append({"type": "tool_use", "id": tool_id, "name": tool.get("name") or "tool", "input": tool_input})
-            if tool.get("output"):
-                results.append({"type": "tool_result", "tool_use_id": tool_id, "content": str(tool["output"])})
-        lines.append({"type": "assistant", "message": {"content": blocks}})
+            if "output" in tool:
+                results.append({**metadata, "type": "tool_result", "tool_use_id": tool_id,
+                                "content": tool["output"], "is_error": tool.get("is_error", False),
+                                "exit_code": tool.get("exit_code")})
+        lines.append({**metadata, "type": "assistant", "message": {"content": blocks}})
         lines.extend(results)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text("".join(json.dumps(line) + "\n" for line in lines))
-    tmp.replace(path)
+    from .state_io import atomic_bytes
+    atomic_bytes(path, "".join(json.dumps(line) + "\n" for line in lines).encode())
 
     _enqueue(session_id, path, cwd, prompts[0], source)
     seen[key] = digest
@@ -149,10 +157,12 @@ def _claude_export_messages(conv: dict) -> list:
         role = "user" if msg.get("sender") == "human" else "assistant"
         texts = [b.get("text", "") for b in msg.get("content") or [] if isinstance(b, dict) and b.get("type") == "text"]
         thinking = [b.get("thinking", "") for b in msg.get("content") or [] if isinstance(b, dict) and b.get("type") == "thinking"]
-        tools = [{"name": b.get("name"), "input": b.get("input")} for b in msg.get("content") or []
+        tools = [{"id": b.get("id"), "name": b.get("name"), "input": b.get("input")} for b in msg.get("content") or []
                  if isinstance(b, dict) and b.get("type") == "tool_use"]
         text = "\n\n".join(t for t in texts if t) or msg.get("text") or ""
-        out.append({"role": role, "text": text, "tools": tools, "thinking": thinking})
+        out.append({"role": role, "text": text, "tools": tools, "thinking": thinking,
+                    "id": msg.get("uuid") or msg.get("id"), "timestamp": msg.get("created_at", ""),
+                    "parent_id": msg.get("parent_uuid", "")})
     return out
 
 
@@ -174,7 +184,8 @@ def _chatgpt_export_messages(conv: dict) -> list:
             continue
         text = "\n".join(p for p in content.get("parts") or [] if isinstance(p, str)).strip()
         if text:
-            out.append({"role": role, "text": text})
+            out.append({"role": role, "text": text, "id": msg.get("id") or node.get("id"),
+                        "timestamp": msg.get("create_time", ""), "parent_id": node.get("parent", "")})
     return out
 
 
@@ -200,7 +211,7 @@ def import_zip(zip_path: Path, seen: dict) -> Optional[int]:
                         cwd = "chatgpt.com"
                     else:
                         continue
-                    if conv_id and write_session(seen, source, conv_id, msgs, cwd):
+                    if conv_id and write_session(seen, source, conv_id, msgs, cwd, origin_sources=[zip_path]):
                         queued += 1
             return queued
     except (zipfile.BadZipFile, OSError, ValueError):
@@ -208,7 +219,7 @@ def import_zip(zip_path: Path, seen: dict) -> Optional[int]:
 
 
 def sweep_zips(seen: dict, problems: list) -> int:
-    """Import export zips from the watched folders and file them under done/."""
+    """Import export zips; retain originals and archive newly imported versions."""
     done_dir = IMPORTS_DIR / "done"
     queued = 0
     for folder in WATCH_DIRS:
@@ -229,11 +240,15 @@ def sweep_zips(seen: dict, problems: list) -> int:
             if count is None:
                 continue
             queued += count
+            if not count:
+                continue
             done_dir.mkdir(parents=True, exist_ok=True)
             target = done_dir / zip_path.name
             if target.exists():
                 target = done_dir / f"{zip_path.stem}-{int(time.time())}.zip"
-            shutil.move(str(zip_path), target)
+            # Moving the original erases its inspectable policy identity. Keep
+            # it in place so a deny on the actual export remains enforceable.
+            shutil.copy2(zip_path, target)
     return queued
 
 
@@ -316,7 +331,7 @@ def sweep_cursor(seen: dict, since_ts: float, db_path: Path = None) -> int:
             msgs = [m for m in (_cursor_bubble_message(b) for b in bubbles) if m]
             if folders is None:
                 folders = _cursor_workspace_folders()
-            if write_session(seen, "cursor", comp_id, msgs, folders.get(comp_id) or "cursor"):
+            if write_session(seen, "cursor", comp_id, msgs, folders.get(comp_id) or "cursor", origin_sources=[db_path]):
                 queued += 1
         return queued
     finally:

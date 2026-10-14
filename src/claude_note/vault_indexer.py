@@ -273,7 +273,9 @@ def load_index() -> Optional[VaultIndex]:
         return None
 
     try:
-        return VaultIndex.from_json(index_path.read_text())
+        from . import mutation
+        content = mutation.read_text(index_path, vault_root=config.VAULT_ROOT)
+        return VaultIndex.from_json(content) if content is not None else None
     except Exception:
         return None
 
@@ -282,12 +284,16 @@ def save_index(index: VaultIndex) -> None:
     """Save vault index to disk."""
     index_path = config.INDEX_PATH
 
-    index_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Atomic write
-    temp_path = index_path.with_suffix(".tmp")
-    temp_path.write_text(index.to_json())
-    temp_path.rename(index_path)
+    from . import mutation
+    content = index.to_json()
+    existing = mutation.read_text(index_path, vault_root=config.VAULT_ROOT)
+    result = mutation.mutate(index_path, lambda before: content,
+                             vault_root=config.VAULT_ROOT, allow_protected=True,
+                             expected_revision=mutation.revision(existing) if existing is not None else None,
+                             machine_owned=True,
+                             operation_id=mutation.operation_id('vault-index', content))
+    if not result.applied:
+        raise mutation.MutationConflict(result)
 
 
 def update_index(changed_files: list[Path] = None) -> VaultIndex:

@@ -188,6 +188,36 @@ def _synthesis(vault: Path) -> dict:
     return out
 
 
+def recall_capabilities() -> dict:
+    """Offline receipt only: status JSON must not contact a daemon or model."""
+    receipt = STATE_DIR / "recall-capabilities.json"
+    try:
+        data = json.loads(receipt.read_text())
+        if not isinstance(data, dict) or data.get("schema_version") != 2:
+            raise ValueError("unsupported capability receipt")
+        age = max(0, int(time.time() - receipt.stat().st_mtime))
+        return {**data, "age_seconds": age, "stale": age > 26 * 3600,
+                "evidence": "last explicit doctor/nightly public probe; not probed by status"}
+    except (OSError, ValueError):
+        return {"ok": False, "stale": True, "manifest": {}, "checks": [],
+                "evidence": "not exercised; run doctor after setup", "age_seconds": None}
+
+
+def freshness_summary(vault: Path) -> dict:
+    from .freshness import snapshot
+    try:
+        value = snapshot(vault)
+        present = (vault / ".claude-note/mutations/freshness/manifest.json").exists()
+        return {k: value[k] for k in ("generation", "saved_generation", "lexical_generation", "vector_generation")} | {
+            "journal_present": present, "dirty_count": len(value["dirty"]),
+            "pending_count": sum(v.get("status") == "pending" for v in value["dirty"].values()),
+            "lexical_fresh": value["lexical_generation"] >= value["saved_generation"] if present else None,
+            "vector_fresh": value["vector_generation"] >= value["saved_generation"] if present else None,
+            "evidence": "tracked mutations only; generations do not prove preexisting corpus coverage"}
+    except (OSError, ValueError) as exc:
+        return {"journal_present": False, "error": str(exc)[:200], "lexical_fresh": False, "vector_fresh": False}
+
+
 def report() -> dict:
     config_path, cfg = _config()
     vault_root = (os.environ.get("CLAUDE_NOTE_VAULT") or os.environ.get("CLAUDE_NOTE_VAULT_ROOT")
@@ -232,6 +262,14 @@ def report() -> dict:
         "queue_files": len(list(queue_dir.glob("*.jsonl"))) if queue_dir and queue_dir.is_dir() else 0,
         "notes": _notes(vault) if vault and vault.is_dir() else None,
         "synthesis": _synthesis(vault) if vault and vault.is_dir() else None,
+        "freshness": freshness_summary(vault) if vault and vault.is_dir() else None,
+        "recall": recall_capabilities(),
+        "model_egress": {"default_authorized": "model" in (cfg.get("egress") or {}).get("default", ["host", "local"]),
+                         "source_policy_rules": len((cfg.get("egress") or {}).get("rules", [])),
+                         "has_source_grant": any(isinstance(rule, dict) and rule.get("source")
+                             and not rule.get("restrict") and "model" in rule.get("audiences", [])
+                             for rule in (cfg.get("egress") or {}).get("rules", [])),
+                         "evidence": "configuration only; each source is checked before a model call"},
     }
 
     problems = []
@@ -256,6 +294,10 @@ def report() -> dict:
         mode_source = "CLAUDE_NOTE_MODE" if "CLAUDE_NOTE_MODE" in os.environ else str(config_path)
         problems.append(f"synthesis is off (mode = \"log\" from {mode_source}): sessions are logged "
                         "but never become notes; set mode = \"route\"")
+    model_granted = out["model_egress"]["default_authorized"] or out["model_egress"]["has_source_grant"]
+    if out["synth_mode"] not in (None, "log") and not model_granted:
+        problems.append("external synthesis paused: configure model source audiences in [egress]; "
+                        "local capture and recall remain available")
     synth = out["synthesis"] or {}
     if synth.get("failed") and not synth.get("succeeded"):
         problems.append(f"synthesis failing: {synth.get('last_error')}")
@@ -269,6 +311,10 @@ def report() -> dict:
     problems.extend(f"import: {p}" for p in sweep["problems"])
     out["problems"] = problems
     out["ok"] = not problems
+    fresh = out["freshness"] or {}
+    out["knowledge_loop_ready"] = bool(out["ok"] and out["recall"].get("ok") and not out["recall"].get("stale")
+                                       and model_granted
+                                       and fresh.get("lexical_fresh") and fresh.get("vector_fresh") and not fresh.get("pending_count"))
     return out
 
 

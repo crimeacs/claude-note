@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Optional
 import hashlib
 import json
+import re
 
 
 @dataclass
@@ -17,6 +18,20 @@ class QueuedEvent:
     cwd: str
     transcript_path: str
     data: dict              # Raw hook payload
+
+    def validate(self):
+        for key in ("event_id", "ts", "event", "session_id", "cwd", "transcript_path"):
+            if not isinstance(getattr(self, key), str):
+                raise ValueError(f"Queued event {key} must be text")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", self.session_id):
+            raise ValueError("Invalid queued session identity")
+        if not self.event_id or not isinstance(self.data, dict):
+            raise ValueError("Invalid queue identity/payload")
+        try:
+            datetime.fromisoformat(self.ts.rstrip("Z"))
+        except ValueError as exc:
+            raise ValueError("Invalid queued timestamp") from exc
+        return self
 
     @classmethod
     def from_hook_input(cls, hook_data: dict) -> "QueuedEvent":
@@ -39,7 +54,7 @@ class QueuedEvent:
             cwd=cwd,
             transcript_path=transcript_path,
             data=hook_data,
-        )
+        ).validate()
 
     def to_json(self) -> str:
         """Serialize to JSON string."""
@@ -49,7 +64,7 @@ class QueuedEvent:
     def from_json(cls, json_str: str) -> "QueuedEvent":
         """Deserialize from JSON string."""
         data = json.loads(json_str)
-        return cls(**data)
+        return cls(**data).validate()
 
 
 @dataclass
@@ -66,6 +81,14 @@ class SessionState:
     synthesis_pending: bool = False
     synthesis_attempts: int = 0
     last_synthesis_attempt_ts: Optional[str] = None
+    synthesis_parked: bool = False
+    synthesis_park_reason: str = ""
+    extraction_generation: str = ""
+    extraction_checkpoint: dict = field(default_factory=dict)
+    transcript_checkpoint: dict = field(default_factory=dict)
+    note_pending_path: str = ""
+    note_pending_revision: str = ""
+    filtered_event_ids: dict = field(default_factory=dict)
 
     def to_json(self) -> str:
         """Serialize to JSON string."""

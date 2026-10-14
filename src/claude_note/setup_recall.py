@@ -18,6 +18,7 @@ reports what an agent would have seen.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -27,12 +28,15 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timezone
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
 from . import recall as recall_mod
 
 HOME = Path.home()
+PUBLIC_CANARY_COLLECTION = "claude-note-public-canary"
+CAPABILITY_RECEIPT = HOME / ".local/share/claude-note/recall-capabilities.json"
 SHARE = HOME / ".local" / "share" / "claude-note"
 HEARTBEAT = SHARE / "refresh.ok"
 REFRESH_LOG = SHARE / "refresh.log"
@@ -204,6 +208,75 @@ def _log(line: str) -> None:
         fh.write(f"{datetime.now():%Y-%m-%dT%H:%M:%S} {line}\n")
 
 
+def _freshness_config(index: str) -> tuple[bytes, str]:
+    """Read the bounded collection configuration used by this index."""
+    name = f"{index or 'index'}.yml"
+    directory = Path(os.environ["QMD_CONFIG_DIR"]) if os.environ.get("QMD_CONFIG_DIR") else (
+        Path(os.environ.get("XDG_CONFIG_HOME", str(recall_mod.HOME / ".config"))) / "qmd")
+    path = directory / name
+    try:
+        with path.open("rb") as handle:
+            body = handle.read(256_001)
+        if len(body) <= 256_000:
+            identity = hashlib.sha256(str(path.absolute()).encode() + b"\0" + body).hexdigest()
+            return body, identity
+    except OSError:
+        pass
+    return b"", ""
+
+
+def _freshness_capture(index: str) -> tuple[dict[Path, int], str]:
+    """Capture journals only for collections indexing their whole Markdown root.
+
+    A successful filtered collection update cannot establish whole-vault
+    freshness. Unknown/custom masks therefore remain unacknowledged.
+    """
+    body, identity = _freshness_config(index)
+    if not identity:
+        return {}, ""
+    try:
+        text = body.decode("utf-8")
+    except UnicodeError:
+        return {}, ""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = None
+    patterns = {}
+    if isinstance(data, dict) and isinstance(data.get("collections"), dict):
+        patterns = {key: value.get("pattern") for key, value in data["collections"].items()
+                    if isinstance(value, dict)}
+    else:
+        current = None
+        for line in text.splitlines():
+            collection = re.fullmatch(r"  ([A-Za-z0-9_.-]+):\s*", line)
+            if collection:
+                current = collection[1]
+            elif line and not line.startswith(" "):
+                current = None
+            elif current:
+                pattern = re.fullmatch(r"    pattern:\s*(.*?)\s*", line)
+                if pattern:
+                    patterns[current] = pattern[1].strip("\"'")
+    from . import freshness
+    captured = {}
+    for collection, path in registered_collections(index).items():
+        if patterns.get(collection) != "**/*.md":
+            continue
+        root = path.expanduser().resolve()
+        if root in captured or not (root / ".claude-note/mutations/freshness/manifest.json").exists():
+            continue
+        try:
+            captured[root] = freshness.snapshot(root)["saved_generation"]
+        except (OSError, ValueError, KeyError) as exc:
+            _log(f"WARN cannot capture tracked freshness for {root}: {type(exc).__name__}")
+    # registered_collections reads the config separately. It must still match
+    # the configuration whose masks were inspected before capturing journals.
+    if _freshness_config(index)[1] != identity:
+        return {}, ""
+    return captured, identity
+
+
 def refresh(embed: bool = True, update_timeout: int = 900, embed_timeout: int = 3000) -> int:
     """`qmd update` then `qmd embed`, once at a time, bounded, with a heartbeat.
 
@@ -227,6 +300,9 @@ def refresh(embed: bool = True, update_timeout: int = 900, embed_timeout: int = 
     base = [exe] + (["--index", index] if index else [])
     started = time.monotonic()
     try:
+        # Capture before update: notes arriving during either stage may not be
+        # present in its index, and must remain dirty for the following refresh.
+        captured, configuration = _freshness_capture(index)
         for stage, timeout in (("update", update_timeout), ("embed", embed_timeout)):
             if stage == "embed" and not embed:
                 continue
@@ -240,6 +316,14 @@ def refresh(embed: bool = True, update_timeout: int = 900, embed_timeout: int = 
                 _log(f"FAIL qmd {stage} rc={proc.returncode}"
                      + (" (text index is current, vectors are stale)" if stage == "embed" else ""))
                 return 1
+            if _freshness_config(index)[1] != configuration:
+                if captured:
+                    _log("WARN QMD collection configuration changed; tracked freshness not acknowledged")
+                captured = {}
+            from . import freshness
+            for root, generation in captured.items():
+                freshness.acknowledge(generation, capability="lexical" if stage == "update" else "vector",
+                                      vault_root=root)
         HEARTBEAT.write_text(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n")
         _log(f"OK {'update+embed' if embed else 'update'} in {time.monotonic() - started:.0f}s")
         _daily_eval()
@@ -458,6 +542,7 @@ def cmd_setup(args) -> int:
     for extra in args.add or []:
         p = Path(extra).expanduser()
         print(f"   {p}: {add_collection(p, slugify_name(p), '**/*.md', dry_run=dry)}")
+    print(f"   public recall canary: {install_public_canary(dry_run=dry)}")
 
     print("\n2. Recall and sentinel hooks")
     claude_settings = Path(args.claude_settings).expanduser()
@@ -506,6 +591,52 @@ def slugify_name(path: Path) -> str:
     return re.sub(r"[^a-z0-9]+", "-", path.name.lower()).strip("-") or "notes"
 
 
+def install_public_canary(*, dry_run: bool = False) -> str:
+    """Setup-only registration of bundled synthetic text in the default index."""
+    directory = HOME / ".local/share/claude-note/public-canary"
+    if not dry_run:
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "doctor-canary.md").write_text(CANARY, encoding="utf-8")
+        (directory / "diagnostic-context.md").write_text("---\ntype: reference\n---\n# Payment retry diagnostics\n\n"
+            "Customers are charged twice when a payment request is retried. Provider logs help diagnose the sequence, "
+            "but logging alone does not prevent duplicate charges. Verify the logical operation identity before a retry.\n", encoding="utf-8")
+    return add_collection(directory, PUBLIC_CANARY_COLLECTION, "*.md", dry_run=dry_run)
+
+
+def probe_default_server(settings=None, *, save: bool = True) -> dict:
+    """Read-only corpus probe through the default warm server, separate from CLI canary."""
+    settings = settings or recall_mod.Settings.load()
+    manifest = recall_mod.server_capabilities(settings, timeout=2) or {}
+    checks = []
+    expected = f"qmd://{PUBLIC_CANARY_COLLECTION}/doctor-canary.md"
+    public = replace(settings, engine="server", index="", collections=[PUBLIC_CANARY_COLLECTION],
+                     memory_collections=[], log=False, budget=min(settings.budget, 8.0))
+    result = recall_mod.recall("Why are customers charged twice when a payment request is retried?", public)
+    manifest = recall_mod.server_capabilities(settings, timeout=2) or manifest
+    for name, key, enabled in (("lexical readiness", "lexical_ready", True),
+                               ("vector readiness", "vector_ready", settings.vector),
+                               ("rerank readiness", "rerank_ready", settings.rerank)):
+        checks.append({"check": name, "ok": manifest.get(key) is True or not enabled,
+                       "detail": "observed server capability; not a quality score" if enabled else "disabled in recall settings"})
+    found = result.engine == "server" and any(h.uri == expected for h in result.hits)
+    checks.append({"check": "default server retrieves public canary", "ok": found,
+                   "detail": "exact scoped public source returned" if found else result.reason or
+                   "public canary missing; run setup and refresh (doctor does not alter the index)"})
+    out = {"schema_version": 2, "t": datetime.now(timezone.utc).isoformat(),
+           "manifest": manifest, "route": "default-server", "corpus": "bundled-public-synthetic",
+           "checks": checks, "ok": bool(manifest) and all(c["ok"] for c in checks)}
+    if save:
+        CAPABILITY_RECEIPT.parent.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(prefix=".capability-", dir=CAPABILITY_RECEIPT.parent)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                json.dump(out, stream, sort_keys=True)
+            Path(name).replace(CAPABILITY_RECEIPT)
+        finally:
+            Path(name).unlink(missing_ok=True)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # doctor
 # --------------------------------------------------------------------------- #
@@ -547,8 +678,7 @@ def probe_loop(exe: list[str]) -> list[tuple[str, bool, str]]:
                         "--mask", "**/*.md"], capture_output=True, text=True, timeout=120,
                        stdin=subprocess.DEVNULL)
         env = {**os.environ, "CLAUDE_NOTE_RECALL_INDEX": index, "CLAUDE_NOTE_RECALL": "on",
-               "CLAUDE_NOTE_RECALL_LOG": "0",
-               "HOME": str(HOME)}
+               "CLAUDE_NOTE_RECALL_LOG": "0"}
         t0 = time.monotonic()
         ctx = _hook(exe, "recall", {"hook_event_name": "UserPromptSubmit", "prompt":
                     "Why are customers charged twice when a payment request is retried?", "cwd": str(tmp)}, env)
@@ -604,6 +734,14 @@ def cmd_doctor(args) -> int:
             age = (time.time() - hb.stat().st_mtime) / 3600
             break
     settings = recall_mod.Settings.load()
+    vault_setting = os.environ.get("CLAUDE_NOTE_VAULT") or recall_mod._load_toml().get("vault_root")
+    if vault_setting and Path(vault_setting).expanduser().is_dir():
+        from .health import freshness_summary
+        freshness = freshness_summary(Path(vault_setting).expanduser())
+        for capability in ("lexical", "vector"):
+            current = freshness.get(capability + "_fresh")
+            rows.append(("configured freshness", capability + " generation", current is True,
+                         f"{freshness.get(capability + '_generation', 'unknown')} / saved {freshness.get('saved_generation', 'unknown')}; tracked mutations only"))
     if settings.engine != "cli":
         alive = recall_mod.server_alive(settings, timeout=2)
         rows.append(("configured", "warm recall server (meaning + rerank)", alive or settings.engine == "auto",
@@ -613,8 +751,11 @@ def cmd_doctor(args) -> int:
                  f"{age:.1f} h ago" if age is not None else "no refresh heartbeat"))
 
     if not args.skip_probe:
+        capabilities = probe_default_server(settings)
+        for check in capabilities["checks"]:
+            rows.append(("exercised default server", check["check"], check["ok"], check["detail"]))
         for name, ok, detail in probe_loop(exe):
-            rows.append(("exercised", name, ok, detail))
+            rows.append(("exercised isolated CLI", name, ok, detail))
 
     st = recall_mod.stats(7)
     prompts = st["by_kind"].get("prompt", {})

@@ -5,12 +5,16 @@ and debugging chatter from polluting the open questions file.
 """
 
 import json
-import os
+import logging
 import subprocess
+import tempfile
 from datetime import datetime
+from pathlib import Path
 
 from . import config
 from . import note_writer
+from . import mutation
+from . import egress
 
 
 # =============================================================================
@@ -43,7 +47,7 @@ Respond with EXACTLY one of these JSON objects (no other text):
 """
 
 
-def filter_questions_with_llm(questions: list) -> list:
+def filter_questions_with_llm(questions: list, *, sources=None) -> list:
     """
     Use Claude CLI to filter out junk questions, keeping only legitimate research questions.
 
@@ -61,8 +65,7 @@ def filter_questions_with_llm(questions: list) -> list:
     model = "claude-haiku-4-5-20251001"
 
     # Disable hooks to prevent recursion
-    env = os.environ.copy()
-    env["CLAUDE_CODE_HOOKS_ENABLED"] = "false"
+    env = egress.model_env()
 
     for question in questions:
         # Skip obviously short/junk questions without LLM call
@@ -74,13 +77,10 @@ def filter_questions_with_llm(questions: list) -> list:
         prompt = QUALITY_FILTER_PROMPT.format(question=question)
 
         try:
-            result = subprocess.run(
-                ["claude", "-p", prompt, "--model", model],
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=30,  # Short timeout for simple classification
-            )
+            prompt = egress.prepare(prompt, audience='model', sources=sources or [])
+            with tempfile.TemporaryDirectory(prefix='claude-note-model-') as work:
+                result = subprocess.run(egress.model_command('claude', prompt, model=model),
+                                        capture_output=True, text=True, env=env, timeout=30, cwd=work)
 
             if result.returncode != 0:
                 # CLI failed, skip this question
@@ -97,6 +97,10 @@ def filter_questions_with_llm(questions: list) -> list:
                 # If we can't parse the response, be conservative and skip
                 pass
 
+        except egress.EgressDenied:
+            # Keep the evidence local; an unavailable remote classifier is not
+            # evidence that a question is junk. Human review can decide later.
+            filtered.append(question)
         except subprocess.TimeoutExpired:
             # Timeout, skip this question
             pass
@@ -180,39 +184,26 @@ def append_questions_to_open_questions(state, questions: list) -> int:
     session_link = get_session_link(state)
     date_str = datetime.utcnow().strftime("%Y-%m-%d")
 
-    # Read existing content
-    existing = config.OPEN_QUESTIONS_FILE.read_text()
-
-    # Check which questions are already present (avoid duplicates)
-    new_questions = []
-    for q in questions:
-        # Simple check: is the question text already in the file?
-        if q not in existing:
-            new_questions.append(q)
-
-    if not new_questions:
+    added = []
+    def append(existing):
+        if existing is None:
+            return None  # Never create this optional human-owned file.
+        added.extend(q for q in dict.fromkeys(questions) if q not in existing)
+        if not added:
+            return None
+        suffix = "\n" if existing and not existing.endswith("\n") else ""
+        entries = [f"- [ ] {q} (source: {session_link}, {date_str})" for q in added]
+        metadata = {'derivation_sources': [str(Path(state.transcript_path).absolute())] if state.transcript_path else [],
+                    'source_revision': '', 'source_spans': []}
+        marker = '<!-- claude-note:provenance ' + json.dumps(metadata).replace('-->', '\\u002d\\u002d>') + ' -->'
+        return existing + suffix + "\n".join(entries) + "\n" + marker + "\n"
+    result = mutation.mutate(config.OPEN_QUESTIONS_FILE, append,
+                             vault_root=config.VAULT_ROOT, allow_protected=True,
+                             operation_id=mutation.operation_id('open-questions', state.session_id, questions))
+    if not result.applied:
+        logging.getLogger(__name__).warning('Questions staged for review: %s', result.staged_path)
         return 0
-
-    # Build new entries
-    entries = []
-    for q in new_questions:
-        entry = f"- [ ] {q} (source: {session_link}, {date_str})"
-        entries.append(entry)
-
-    # Append to file
-    # Add some spacing if file doesn't end with newline
-    suffix = ""
-    if existing and not existing.endswith("\n"):
-        suffix = "\n"
-
-    new_content = existing + suffix + "\n".join(entries) + "\n"
-
-    # Atomic write
-    temp_path = config.OPEN_QUESTIONS_FILE.with_suffix(".tmp")
-    temp_path.write_text(new_content)
-    temp_path.rename(config.OPEN_QUESTIONS_FILE)
-
-    return len(new_questions)
+    return len(added)
 
 
 def promote_session_questions(state) -> int:
@@ -228,6 +219,6 @@ def promote_session_questions(state) -> int:
     questions = extract_questions_from_events(state)
 
     # Apply LLM quality filter
-    filtered_questions = filter_questions_with_llm(questions)
+    filtered_questions = filter_questions_with_llm(questions, sources=[state.transcript_path] if state.transcript_path else [])
 
     return append_questions_to_open_questions(state, filtered_questions)

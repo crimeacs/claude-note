@@ -5,8 +5,11 @@ Defines the structured output format for knowledge extraction.
 """
 
 import json
-from dataclasses import dataclass, field, asdict
+import re
+from datetime import date
+from dataclasses import dataclass, field, asdict, fields
 from typing import Optional
+from .verified_claims import Claim
 
 
 NOTE_TYPES = (
@@ -85,6 +88,9 @@ class NoteOp:
     frontmatter: Optional[dict] = None     # For create
     managed_block_id: Optional[str] = None # For upsert_block
     section: Optional[str] = None          # For append (e.g., "## Synthesized")
+    operation_id: str = ""                 # programmatically assigned, stable across replay
+    expected_revision: Optional[str] = None
+    source_spans: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -110,6 +116,12 @@ class KnowledgePack:
     howtos: list[HowTo] = field(default_factory=list)
     note_ops: list[NoteOp] = field(default_factory=list)
     assistant: str = ""                    # provenance.ASSISTANTS; set by us, not the model
+    generation: str = ""
+    source_revision: str = ""
+    source_spans: list[str] = field(default_factory=list)
+    coverage: dict = field(default_factory=dict)
+    claims: list[Claim] = field(default_factory=list)
+    derivation_sources: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         d = {
@@ -122,6 +134,12 @@ class KnowledgePack:
             "open_questions": [q.to_dict() for q in self.open_questions],
             "howtos": [h.to_dict() for h in self.howtos],
             "note_ops": [op.to_dict() for op in self.note_ops],
+            "generation": self.generation,
+            "source_revision": self.source_revision,
+            "source_spans": self.source_spans,
+            "coverage": self.coverage,
+            "claims": [asdict(c) for c in self.claims],
+            "derivation_sources": self.derivation_sources,
         }
         if self.time:
             d["time"] = self.time
@@ -134,6 +152,21 @@ class KnowledgePack:
 
     @classmethod
     def from_dict(cls, data: dict) -> "KnowledgePack":
+        if not isinstance(data, dict):
+            raise ValueError("KnowledgePack must be an object")
+        if set(data) - {item.name for item in fields(cls)}:
+            raise ValueError("KnowledgePack contains unknown fields")
+        for key in ("concepts", "decisions", "open_questions", "howtos", "note_ops", "highlights", "source_spans", "claims"):
+            if key in data and (not isinstance(data[key], list) or len(data[key]) > 200):
+                raise ValueError(f"{key} must be a bounded list")
+        for key in ("session_id", "date", "title", "time", "assistant", "generation", "source_revision"):
+            if key in data and not isinstance(data[key], str):
+                raise ValueError(f"{key} must be a string")
+        for key in ("highlights", "source_spans", "derivation_sources"):
+            if key in data and (not isinstance(data[key], list) or any(not isinstance(item, str) for item in data[key])):
+                raise ValueError(f"{key} must be a string list")
+        if "coverage" in data and not isinstance(data["coverage"], dict):
+            raise ValueError("coverage must be an object")
         return cls(
             session_id=data.get("session_id", ""),
             date=data.get("date", ""),
@@ -146,6 +179,12 @@ class KnowledgePack:
             howtos=[HowTo.from_dict(h) for h in data.get("howtos", [])],
             note_ops=[NoteOp.from_dict(op) for op in data.get("note_ops", [])],
             assistant=data.get("assistant", ""),
+            generation=data.get("generation", ""),
+            source_revision=data.get("source_revision", ""),
+            source_spans=data.get("source_spans", []),
+            coverage=data.get("coverage", {}),
+            claims=[Claim(**c).validate() for c in data.get("claims", [])],
+            derivation_sources=data.get("derivation_sources", []),
         )
 
     @classmethod
@@ -162,6 +201,7 @@ class KnowledgePack:
             and not self.open_questions
             and not self.howtos
             and not self.note_ops
+            and not self.claims
         )
 
 
@@ -214,9 +254,14 @@ def get_schema_description() -> str:
             "frontmatter": {"type": "pattern | gotcha | decision | reference | project | log | literature | source | feedback | meta | session", "tags": [...], ...},  // for create only; choose exactly one type explicitly
             "body_markdown": "string - content to write",
             "managed_block_id": "string",  // for upsert_block only
-            "section": "string"  // for append only (e.g., '## Synthesized')
+            "section": "string",  // for append only (e.g., '## Synthesized')
+            "source_spans": ["exact source anchors supporting this change"]
         }
-    ]
+    ],
+    "claims": [{"claim_id": "stable identifier", "text": "durable lesson", "claim_type": "lesson|procedure|decision",
+                "source_spans": ["exact supporting source anchors"], "status": "proposed",
+                "scope": {"repository": "working directory when specific"},
+                "verification_evidence": [], "supersedes": [], "contradicts": [], "depends_on": []}]
 }
 """.strip()
 
@@ -234,6 +279,11 @@ def validate_knowledge_pack(pack: KnowledgePack) -> list[str]:
         warnings.append("Missing session_id")
     if not pack.date:
         warnings.append("Missing date")
+    else:
+        try:
+            date.fromisoformat(pack.date)
+        except (ValueError, TypeError):
+            warnings.append("Invalid date")
     if not pack.title:
         warnings.append("Missing title")
 
@@ -252,13 +302,21 @@ def validate_knowledge_pack(pack: KnowledgePack) -> list[str]:
             warnings.append(f"NoteOp {i}: invalid op '{op.op}'")
         if not op.path:
             warnings.append(f"NoteOp {i}: missing path")
+        elif not isinstance(op.path, str) or not op.path.endswith(".md") or op.path.startswith(("/", "~")) or ".." in op.path.replace("\\", "/").split("/"):
+            warnings.append(f"NoteOp {i}: unsafe path")
+        if not isinstance(op.body_markdown, str) or len(op.body_markdown) > 100_000:
+            warnings.append(f"NoteOp {i}: invalid or oversized body")
         if op.op == "create" and not op.frontmatter:
             warnings.append(f"NoteOp {i}: create op missing frontmatter")
-        if op.op == "create":
+        if op.frontmatter is not None and not isinstance(op.frontmatter, dict):
+            warnings.append(f"NoteOp {i}: frontmatter must be an object")
+        elif op.op == "create":
             note_type = (op.frontmatter or {}).get("type")
             if note_type not in NOTE_TYPES:
                 warnings.append(f"NoteOp {i}: missing or invalid type {note_type!r}; choose an explicit note type")
         if op.op == "upsert_block" and not op.managed_block_id:
             warnings.append(f"NoteOp {i}: upsert_block op missing managed_block_id")
+        if op.managed_block_id and (not isinstance(op.managed_block_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", op.managed_block_id)):
+            warnings.append(f"NoteOp {i}: invalid managed block ID")
 
     return warnings

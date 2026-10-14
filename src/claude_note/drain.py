@@ -10,6 +10,7 @@ import sys
 from datetime import datetime
 
 from . import config
+from . import mutation
 from . import queue_manager
 from . import session_tracker
 from . import note_writer
@@ -41,6 +42,10 @@ def run_synthesis_for_drain(state) -> bool:
         if results["inbox_updated"]:
             print(f"  Synthesized: {len(pack.concepts)} concepts, {len(pack.decisions)} decisions")
 
+        for staged in results.get("notes_staged", []):
+            print(f"  Note staged for review: {staged['pending_path']} ({staged['reason']})")
+        for error in results["errors"]:
+            print(f"  Synthesis error: {error}")
         return not results["errors"]
 
     except Exception as e:
@@ -56,11 +61,11 @@ def drain_all() -> tuple:
     """
     # Group events by session
     sessions: dict[str, list] = {}
-    for event in queue_manager.read_all_events():
+    for event in queue_manager.read_pending_events():
         if event.session_id not in sessions:
             sessions[event.session_id] = []
         sessions[event.session_id].append(event)
-    for session_id in session_tracker.get_pending_synthesis_sessions():
+    for session_id in set(session_tracker.get_pending_synthesis_sessions() + session_tracker.get_sessions_ready_for_write()):
         sessions.setdefault(session_id, [])
 
     sessions_processed = 0
@@ -73,6 +78,9 @@ def drain_all() -> tuple:
                 continue
 
             try:
+                previous = session_tracker.load_session_state(session_id)
+                processed = set(previous.processed_event_ids) if previous else set()
+                new_events = [event for event in events if event.event_id not in processed]
                 # Update session state from events
                 state = session_tracker.update_session_from_events(session_id, events)
 
@@ -86,6 +94,7 @@ def drain_all() -> tuple:
                     for e in state.events
                 )
                 if not has_user_prompt:
+                    session_tracker.save_session_state(state)
                     continue
 
                 # Skip already-written sessions (same as worker.py)
@@ -98,7 +107,19 @@ def drain_all() -> tuple:
                 sessions_processed += 1
 
                 # Write the note (ignore debounce in drain mode)
-                note_path = note_writer.update_session_note(state)
+                try:
+                    note_path = note_writer.update_session_note(state)
+                except mutation.MutationConflict as conflict:
+                    state.note_pending_path = str(conflict.result.staged_path)
+                    state.note_pending_revision = conflict.result.revision or ""
+                    if new_events:
+                        session_tracker.schedule_synthesis(state)
+                    session_tracker.save_session_state(state)
+                    print(f"Session note staged for review: {conflict.result.staged_path}")
+                    session_tracker.run_pending_synthesis(state, run_synthesis_for_drain, force=True)
+                    continue
+                state.note_pending_path = ""
+                state.note_pending_revision = ""
                 print(f"Wrote: {note_path.name}")
                 notes_written += 1
 

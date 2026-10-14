@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 os.environ.setdefault("CLAUDE_NOTE_VAULT_ROOT", tempfile.mkdtemp())
@@ -48,7 +49,7 @@ TABLE = {
 
 class MatchTests(unittest.TestCase):
     def test_path_suffix_stem_and_case(self):
-        self.assertTrue(evals.matches("/Users/x/notes/sub/Never-Build-On-A-Small-Box.md", ["never-build-on-a-small-box"]))
+        self.assertFalse(evals.matches("/Users/x/notes/sub/Never-Build-On-A-Small-Box.md", ["never-build-on-a-small-box"]))
         self.assertTrue(evals.matches("qmd://notes/sub/never-build-on-a-small-box.md", ["notes/sub/never-build-on-a-small-box.md"]))
         self.assertFalse(evals.matches("qmd://notes/never-build.md", ["never-build-on-a-small-box"]))
 
@@ -59,9 +60,9 @@ class RetrievalTests(unittest.TestCase):
 
     def test_hit_miss_baseline_and_off_topic(self):
         run = self.run_cases([
-            {"id": "a", "question": "Can I just run npm run build on the 4 GB box?", "expect": ["never-build-on-a-small-box"], "split": "test"},
-            {"id": "b", "question": "My urlopen call has timeout=10 but it hung for an hour", "expect": ["socket-timeout-is-not-a-deadline"], "split": "test"},
-            {"id": "c", "question": "Why do our cron jobs drift by a few minutes every week", "expect": ["cron-drift"], "split": "test"},
+            {"id": "a", "question": "Can I just run npm run build on the 4 GB box?", "expect": ["notes/never-build-on-a-small-box.md"], "split": "test"},
+            {"id": "b", "question": "My urlopen call has timeout=10 but it hung for an hour", "expect": ["notes/socket-timeout-is-not-a-deadline.md"], "split": "test"},
+            {"id": "c", "question": "Why do our cron jobs drift by a few minutes every week", "expect": ["notes/cron-drift.md"], "split": "test"},
             {"id": "d", "question": "How do I center a div with flexbox please", "expect": [], "split": "test"},
         ])
         m = run["metrics"]["test"]
@@ -80,7 +81,7 @@ class RetrievalTests(unittest.TestCase):
         table = {f"note-{i}": {"run", "npm", "box"} for i in range(6)}
         table["never-build-on-a-small-box"] = {"run", "npm", "box"}
         run = evals.run_retrieval([evals.Case.from_dict({"id": "a", "question": "Can I just run npm run build on the box?",
-                                                         "expect": ["never-build-on-a-small-box"], "split": "dev"})],
+                                                         "expect": ["notes/never-build-on-a-small-box.md"], "split": "dev"})],
                                   settings(inject=2), runner_for(table))
         row = run["rows"][0]
         self.assertIsNone(row["rank"])
@@ -88,12 +89,12 @@ class RetrievalTests(unittest.TestCase):
         self.assertEqual(run["metrics"]["dev"]["ranked_out"], 1.0)
         self.assertIn("ranking", [t["area"] for t in evals.advice({**run, "metrics": {"test": run["metrics"]["dev"]}}, None)])
 
-    def test_a_pushed_copy_with_the_same_title_counts(self):
+    def test_a_pushed_copy_requires_explicit_equivalence(self):
         def run(cmd, timeout):
             return [{"file": "qmd://foresyn/inbox/me/2026-10-01/copy-of-it.md", "title": "Never run the build on the 4 GB box", "snippet": BODY}]
         case = evals.Case.from_dict({"id": "a", "question": "Can I just run npm run build on the box?",
                                      "expect": ["notes/never-build-on-a-small-box.md"], "split": "dev",
-                                     "note_title": "Never run the build on the 4 GB box"})
+                                     "note_title": "Never run the build on the 4 GB box", "expected_sources": [{"source_id": "qmd://notes/never-build-on-a-small-box.md", "mirrors": [{"source_id": "qmd://foresyn/inbox/me/2026-10-01/copy-of-it.md"}]}]})
         self.assertEqual(evals.score_case(case, settings(), run)["rank"], 1)
 
     def test_split_is_by_note_never_by_row(self):
@@ -231,13 +232,80 @@ class AnswerTests(unittest.TestCase):
         self.assertEqual(out["with_follows"], 1.0)
         self.assertEqual(out["without_follows"], 0.0)
 
+    def test_failed_answer_stays_in_scheduled_denominator_and_cli_counts(self):
+        probes = [{"id": identity, "question": identity, "expect": [f"notes/{identity}.md"],
+                   "split": "test", "note_type": "decision"} for identity in ("successful", "failed")]
+        res = recall.Result(status="hit", hits=[recall.Hit(uri="qmd://notes/successful.md", title="Synthetic", snippet=BODY)])
+
+        def answer(prompt):
+            if "Question: failed" in prompt and "RECALL CONTEXT" not in prompt:
+                return None
+            return "WITH" if "RECALL CONTEXT" in prompt else "WITHOUT"
+
+        def ask(prompt):
+            return {"follows": "X" if '<answer id="X">\nWITH\n' in prompt else "Y"}
+
+        with mock.patch.object(evals, "_note_text", return_value="Public synthetic team rule"), \
+                mock.patch.object(recall, "recall", return_value=res), \
+                mock.patch.object(recall, "format_context", return_value="RECALL CONTEXT"):
+            out = evals.run_answers(probes, n=2, settings=settings(), ask=ask, answer=answer)
+        self.assertEqual((out["attempted"], out["judged"], out["unjudged"], out["n"]), (2, 1, 1, 1))
+        self.assertEqual(len(out["rows"]), 2)
+        failed = next(row for row in out["rows"] if row["id"] == "failed")
+        self.assertEqual(failed["follows"], "invalid")
+        self.assertIn("answer-without-unavailable", failed["errors"])
+        self.assertEqual(out["with_follows"], .5)
+        self.assertEqual(out["without_follows"], 0)
+        self.assertEqual(out["judged_with_follows"], 1)
+        self.assertEqual((out["control_attempted"], out["control_judged"], out["control_unjudged"]), (2, 1, 1))
+
+        from claude_note import evals_cli
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            probe_path = root / "probes.jsonl"
+            probe_path.write_text("\n".join(json.dumps(p) for p in probes))
+            stdout = io.StringIO()
+            with mock.patch.multiple(evals, EVAL_DIR=root, PROBES=probe_path, RUNS=root / "runs.jsonl"), \
+                    mock.patch.object(evals_cli, "ANSWERS_LAST", root / "last-answers.json"), \
+                    mock.patch.object(evals, "run_answers", return_value=out), mock.patch("sys.stdout", stdout):
+                status = evals_cli.main(SimpleNamespace(eval_command="answers", n=2, model="", judge_model="", json=False))
+            self.assertEqual(status, 0)
+            self.assertIn("2 attempted · 1 judged · 1 unjudged", stdout.getvalue())
+            self.assertIn("Across all attempted questions, answer follows the team's note: with recall 50%", stdout.getvalue())
+            self.assertIn("Among judged pairs only: with recall 100%", stdout.getvalue())
+            self.assertEqual(len(json.loads((root / "last-answers.json").read_text())["rows"]), 2)
+
+    def test_missing_note_and_model_or_judge_failure_keep_all_rows(self):
+        probes = [{"id": identity, "question": identity, "expect": [f"notes/{identity}.md"],
+                   "split": "test", "note_type": "gotcha"} for identity in ("missing", "answer-error", "judge-error")]
+
+        def answer(prompt):
+            if "answer-error" in prompt:
+                raise RuntimeError("Synthetic adapter failed")
+            return "A public synthetic answer"
+
+        def ask(prompt):
+            raise TimeoutError("Synthetic judge timed out")
+
+        with mock.patch.object(evals, "_note_text", side_effect=lambda ref, _: "" if "missing" in ref else BODY), \
+                mock.patch.object(recall, "recall", return_value=recall.Result(status="miss")):
+            out = evals.run_answers(probes, n=3, settings=settings(), ask=ask, answer=answer)
+        self.assertEqual((out["attempted"], out["judged"], out["unjudged"]), (3, 0, 3))
+        self.assertEqual(out["with_follows"], 0)
+        self.assertIsNone(out["judged_with_follows"])
+        rows = {row["id"]: row for row in out["rows"]}
+        self.assertEqual(set(rows), {"missing", "answer-error", "judge-error"})
+        self.assertIn("missing-note", rows["missing"]["errors"])
+        self.assertIn("answer-without-RuntimeError", rows["answer-error"]["errors"])
+        self.assertIn("judge-TimeoutError", rows["judge-error"]["errors"])
+
 
 class DashboardTests(unittest.TestCase):
     def test_renders_self_contained(self):
         run = evals.run_retrieval([evals.Case.from_dict({"id": "a", "question": "Can I just run npm run build on the 4 GB box?",
-                                                         "expect": ["never-build-on-a-small-box"], "split": "test"}),
+                                                         "expect": ["notes/never-build-on-a-small-box.md"], "split": "test"}),
                                    evals.Case.from_dict({"id": "c", "question": "Why do our cron jobs drift every single week",
-                                                         "expect": ["cron-drift"], "split": "test"})],
+                                                         "expect": ["notes/cron-drift.md"], "split": "test"})],
                                   settings(), runner_for(TABLE))
         page = evals_dashboard.render([{k: v for k, v in run.items() if k != "rows"}], run, {"prompts": 0, "days": 30}, None,
                                       evals.advice(run, None))
@@ -252,6 +320,7 @@ class NightlyTests(unittest.TestCase):
 
     def run_(self, t, hit, junk=0.0, sett=None, set_id="probe+offtopic:110:x"):
         return {"kind": "retrieval", "t": t, "set": set_id, "settings": sett or {"inject": 4},
+                "scorer_version": evals.SCORER_VERSION, "comparable": True, "fingerprint": {"set": set_id, "settings": sett or {"inject": 4}},
                 "metrics": {"test": {"hit_at_k": hit}, "all": {"hit_at_k": hit, "false_injection_rate": junk}}}
 
     def test_flags_a_clear_drop_against_the_recent_median(self):

@@ -81,6 +81,11 @@ class QMDTests(unittest.TestCase):
 
 
 class SynthesisRetrievalTests(unittest.TestCase):
+    def setUp(self):
+        policy = mock.patch.object(synthesizer.egress, "policy", return_value={"default": ["host", "model"]})
+        policy.start()
+        self.addCleanup(policy.stop)
+
     def test_prompt_retains_conclusions_and_actual_tool_outcomes(self):
         transcript = transcript_reader.TranscriptContent(
             session_id="s1", user_prompts=["Investigate retry behavior"],
@@ -90,7 +95,7 @@ class SynthesisRetrievalTests(unittest.TestCase):
         with mock.patch.object(config, "QMD_SYNTH_ENABLED", False):
             prompt = synthesizer.build_synthesis_prompt(transcript, vault_indexer.VaultIndex())
         self.assertIn("Verified the current failure is authentication.", prompt)
-        self.assertIn("Outcome (failed): 401 unauthorized", prompt)
+        self.assertIn("Outcome (failure; ): 401 unauthorized", prompt)
         self.assertIn("An assistant proposal", prompt)
         self.assertLessEqual(len(synthesizer._format_assistant_texts(["x" * 30000] * 100)), 12100)
         prompts = ["Original goal"] + ["Earlier investigation " * 25] * 100 + ["Correction: retain the actual result"]
@@ -130,8 +135,12 @@ class SynthesisRetrievalTests(unittest.TestCase):
         self.assertNotIn("stale source", context)
 
     def test_synthesis_honors_configured_timeout(self):
-        transcript = transcript_reader.TranscriptContent(session_id="s1")
-        pack = mock.Mock(time="", assistant="")
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        source = Path(temporary.name) / 'session.jsonl'
+        source.write_text('{"type":"user","message":{"content":"public fixture"}}\n')
+        transcript = transcript_reader.TranscriptContent(session_id="s1", source_path=str(source.resolve()))
+        pack = synthesizer.knowledge_pack.KnowledgePack("s1", "2026-01-01", "Public test")
         with mock.patch.object(config, "SYNTH_TIMEOUT", 271), \
                 mock.patch.object(synthesizer, "build_synthesis_prompt", return_value="prompt"), \
                 mock.patch.object(synthesizer, "_claude_bin", return_value="claude"), \
@@ -149,7 +158,9 @@ class ConfigAliasTests(unittest.TestCase):
             (xdg / "claude-note").mkdir(parents=True)
             (xdg / "claude-note/config.toml").write_text('vault_root = "/configured-vault"\n')
             env = dict(os.environ, XDG_CONFIG_HOME=str(xdg), CLAUDE_NOTE_VAULT=str(Path(tmp) / "override"))
-            result = subprocess.run(["python3", "-c", "from claude_note.config import VAULT_ROOT; print(VAULT_ROOT)"],
+            import sys
+            env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+            result = subprocess.run([sys.executable, "-c", "from claude_note.config import VAULT_ROOT; print(VAULT_ROOT)"],
                                     env=env, text=True, capture_output=True, check=True)
             self.assertEqual(result.stdout.strip(), str(Path(tmp) / "override"))
 

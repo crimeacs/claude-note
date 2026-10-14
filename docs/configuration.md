@@ -98,3 +98,80 @@ Environment: `CLAUDE_NOTE_RECALL=off` disables recall; `CLAUDE_NOTE_RECALL_INDEX
 index; `CLAUDE_NOTE_RECALL_LOG=0` stops logging (the doctor's probes use it).
 
 The optional push adapter reads its destination and credentials from `~/.foresyn/config.json`; do not put credentials in this repository or notes. See [shared-system boundaries](current-system.md).
+
+## Source egress policy
+
+Version 2.1 defaults to `local` and `host` audiences. Capture, Markdown storage and recall
+can run locally; synthesis, optional external judging and staging require explicit grants.
+Every source in a derivation must permit the destination. Marked private sources, malformed
+privacy controls and denied origins remain local even under a broad grant. Redaction runs
+after authorization and does not identify ordinary business confidentiality.
+
+```toml
+[egress]
+default = ["local", "host"]
+
+[[egress.rules]]
+source = "/absolute/approved-project/*"
+audiences = ["local", "host", "model"]
+
+[[egress.rules]]
+source = "/absolute/approved-project/private/*"
+audiences = ["local", "host"]
+restrict = true
+```
+
+Use actual absolute source paths. Background capture includes the transcript, tool input
+paths, working directory, included catalog metadata and retrieved sources. A generated note
+also retains restrictive lineage in local protected state. Removing its visible provenance
+does not declassify it. Grant `staging` separately only when those source owners authorize the
+configured destination. Existing generated notes without known lineage are deferred.
+
+Normalized chat imports retain the original export ZIP or native database as a restrictive
+origin. Granting the generated transcript folder cannot override a deny on that origin.
+New ZIP sweeps retain the original file and archive a copy only when new conversations are
+imported; deleting an origin pauses external use of its derivatives. Legacy imports with an
+unknown origin require reimport or owner reconciliation rather than an inferred grant.
+Source inspection supports bounded UTF-8 text/native JSONL and recognized PDF, Word, assistant
+export ZIP and SQLite inputs. Unsupported, oversized or linked final sources fail closed.
+
+Model calls run with no tools, MCP servers, skills, project settings or session persistence,
+from an empty directory with an allowlisted environment. Older unsupported Claude CLI versions
+fail closed. Provider authentication and quota are reported separately from local readiness.
+
+## Claim inspection and attestation
+
+Canonical claim records live in Markdown. `claude-note claim inspect claims/<id>.md` shows
+the exact claim digest and current detached authority. After inspecting the claim and local
+evidence, an owner can attest that exact digest:
+
+```sh
+claude-note claim attest claims/<id>.md --authority verified \
+  --evidence checks/result.md --confirm-digest <digest-from-inspect>
+```
+
+`approved` records a governing choice; `verified` records inspected support. Neither follows
+from the producing assistant's identity or a note saying it was approved. Evidence changes,
+deletion, scope, expiry, unresolved contradictions and invalid dependencies prevent admission.
+Use `claim revoke` with the inspected digest to withdraw a local attestation. The private
+receipt key protects against note-content forgery, not a compromised local account.
+
+Retrieval supports `[recall] repository`, `environment` and `audiences` for claim applicability,
+plus `context_token_budget` (a conservative UTF-8-byte bound) and absolute `budget` deadlines.
+Unknown required context denies a machine claim; legacy prose remains an unverified lead.
+
+## Evaluation and recovery
+
+`claude-note eval tasks` runs simulated policy contracts. Actual constrained code editing is
+separate: `claude-note eval agent-tasks --help` describes public fixtures, provider budgets,
+OS sandbox requirements and exact baseline configuration. A missing backend or failed model
+call stays in the scheduled denominator. Unknown runtime identities do not join historical
+trends. Nightly runs require explicit `[eval.agent_tasks]` settings before provider calls.
+
+Expensive extraction packs and immutable appended source snapshots survive crashes before
+effects complete. Eight failed synthesis attempts park the session for inspection; a new
+completed turn or explicit resynthesis can resume it. Human-file replacements and malformed
+managed blocks become proposals under `.claude-note/mutations/pending`. Staging is reported
+separately from an applied canonical change. External upload intents are read back at their
+bound destination after unknown outcomes; conflicts and revocation requests await destination
+reconciliation instead of silently overwriting reviewed content.

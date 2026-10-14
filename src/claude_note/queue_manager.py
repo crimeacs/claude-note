@@ -2,12 +2,15 @@
 
 import fcntl
 import os
+import hashlib
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Optional
 
 from . import config
 from . import models
+from .state_io import append_line, atomic_json, read_json
 
 
 def get_queue_file(date: Optional[datetime] = None) -> Path:
@@ -25,14 +28,7 @@ def enqueue_event(event: models.QueuedEvent) -> None:
 
     json_line = event.to_json() + "\n"
 
-    # Open file with append mode, using file locking for safety
-    fd = os.open(str(queue_file), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        os.write(fd, json_line.encode())
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+    append_line(queue_file, json_line.encode())
 
 
 def read_queue_files() -> Iterator[Path]:
@@ -64,6 +60,76 @@ def read_all_events() -> Iterator[models.QueuedEvent]:
     """Read all events from all queue files."""
     for queue_file in read_queue_files():
         yield from read_events(queue_file)
+
+
+def read_pending_events(limit: int = 10000) -> Iterator[models.QueuedEvent]:
+    """Advance append-journal offsets only past durably captured session events.
+
+    Delivery itself does not acknowledge a record. Prefix digests detect edits
+    and truncation, with full replay on a mismatch. A partial final line waits
+    for the append to complete. Session-state dedup remains the effect boundary.
+    """
+    from .session_tracker import load_session_state
+    state_cache = {}
+    delivered = 0
+    for path in read_queue_files():
+        cursor = config.STATE_DIR / "queue-offsets" / (path.stem + ".json")
+        try:
+            saved = read_json(cursor)
+        except (OSError, ValueError):
+            saved = {}
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            offset = saved.get("offset", 0)
+            digest = hashlib.sha256()
+            if not isinstance(offset, int) or offset < 0 or offset > info.st_size:
+                offset = 0
+            remaining = offset
+            while remaining:
+                chunk = handle.read(min(65536, remaining))
+                if not chunk:
+                    break
+                digest.update(chunk)
+                remaining -= len(chunk)
+            if remaining or (offset and digest.hexdigest() != saved.get("prefix_revision")):
+                handle.seek(0)
+                offset, digest = 0, hashlib.sha256()
+            acknowledged, contiguous = offset, True
+            acknowledged_digest = digest.hexdigest()
+            while True:
+                line = handle.readline(4 * 1024 * 1024 + 1)
+                if not line:
+                    break
+                if len(line) > 4 * 1024 * 1024 or not line.endswith(b"\n"):
+                    break  # incomplete/oversized evidence is never acknowledged
+                digest.update(line)
+                try:
+                    event = models.QueuedEvent.from_json(line)
+                except (ValueError, TypeError):
+                    # Invalid full records remain inspectable in the journal.
+                    if contiguous:
+                        acknowledged, acknowledged_digest = handle.tell(), digest.hexdigest()
+                    continue
+                if event.session_id not in state_cache:
+                    try:
+                        state = load_session_state(event.session_id)
+                    except ValueError:
+                        state = None
+                    state_cache[event.session_id] = set(state.processed_event_ids) if state else set()
+                captured = event.event_id in state_cache[event.session_id]
+                if contiguous and captured:
+                    acknowledged, acknowledged_digest = handle.tell(), digest.hexdigest()
+                elif not captured:
+                    contiguous = False
+                    yield event
+                    delivered += 1
+                    if delivered >= limit:
+                        break
+            if acknowledged > offset:
+                atomic_json(cursor, {"version": 1, "offset": acknowledged, "prefix_revision": acknowledged_digest})
+        if delivered >= limit:
+            return
 
 
 def get_events_by_session(session_id: str) -> list[models.QueuedEvent]:
@@ -107,7 +173,23 @@ def cleanup_old_queue_files(keep_days: int = 7) -> None:
             file_date = datetime.strptime(queue_file.stem, "%Y-%m-%d").date()
             age_days = (cutoff - file_date).days
             if age_days > keep_days:
-                queue_file.unlink()
+                from .session_tracker import load_session_state
+                captured = True
+                try:
+                    raw = queue_file.read_bytes()
+                    for line in raw.splitlines(keepends=True):
+                        if not line.endswith(b"\n"):
+                            raise ValueError("Partial queue record")
+                        models.QueuedEvent.from_json(line)
+                except (OSError, ValueError, TypeError):
+                    continue
+                for event in read_events(queue_file):
+                    state = load_session_state(event.session_id)
+                    if not state or event.event_id not in state.processed_event_ids:
+                        captured = False
+                        break
+                if captured:
+                    queue_file.unlink()
         except ValueError:
             # Skip files that don't match the date pattern
             continue

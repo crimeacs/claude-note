@@ -7,6 +7,7 @@ Supports two modes:
 """
 
 import itertools
+import hashlib
 import json
 import os
 import re
@@ -14,12 +15,16 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from . import config
 from . import qmd_search
+from . import egress
+from .document_sections import sections
+from .state_io import atomic_json, read_json
 
 
 # =============================================================================
@@ -99,7 +104,8 @@ def convert_to_text(file_path: Path) -> str:
                 text = "\n\n".join(text_parts)
                 # Remove null bytes that can appear in PDF extraction
                 text = text.replace('\x00', '')
-                return text
+                if text.strip():
+                    return text
         except ImportError:
             pass
         except Exception:
@@ -113,7 +119,7 @@ def convert_to_text(file_path: Path) -> str:
                 text=True,
                 timeout=120,
             )
-            if result.returncode == 0:
+            if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.replace('\x00', '')
         except FileNotFoundError:
             pass
@@ -126,7 +132,7 @@ def convert_to_text(file_path: Path) -> str:
                 text=True,
                 timeout=120,
             )
-            if result.returncode == 0:
+            if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.replace('\x00', '')
         except FileNotFoundError:
             pass
@@ -251,13 +257,14 @@ Return ONLY valid JSON. No markdown, no explanation.
 # Knowledge Extraction
 # =============================================================================
 
-def extract_knowledge(
+def _extract_section_knowledge(
     content: str,
     title: str,
     filename: str,
     model: str = None,
     timeout: int = 180,
     mode: str = "literature",
+    source_path: str = "",
 ) -> dict:
     """
     Call Claude CLI to extract structured knowledge from document content.
@@ -270,10 +277,8 @@ def extract_knowledge(
     if model is None:
         model = getattr(config, "SYNTH_MODEL", "claude-sonnet-4-5-20250929")
 
-    # Truncate content if too long (rough token estimate: 4 chars per token)
-    max_chars = 100000  # ~25k tokens
-    if len(content) > max_chars:
-        content = content[:max_chars] + "\n\n[... content truncated ...]"
+    if len(content) > 25000:
+        raise ValueError("Extraction requires bounded source sections")
 
     # Select prompt based on mode
     prompt_template = INTERNAL_EXTRACTION_PROMPT if mode == "internal" else LITERATURE_EXTRACTION_PROMPT
@@ -284,16 +289,13 @@ def extract_knowledge(
     )
 
     # Disable hooks to prevent recursion
-    env = os.environ.copy()
-    env["CLAUDE_CODE_HOOKS_ENABLED"] = "false"
+    env = egress.model_env()
+    prompt = egress.prepare(prompt, audience="model", sources=[source_path or filename])
 
-    result = subprocess.run(
-        ["claude", "-p", prompt, "--model", model],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=timeout,
-    )
+    with tempfile.TemporaryDirectory(prefix='claude-note-model-') as work:
+        result = subprocess.run(egress.model_command('claude', prompt, model=model),
+                                capture_output=True, text=True, env=env,
+                                timeout=timeout, cwd=work)
 
     if result.returncode != 0:
         raise RuntimeError(f"Claude CLI failed: {result.stderr}")
@@ -317,9 +319,56 @@ def extract_knowledge(
         output = json_match.group()
 
     try:
-        return json.loads(output)
+        value = json.loads(output)
+        if not isinstance(value, dict) or not isinstance(value.get("notes", []), list):
+            raise ValueError("Extraction must be an object with a notes list")
+        if len(value.get("notes", [])) > 200:
+            raise ValueError("Too many concepts in a source section")
+        return value
     except json.JSONDecodeError as e:
         raise ValueError(f"Failed to parse extraction result: {e}\nOutput: {output[:500]}")
+
+
+def extract_knowledge(content, title, filename, model=None, timeout=180, mode="literature", source_path=""):
+    """Extract every section, caching expensive work before downstream mutation.
+
+    Repeated commands resume cached sections. A missed deadline raises instead
+    of publishing a prefix as a complete source. Equal sections reuse work;
+    source offsets/revisions are assigned after cache loading, never by a model.
+    """
+    parts = sections(content)
+    deadline = time.monotonic() + timeout
+    extracted = []
+    for part in parts:
+        key = hashlib.sha256(json.dumps(["sections-v1", part["revision"], title, filename, source_path,
+                model or config.SYNTH_MODEL, mode], sort_keys=True).encode()).hexdigest()
+        cache = config.STATE_DIR / "documents" / (key + ".json")
+        try:
+            value = read_json(cache)
+        except (OSError, ValueError):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Document extraction deadline; cached sections retained, run again to resume")
+            value = _extract_section_knowledge(part["text"], title, filename, model,
+                                               timeout=remaining, mode=mode, source_path=source_path)
+            atomic_json(cache, value)
+        for note in value.get("notes", []):
+            if not isinstance(note, dict) or not isinstance(note.get("summary", ""), str):
+                raise ValueError("Invalid extracted concept")
+            note["source_spans"] = [part["anchor"]]
+            note["source_revision"] = part["source_revision"]
+            note["verification"] = "proposed"
+        extracted.append(value)
+    result = dict(extracted[0])
+    # Preserve distinct findings, including contradictions. Similarity is only
+    # a link suggestion; it cannot erase a later source qualification.
+    result["notes"] = [note for value in extracted for note in value.get("notes", [])]
+    result["source_summary"] = "\n\n".join(value.get("source_summary", "") for value in extracted)
+    result["interesting_takeaways"] = "\n\n".join(value.get("interesting_takeaways", "") for value in extracted)
+    result["source_revision"] = parts[0]["source_revision"]
+    result["coverage"] = {"characters": len(content), "covered_characters": sum(p["end"]-p["start"] for p in parts),
+                          "sections": [{k: v for k, v in p.items() if k != "text"} for p in parts], "complete": True}
+    return result
 
 
 # =============================================================================
@@ -426,193 +475,123 @@ Return ONLY valid JSON. No markdown, no explanation.
 '''
 
 
-def _merge_concept_sources(
-    existing_note: Path,
-    new_concept: dict,
-    new_source_citation: str,
-    model: str = None,
-    source_note: Path = None,
-) -> Optional[Path]:
+def _source_metadata(value):
+    """Every extraction remains proposed and carries its real source anchors."""
+    spans = value.get('source_spans', [])
+    if not spans and isinstance(value.get('coverage'), dict):
+        spans = [part['anchor'] for part in value['coverage'].get('sections', []) if part.get('anchor')]
+    return {'verification': 'proposed', 'source_revision': value.get('source_revision', ''),
+            'source_spans': spans, 'coverage': json.dumps(value.get('coverage', {}), sort_keys=True),
+            'source_origin': value.get('source_origin', ''),
+            'derivation_sources': value.get('derivation_sources', [])}
+
+
+def _create_ingested_note(path, frontmatter, body, identity):
+    from . import mutation
+    content = mutation.serialize_frontmatter(frontmatter) + "\n\n" + body.rstrip() + "\n"
+    return mutation.create_note(path, content, vault_root=config.VAULT_ROOT,
+                                operation_id=identity).path
+
+
+def _preserve_additional_source(existing_note, concept, citation, source_note, reason):
+    """Keep source evidence immutable when a merge is capped, denied or uncertain."""
+    from . import mutation, provenance
+    identity = mutation.operation_id('additional-source', existing_note.name, citation, concept)
+    path = existing_note.with_name(existing_note.stem[:75] + '-source-' + identity[:16] + '.md')
+    source_link = _note_link(source_note) if source_note else citation
+    fm = provenance.stamp({'type': 'source' if existing_note.name.startswith('int-') else 'literature',
+                           'source': source_link, **_source_metadata(concept)})
+    body = (f"# {concept.get('title', concept.get('slug', 'Additional source'))}\n\n"
+            f"{concept.get('summary', '')}\n\n{concept.get('details', '')}\n\n"
+            f"## Source\n\n{source_link} — {citation}\n\n"
+            f"## Related concept\n\n{_note_link(existing_note)}\n\n"
+            f"Preserved separately: {reason}.\n")
+    _create_ingested_note(path, fm, body, identity)
+    # Physical append leaves the existing concept's prose and correction intact.
+    marker = '<!-- claude-note:additional-source:' + identity + ' -->'
+    def link(old):
+        if old is None or marker in old:
+            return None
+        return old + f"\n{marker}\nAdditional proposed evidence: {_note_link(path)}\n"
+    result = mutation.mutate(existing_note, link, vault_root=config.VAULT_ROOT,
+                             operation_id=mutation.operation_id('additional-source-link', identity))
+    if not result.applied:
+        print(f"  Related-source link staged for review: {result.staged_path}")
+    print(f"  Preserved additional proposed source: {path.name} ({reason})")
+    return path
+
+
+def _merge_concept_sources(existing_note: Path, new_concept: dict, new_source_citation: str,
+                           model: str = None, source_note: Path = None) -> Optional[Path]:
+    """Assess a cross-source addition; never let an assessment discard evidence.
+
+    New evidence is appended without rewriting the existing note. A cap, policy
+    denial, failed assessment or uncertain equivalence creates a linked immutable
+    proposed note instead. Existing human corrections remain authoritative text.
     """
-    Merge new concept info into an existing similar note.
-
-    Uses Claude to assess what's genuinely new and worth adding.
-    Updates the note's YAML sources array and appends new findings.
-
-    Args:
-        existing_note: Path to the existing note to merge into
-        new_concept: New concept dict with title, summary, details, relevance
-        new_source_citation: Citation string for the new source
-        model: Optional model override
-
-    Returns:
-        Path to merged note, or None if nothing new to add
-    """
-    # config imported at module level
-
-    # Check if merge is enabled
-    if not getattr(config, "INGEST_MERGE_ENABLED", True):
-        return None
-
-    if model is None:
-        model = getattr(config, "SYNTH_MODEL", "claude-sonnet-4-5-20250929")
-
-    # Read existing note
-    existing_content = existing_note.read_text()
-
-    # Parse YAML frontmatter to check source count
-    yaml_match = re.match(r'^---\n(.*?)\n---', existing_content, re.DOTALL)
-    if not yaml_match:
-        return None  # Can't parse, skip
-
-    yaml_content = yaml_match.group(1)
-
-    # Count existing sources
-    # Handle both single `source:` and array `sources:`
-    sources_match = re.search(r'sources:\s*\n((?:\s+-\s*.*\n)*)', yaml_content)
-    if sources_match:
-        source_lines = [l.strip() for l in sources_match.group(1).strip().split('\n') if l.strip().startswith('-')]
-        existing_source_count = len(source_lines)
-    else:
-        # Check for single source field
-        single_source_match = re.search(r'^source:\s*"?(.+?)"?\s*$', yaml_content, re.MULTILINE)
-        existing_source_count = 1 if single_source_match else 0
-
-    max_sources = getattr(config, "INGEST_MAX_SOURCES_PER_CONCEPT", 5)
-    if existing_source_count >= max_sources:
-        print(f"  Max sources ({max_sources}) reached for '{existing_note.name}', skipping merge")
-        return None
-
-    # Check if this source is already present
-    if new_source_citation in existing_content:
-        print(f"  Source already present in '{existing_note.name}', skipping")
-        return None
-
-    # Call Claude to assess if there's new info worth adding
-    prompt = MERGE_ASSESSMENT_PROMPT.format(
-        existing_content=existing_content[:8000],  # Truncate if very long
-        new_source=new_source_citation,
-        new_title=new_concept.get("title", ""),
-        new_summary=new_concept.get("summary", ""),
-        new_details=new_concept.get("details", ""),
-        new_relevance=new_concept.get("relevance", ""),
-    )
-
-    # Disable hooks to prevent recursion
-    env = os.environ.copy()
-    env["CLAUDE_CODE_HOOKS_ENABLED"] = "false"
-
+    from . import mutation
+    existing_content = mutation.read_text(existing_note, vault_root=config.VAULT_ROOT)
+    if existing_content is None:
+        raise FileNotFoundError(existing_note)
+    identity = mutation.operation_id('concept-source', new_source_citation, new_concept)
+    marker = '<!-- claude-note:concept-source:' + identity + ' -->'
+    if marker in existing_content:
+        return existing_note
+    def preserve(reason):
+        return _preserve_additional_source(existing_note, new_concept, new_source_citation, source_note, reason)
+    if not getattr(config, 'INGEST_MERGE_ENABLED', True):
+        return preserve('merge disabled')
+    source_count = len(re.findall(r'^\s*-\s*"?\[\[', existing_content, re.MULTILINE))
+    source_count += len(re.findall(r'^source:', existing_content, re.MULTILINE))
+    source_count += existing_content.count('<!-- claude-note:concept-source:')
+    if source_count >= getattr(config, 'INGEST_MAX_SOURCES_PER_CONCEPT', 5):
+        return preserve('concept source limit reached')
+    new_sources = list(new_concept.get('derivation_sources', []))
+    if new_concept.get('source_origin'):
+        new_sources.append(new_concept['source_origin'])
+    if not new_sources and source_note is not None and source_note.is_file():
+        new_sources.append(str(source_note))
+    if not new_sources:
+        return preserve('actual source path unavailable for model egress policy')
+    if len(existing_content) > 24000:
+        return preserve('existing note exceeds bounded merge assessment')
+    prompt = MERGE_ASSESSMENT_PROMPT.format(existing_content=existing_content,
+        new_source=new_source_citation, new_title=new_concept.get('title', ''),
+        new_summary=new_concept.get('summary', ''), new_details=new_concept.get('details', ''),
+        new_relevance=new_concept.get('relevance', ''))
     try:
-        result = subprocess.run(
-            ["claude", "-p", prompt, "--model", model],
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=60,
-        )
-
+        derivation_sources = sorted(set([str(existing_note),
+            *egress.derivations(existing_content), *new_sources]))
+        prompt = egress.prepare(prompt, audience='model', sources=derivation_sources)
+        with tempfile.TemporaryDirectory(prefix='claude-note-model-') as work:
+            result = subprocess.run(egress.model_command('claude', prompt, model=model or config.SYNTH_MODEL),
+                                    capture_output=True, text=True, env=egress.model_env(), timeout=60, cwd=work)
         if result.returncode != 0:
-            print(f"  Merge assessment failed: {result.stderr[:100]}")
-            return None
-
-        # Parse response
-        output = result.stdout.strip()
-        if output.startswith("```"):
-            first_newline = output.find("\n")
-            if first_newline > 0:
-                output = output[first_newline + 1:]
-            if output.endswith("```"):
-                output = output[:-3].strip()
-
-        json_match = re.search(r'\{[\s\S]*\}', output)
-        if json_match:
-            output = json_match.group()
-
-        assessment = json.loads(output)
-
-        if not assessment.get("has_new_info", False):
-            print(f"  Nothing new to add from '{new_source_citation}' to '{existing_note.name}'")
-            return None
-
-        new_info_summary = assessment.get("new_info_summary", "")
-        if not new_info_summary:
-            return None
-
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:
-        print(f"  Merge assessment error: {e}")
-        return None
-
-    # Perform the merge
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-
-    # Determine the prefix and folder for source link
-    prefix = "int" if existing_note.name.startswith("int-") else "lit"
-    folder = "internal" if prefix == "int" else "literature"
-    source_slug = slugify(new_source_citation)
-    new_source_link = _note_link(source_note) if source_note else f"[[{folder}/{prefix}-{source_slug}]]"
-
-    # Update YAML frontmatter
-    new_yaml = yaml_content
-
-    # Convert single `source:` to `sources:` array if needed
-    if sources_match:
-        # Already has sources array, append
-        new_source_line = f'  - "{new_source_link}"'
-        # Insert before the last source line's newline
-        insertion_point = sources_match.end(1)
-        new_yaml = yaml_content[:insertion_point].rstrip() + f'\n{new_source_line}\n' + yaml_content[insertion_point:].lstrip('\n')
-    elif single_source_match:
-        # Convert to array format
-        old_source = single_source_match.group(1).strip('"')
-        new_sources_block = f'sources:\n  - "{old_source}"\n  - "{new_source_link}"'
-        new_yaml = re.sub(r'^source:\s*"?.+?"?\s*$', new_sources_block, yaml_content, flags=re.MULTILINE)
-    else:
-        # No sources field, add one
-        new_yaml = yaml_content.rstrip() + f'\nsources:\n  - "{new_source_link}"\n'
-
-    # Add/update the `updated:` field
-    if 'updated:' in new_yaml:
-        new_yaml = re.sub(r'updated:\s*\S+', f'updated: {today}', new_yaml)
-    else:
-        new_yaml = new_yaml.rstrip() + f'\nupdated: {today}\n'
-
-    # Rebuild frontmatter
-    new_frontmatter = f"---\n{new_yaml.strip()}\n---"
-
-    # Get content after frontmatter
-    body = existing_content[yaml_match.end():].strip()
-
-    # Check if "## Additional Sources" section exists
-    additional_sources_match = re.search(r'^## Additional Sources\s*$', body, re.MULTILINE)
-
-    # Build the new source entry
-    new_entry = f"""
-**From {new_source_citation}:**
-{new_info_summary}
-"""
-
-    if additional_sources_match:
-        # Append to existing section
-        insert_pos = additional_sources_match.end()
-        # Find the next section or end
-        next_section = re.search(r'\n## ', body[insert_pos:])
-        if next_section:
-            insert_pos += next_section.start()
-        else:
-            insert_pos = len(body)
-        body = body[:insert_pos].rstrip() + "\n" + new_entry + "\n" + body[insert_pos:].lstrip()
-    else:
-        # Add new section before the footer (if present) or at the end
-        footer_match = re.search(r'\n---\s*\n\*Source:', body)
-        if footer_match:
-            body = body[:footer_match.start()] + "\n\n## Additional Sources\n" + new_entry + body[footer_match.start():]
-        else:
-            body = body.rstrip() + "\n\n## Additional Sources\n" + new_entry
-
-    # Write updated content
-    new_content = new_frontmatter + "\n\n" + body.strip() + "\n"
-    existing_note.write_text(new_content)
-
+            return preserve('merge assessment failed')
+        match = re.search(r'\{[\s\S]*\}', result.stdout)
+        assessment = json.loads(match.group() if match else result.stdout)
+        summary = assessment.get('new_info_summary', '')
+        if not assessment.get('has_new_info') or not isinstance(summary, str) or not summary.strip():
+            return preserve('assessment did not establish a new addition')
+    except egress.EgressDenied:
+        return preserve('model egress not authorized for every source')
+    except (subprocess.TimeoutExpired, OSError, ValueError, AttributeError):
+        return preserve('merge assessment unavailable or invalid')
+    metadata = _source_metadata(new_concept)
+    source_link = _note_link(source_note) if source_note else new_source_citation
+    addition = (f"\n{marker}\n## Additional proposed source: {new_source_citation}\n\n"
+                f"{summary}\n\n### Extracted evidence\n\n{new_concept.get('summary', '')}\n\n"
+                f"{new_concept.get('details', '')}\n\nSource: {source_link}\n"
+                f"Verification: proposed\nSource revision: {metadata['source_revision']}\n"
+                f"Source spans: {json.dumps(metadata['source_spans'])}\n"
+                + '<!-- claude-note:provenance ' + json.dumps({
+                    'derivation_sources': derivation_sources, 'source_revision': metadata['source_revision'],
+                    'source_spans': metadata['source_spans']}, sort_keys=True).replace('-->', '\\u002d\\u002d>') + ' -->\n')
+    result = mutation.mutate(existing_note, lambda old: None if old is None or marker in old else old + addition,
+                             vault_root=config.VAULT_ROOT, operation_id=identity)
+    if not result.applied:
+        print(f"  Concept addition staged for review: {result.staged_path}")
+        return preserve('canonical addition requires review')
     return existing_note
 
 
@@ -683,10 +662,10 @@ def create_source_note(
         output_dir: Directory to write the note to
         mode: "literature" or "internal"
     """
-    from . import managed_blocks, note_router, provenance
+    from . import managed_blocks, note_router, provenance, mutation
 
     note_path = _source_path(extraction, source_file, output_dir, mode)
-    note_router.resolve_note_path(note_path.name, output_dir)
+    note_router.resolve_note_path(note_path, config.VAULT_ROOT)
 
     # Build note content based on mode
     if mode == "internal":
@@ -712,12 +691,16 @@ def create_source_note(
 - **File:** `{source_file.name}`
 - **Ingested:** {date}
 - **Type:** {extraction.get("source_type", "unknown")}
+- **Verification:** proposed
+- **Source revision:** {extraction.get("source_revision", "")}
+- **Source spans:** {json.dumps(_source_metadata(extraction)["source_spans"])}
+- **Coverage:** {json.dumps(extraction.get("coverage", {}), sort_keys=True)}
 
 """
     if note_path.exists():
         if note_path.is_symlink():
             raise ValueError(f"Source note is a symlink: {note_path}")
-        existing = note_path.read_text(encoding="utf-8")
+        existing = mutation.read_text(note_path, vault_root=config.VAULT_ROOT)
         source_match = re.search(r'^source_file:\s*(.+)$', existing.split("\n---", 1)[0], re.MULTILINE)
         source_value = source_match.group(1).strip() if source_match else ""
         if source_value.startswith('"'):
@@ -729,15 +712,37 @@ def create_source_note(
             source_value = source_value.strip("'")
         if source_value != source_file.name:
             raise FileExistsError(f"Source note path is already used by another note: {note_path}")
-        managed_blocks.write_managed_block(note_path, "ingested-source", content, create_if_missing=True)
+        def update(old):
+            if old is None:
+                raise FileNotFoundError(note_path)
+            located = managed_blocks._locate(old, 'ingested-source')
+            block = (managed_blocks._make_start_marker('ingested-source') + "\n" + content + "\n"
+                     + managed_blocks._make_end_marker('ingested-source'))
+            proposed = old[:located[0]] + block + old[located[1]:] if located else old + "\n" + block + "\n"
+            # Refresh only our extraction metadata. All other frontmatter and
+            # surrounding text remain intact in the proposal/owned-file update.
+            match = re.match(r'^---\n(.*?)\n---', proposed, re.DOTALL)
+            if match:
+                fields = match.group(1)
+                for key in _source_metadata(extraction):
+                    fields = re.sub(r'^' + key + r':[^\n]*(?:\n[ \t]+[^\n]*)*\n?', '', fields, flags=re.MULTILINE)
+                metadata = mutation.serialize_frontmatter(_source_metadata(extraction)).split('\n', 1)[1].rsplit('\n', 1)[0]
+                proposed = '---\n' + fields.rstrip() + '\n' + metadata + '\n---' + proposed[match.end():]
+            return proposed
+        result = mutation.mutate(note_path, update, vault_root=config.VAULT_ROOT,
+            expected_revision=mutation.revision(existing), require_revision=True,
+            operation_id=mutation.operation_id('source-update', str(note_path), extraction, concept_links))
+        if not result.applied:
+            raise mutation.MutationConflict(result)
     else:
         fm = provenance.stamp({
             "type": "source" if mode == "internal" else "literature",
             "tags": tags, "source_file": source_file.name, "ingested": date,
+            **_source_metadata(extraction),
         })
         # Keep marker syntax identical to the managed-block writer.
         block = managed_blocks._make_start_marker("ingested-source") + "\n" + content + "\n" + managed_blocks._make_end_marker("ingested-source")
-        note_router.create_note(note_path.name, fm, block, output_dir)
+        _create_ingested_note(note_path, fm, block, mutation.operation_id('source-note', str(note_path), extraction))
     return note_path
 
 
@@ -770,8 +775,8 @@ def create_concept_note(
     slug = _concept_slug(concept)
     prefix = "int" if mode == "internal" else "lit"
     note_path = _concept_path(concept, output_dir, mode, source_note)
-    from . import note_router, provenance
-    note_router.resolve_note_path(note_path.name, output_dir)
+    from . import note_router, provenance, mutation
+    note_router.resolve_note_path(note_path, config.VAULT_ROOT)
 
     # Don't overwrite existing notes (exact match)
     if note_path.exists():
@@ -839,8 +844,9 @@ def create_concept_note(
     fm = provenance.stamp({
         "type": "source" if mode == "internal" else "literature",
         "tags": tags, "source": source_link, "added": date,
+        **_source_metadata(concept),
     })
-    note_router.create_note(note_path.name, fm, content, output_dir)
+    _create_ingested_note(note_path, fm, content, mutation.operation_id('concept-note', str(note_path), concept, source_citation))
     return note_path
 
 
@@ -900,7 +906,15 @@ def ingest_document(
             filename=file_path.name,
             model=model,
             mode=mode,
+            source_path=str(file_path),
         )
+    # Source identity is assigned by the importer, never by model output. It
+    # accompanies every child so later egress can intersect the original input.
+    extraction['source_origin'] = str(file_path)
+    extraction['derivation_sources'] = [str(file_path)]
+    for concept in extraction.get('notes', []):
+        concept['source_origin'] = str(file_path)
+        concept['derivation_sources'] = [str(file_path)]
     print(f"  {len(extraction.get('notes', []))} concepts found")
     for concept in extraction.get("notes", []):
         _concept_slug(concept)
@@ -915,7 +929,6 @@ def ingest_document(
         }
 
     # Create notes
-    output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Creating notes in {output_dir.name}/...")
 
     source_citation = extraction.get("key_citation") or title
@@ -935,7 +948,10 @@ def ingest_document(
         if note_path:
             index_paths.append(note_path)
             # Check if this was a merge (note already existed) vs new creation
-            if already_existed or note_path != expected_path:
+            if note_path.name.startswith(expected_path.stem + '-source-'):
+                concept_notes.append(note_path)
+                print(f"  Created proposed source: {note_path.name}")
+            elif already_existed or note_path != expected_path:
                 merged_notes.append(note_path)
                 print(f"  Merged into: {note_path.name}")
             else:

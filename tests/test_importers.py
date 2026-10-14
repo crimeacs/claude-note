@@ -64,7 +64,7 @@ class ImporterTests(unittest.TestCase):
         os.utime(path, (old, old))
         return path
 
-    def test_export_zips_import_once_and_move_to_done(self):
+    def test_export_zips_import_once_retain_origins_and_archive_new_versions(self):
         self._zip(self.tmp / "downloads", "data-2026-09-25.zip", CLAUDE_EXPORT, "users.json")
         self._zip(importers.IMPORTS_DIR, "anything.zip", CHATGPT_EXPORT)
         (self.tmp / "downloads" / "unrelated.zip").write_bytes(b"not a zip")
@@ -73,6 +73,8 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(counts["zips"], 2)
         self.assertTrue((importers.IMPORTS_DIR / "done/data-2026-09-25.zip").exists())
         self.assertTrue((importers.IMPORTS_DIR / "done/anything.zip").exists())
+        self.assertTrue((self.tmp / "downloads/data-2026-09-25.zip").exists())
+        self.assertTrue((importers.IMPORTS_DIR / "anything.zip").exists())
         self.assertTrue((self.tmp / "downloads/unrelated.zip").exists())
         self.assertTrue(importers.HEARTBEAT.exists())
 
@@ -87,6 +89,48 @@ class ImporterTests(unittest.TestCase):
         self._zip(importers.IMPORTS_DIR, "again.zip", CHATGPT_EXPORT)
         self.assertEqual(importers.sweep()["zips"], 0)
         self.assertEqual(len(self._events()), 4)
+
+    def test_export_origin_policy_survives_normalization_and_metadata_removal(self):
+        from claude_note import egress, transcript_reader
+        archive = self._zip(importers.IMPORTS_DIR, 'private.zip', CHATGPT_EXPORT)
+        self.assertEqual(importers.import_zip(archive, {}), 1)
+        transcript = next(importers.TRANSCRIPTS_DIR.glob('chatgpt/*.jsonl'))
+        content = transcript_reader.read_transcript(transcript)
+        self.assertIn(str(archive.absolute()), transcript_reader.derivation_sources(content))
+        rules = {'default': ['model'], 'rules': [{'source': str(archive.absolute()), 'audiences': ['host'], 'restrict': True}]}
+        with self.assertRaises(egress.EgressDenied):
+            egress.prepare('Confidential synthetic export', audience='model', sources=[str(transcript)], rules=rules)
+        records = [json.loads(line) for line in transcript.read_text().splitlines()]
+        for record in records:
+            record.pop('derivation_sources', None)
+        transcript.write_text(''.join(json.dumps(record) + '\n' for record in records))
+        with self.assertRaises(egress.EgressDenied):
+            egress.prepare('Confidential synthetic export', audience='model', sources=[str(transcript)], rules=rules)
+        self.assertEqual(egress.prepare('Public synthetic export', audience='model', sources=[str(transcript)], rules={'default': ['model']}), 'Public synthetic export')
+        archive.unlink()
+        with self.assertRaises(egress.EgressDenied):
+            egress.prepare('Former export', audience='model', sources=[str(transcript)], rules={'default': ['model']})
+
+    def test_unknown_legacy_import_origin_cannot_inherit_a_transcript_grant(self):
+        from claude_note import egress
+        path = importers.TRANSCRIPTS_DIR / 'chatgpt' / 'legacy.jsonl'
+        path.parent.mkdir(parents=True)
+        path.write_text('{"type":"user","message":{"content":"old export"}}\n')
+        with self.assertRaises(egress.EgressDenied):
+            egress.prepare('Old export', audience='model', sources=[str(path)], rules={'default': ['model']})
+
+    def test_native_database_origin_is_restricted_and_explicitly_inspectable(self):
+        from claude_note import egress
+        database = self.tmp / 'private.vscdb'
+        with sqlite3.connect(database) as connection:
+            connection.execute('create table fixture (content text)')
+        messages = [{'role': 'user', 'text': 'Public fixture'}, {'role': 'assistant', 'text': 'Public reply'}]
+        self.assertTrue(importers.write_session({}, 'cursor', 'native-origin', messages, origin_sources=[database]))
+        transcript = next(importers.TRANSCRIPTS_DIR.glob('cursor/*.jsonl'))
+        rules = {'default': ['model'], 'rules': [{'source': str(database), 'audiences': ['host'], 'restrict': True}]}
+        with self.assertRaises(egress.EgressDenied):
+            egress.prepare('Synthetic native import', audience='model', sources=[str(transcript)], rules=rules)
+        self.assertEqual(egress.prepare('Synthetic native import', audience='model', sources=[str(transcript)], rules={'default': ['model']}), 'Synthetic native import')
 
     def test_import_identity_includes_source_and_complete_conversation_id(self):
         seen = {}

@@ -38,6 +38,8 @@ from typing import Optional
 
 from . import config
 from . import provenance
+from . import egress
+from .state_io import atomic_json
 
 PUSH_TYPES = {"pattern", "gotcha", "decision", "reference", "project", "literature"}
 STATE_FILE = Path.home() / ".local/share/claude-note/push-state.json"
@@ -49,57 +51,7 @@ RUN_DEADLINE = 45 * 60       # wall-clock seconds for the whole run
 RETRY_DELAY = 5              # seconds before the single retry of a transient failure
 DETERMINISTIC = (401, 403, 429)
 
-# Well-known secret shapes (subset of the gitleaks / detect-secrets rules).
-# Order matters: specific rules first, generic assignment last.
-SECRET_PATTERNS = [
-    ("private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)")),
-    ("AWS key", re.compile(r"\b(?:AKIA|ASIA|AGPA|AIDA|AROA)[0-9A-Z]{16}\b")),
-    ("Anthropic key", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}")),
-    ("OpenAI key", re.compile(r"\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_\-]{20,}")),
-    ("Stripe key", re.compile(r"\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}")),
-    ("GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})")),
-    ("Slack token", re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}")),
-    ("Slack webhook", re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/]+")),
-    ("Google API key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}")),
-    ("Supabase key", re.compile(r"\bsb_(?:secret|publishable)_[A-Za-z0-9_\-]{20,}")),
-    ("Telegram bot token", re.compile(r"\b\d{8,10}:AA[A-Za-z0-9_\-]{33}\b")),
-    ("JWT", re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}")),
-    ("connection string", re.compile(r"\b[a-z][a-z0-9+.\-]*://[^\s:/@]+:[^\s@/]{3,}@[^\s/]+")),
-    ("bearer token", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9_\-.=]{20,}")),
-    ("secret", re.compile(
-        r"(?i)\b([A-Z0-9_]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|_key)[A-Z0-9_]*)"
-        r"(\s*[:=]\s*[\"']?)(?![\"']?(?:\[|<|\{|\(|\$|\*\*|\.\.\.|x{6}|(?:os|process|env|config|settings|self|args|req|request)\.))([^\s\"'`,;]{8,})")),
-]
-
-
-def redact(text: str) -> tuple[str, int]:
-    """Replace secrets with [REDACTED: <kind>]. Returns (text, count)."""
-    total = 0
-    for label, pattern in SECRET_PATTERNS:
-        if label == "secret":
-            text, n = pattern.subn(lambda m: f"{m.group(1)}{m.group(2)}[REDACTED: {label}]", text)
-        elif label == "connection string":
-            text, n = pattern.subn(lambda m: re.sub(r"://[^@]+@", f"://[REDACTED: {label}]@", m.group(0)), text)
-        else:
-            text, n = pattern.subn(f"[REDACTED: {label}]", text)
-        total += n
-    return text, total
-
-
-_FRONTMATTER_OPEN = re.compile(r"\A\ufeff?---[ \t]*(?:\r?\n|\Z)")
-_FRONTMATTER_BLOCK = re.compile(
-    r"\A\ufeff?---[ \t]*\r?\n(.*?)^---[ \t]*(?:\r?\n|\Z)", re.S | re.M)
-
-
-def frontmatter(text: str) -> dict:
-    """Top-level scalar keys of a YAML frontmatter block (no YAML dependency)."""
-    m = _FRONTMATTER_BLOCK.match(text)
-    out = {}
-    for line in (m.group(1).splitlines() if m else []):
-        kv = re.match(r"([A-Za-z_][\w-]*):\s*(.*)$", line)
-        if kv:
-            out[kv.group(1)] = kv.group(2).strip().strip("\"'")
-    return out
+from .privacy_text import SECRET_PATTERNS, redact, frontmatter, _FRONTMATTER_OPEN, _FRONTMATTER_BLOCK
 
 
 # Tags that mark a note as a session log or the synthesis inbox: never knowledge.
@@ -263,7 +215,12 @@ class Client:
         if status == 404:
             revision = 0
         elif status == 200:
-            revision = (got.get("document") or {}).get("revision", 0)
+            document = got.get("document") or {}
+            if document.get("content") == content:
+                return 200, got  # reconcile a lost response without another effect
+            # An existing staging artifact may have been reviewed or edited.
+            # Do not fetch its newest revision as permission to overwrite it.
+            return 409, {"error": "staging-content-conflict", "document": {"revision": document.get("revision")}}
         else:
             return status, got
         return self._call("PUT", path, {"path": path, "content": content,
@@ -280,11 +237,13 @@ def _load_state() -> dict:
     if raw.get("version") == 2:
         return {"version": 2,
                 "destinations": raw.get("destinations") if isinstance(raw.get("destinations"), dict) else {},
-                "legacy": raw.get("legacy") if isinstance(raw.get("legacy"), dict) else {}}
+                "legacy": raw.get("legacy") if isinstance(raw.get("legacy"), dict) else {},
+                "intents": raw.get("intents") if isinstance(raw.get("intents"), dict) else {},
+                "revocations": raw.get("revocations") if isinstance(raw.get("revocations"), list) else []}
     # Old receipts identify neither the remote tenant nor the local vault.
     # Keep them unbound until an explicit resend or a changed note establishes
     # a real receipt; assigning them to today's config would be a false claim.
-    return {"version": 2, "destinations": {},
+    return {"version": 2, "destinations": {}, "intents": {}, "revocations": [],
             "legacy": {k: v for k, v in raw.items() if isinstance(v, str)}}
 
 
@@ -332,10 +291,37 @@ def _has_known_receipt(state: dict, source: str, destination: Optional[dict]) ->
 
 
 def _save_state(state: dict) -> None:
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STATE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=1, sort_keys=True))
-    tmp.replace(STATE_FILE)
+    atomic_json(STATE_FILE, state)
+
+
+def reconcile_intents(state, client, destination, receipts, limit=20):
+    """Read back unknown outcomes at their exact bound destination before retry."""
+    if destination is None or not isinstance(client, Client):
+        return
+    checked = 0
+    for intent in state["intents"].values():
+        if intent.get("status") != "unknown" or intent.get("destination") != destination:
+            continue
+        if checked >= limit:
+            break
+        checked += 1
+        try:
+            status, got = client._call("GET", intent["remote_path"])
+        except (OSError, TimeoutError):
+            continue
+        if status == 200:
+            content = (got.get("document") or {}).get("content")
+            if isinstance(content, str) and hashlib.sha256(content.encode()).hexdigest() == intent["revision"]:
+                intent["status"] = "confirmed"
+                receipts[intent["source"]] = intent["revision"]
+            else:
+                intent["status"] = "conflict"
+        elif status == 404:
+            intent["status"] = "absent"
+        elif status in (401, 403):
+            break
+    if checked:
+        _save_state(state)
 
 
 def _describe(status: int, body: dict) -> str:
@@ -374,7 +360,7 @@ def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit:
     laptop = socket.gethostname().split(".")[0]
     state = _load_state()
     counts = {"pushed": 0, "unchanged": 0, "redacted": 0, "skipped": 0, "skipped_stub": 0,
-              "errors": 0, "not_eligible": 0, "legacy_deferred": 0}
+              "errors": 0, "not_eligible": 0, "legacy_deferred": 0, "policy_denied": 0, "unknown_outcomes": 0}
     if client is None:
         try:
             client = Client(json.loads(FORESYN_CONFIG.read_text()))
@@ -383,6 +369,8 @@ def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit:
                 raise
     destination = _destination(client, vault, person, email)
     receipts = _receipts(state, destination)
+    if not dry_run:
+        reconcile_intents(state, client, destination, receipts)
     started = time.monotonic()
     stop_reason = None
 
@@ -398,12 +386,29 @@ def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit:
             continue
         if not note_type:
             counts["not_eligible"] += 1
+            if rel.as_posix() in receipts:
+                revocation = {"source": rel.as_posix(), "destination": destination, "reason": "eligibility-revoked"}
+                if revocation not in state["revocations"]:
+                    state["revocations"].append(revocation)
             continue
         if is_stub(text):
             counts["skipped_stub"] += 1
             continue
         try:
-            content, n = redact(text)
+            from .verified_claims import parse as parse_claims
+            if frontmatter(text).get("assistant") and not egress.derivations(text):
+                raise egress.EgressDenied("Generated note has no bound derivation sources")
+            if any("staging" not in claim.audiences for claim in parse_claims(text)):
+                raise egress.EgressDenied("Derived claim does not permit staging")
+            _, n = redact(text)
+            content = egress.prepare(text, audience="staging", sources=[str(path)])
+        except egress.EgressDenied:
+            counts["policy_denied"] += 1
+            if rel.as_posix() in receipts:
+                revocation = {"source": rel.as_posix(), "destination": destination, "reason": "audience-revoked"}
+                if revocation not in state["revocations"]:
+                    state["revocations"].append(revocation)
+            continue
         except Exception:
             counts["skipped"] += 1  # never upload a note the scanner did not finish
             continue
@@ -433,13 +438,26 @@ def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit:
                     "assistant": assistant if assistant in provenance.ASSISTANTS else "",
                     "laptop": laptop, "source_path": str(rel),
                     "content_sha256": sha, "note_type": note_type, "redactions": n}
-        status, body = _put_once_more_if_transient(client, remote_path(person, day, rel), content, metadata)
+        remote = remote_path(person, day, rel)
+        operation = hashlib.sha256(json.dumps([destination, source, sha], sort_keys=True).encode()).hexdigest()
+        metadata["operation_id"] = operation
+        previous = state["intents"].get(operation, {})
+        if previous.get("status") in {"unknown", "conflict"}:
+            counts["unknown_outcomes"] += 1
+            continue  # reconcile the bound destination explicitly before retry
+        state["intents"][operation] = {"status": "unknown", "destination": destination,
+                                        "source": source, "remote_path": remote, "revision": sha}
+        _save_state(state)
+        status, body = _put_once_more_if_transient(client, remote, content, metadata)
         if status == 200:
+            state["intents"][operation]["status"] = "confirmed"
             counts["pushed"] += 1
             if destination is not None:
                 receipts[source] = sha
                 _save_state(state)
         else:
+            state["intents"][operation]["status"] = "unknown" if status == 0 or status >= 500 else "rejected"
+            _save_state(state)
             counts["errors"] += 1
             print(f"error: {rel}: {_describe(status, body)}", file=sys.stderr)
             if status in DETERMINISTIC:  # do not hammer
@@ -448,6 +466,9 @@ def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit:
 
     if stop_reason:
         counts["stopped"] = stop_reason
+    if not dry_run:
+        _save_state(state)
+    counts["revocations_pending"] = len(state["revocations"])
     if counts["legacy_deferred"]:
         print(f"{counts['legacy_deferred']} legacy push receipts have no recorded destination; "
               "unchanged notes were not resent. Check the configured destination, then run "
@@ -456,7 +477,8 @@ def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit:
             _save_state(state)
     # Touched on every clean run, including one with nothing to push: the
     # owner's app alerts when this file is older than 26 h.
-    if not dry_run and counts["errors"] == 0 and not stop_reason and not counts["legacy_deferred"]:
+    if (not dry_run and counts["errors"] == 0 and not stop_reason and not counts["legacy_deferred"]
+            and not counts["unknown_outcomes"] and not counts["revocations_pending"]):
         HEARTBEAT.parent.mkdir(parents=True, exist_ok=True)
         HEARTBEAT.write_text(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "counts": counts}))
     return counts

@@ -17,6 +17,7 @@ from . import config
 from . import models
 from . import note_writer
 from . import managed_blocks
+from . import mutation
 
 
 def clean_state_dir(max_age_days: int = 7, dry_run: bool = True) -> dict:
@@ -68,7 +69,8 @@ def clean_state_dir(max_age_days: int = 7, dry_run: bool = True) -> dict:
                     state_data = json.loads(state_file.read_text(encoding="utf-8"))
                 except (ValueError, OSError):
                     continue
-                if not isinstance(state_data, dict) or state_data.get("synthesis_pending"):
+                if (not isinstance(state_data, dict) or state_data.get("synthesis_pending")
+                        or state_data.get("note_pending_path")):
                     continue
                 results["bytes_freed"] += stat.st_size
                 results["states_removed"] += 1
@@ -93,6 +95,19 @@ def clean_state_dir(max_age_days: int = 7, dry_run: bool = True) -> dict:
     return results
 
 
+def _apply_cleanup(path, before, after, results, count_key):
+    """A destructive cleanup reports effects only after a confined commit."""
+    result = mutation.mutate(path, lambda current: after, vault_root=config.VAULT_ROOT,
+                             allow_protected=True, expected_revision=mutation.revision(before),
+                             operation_id=mutation.operation_id('cleanup', str(path), before, after))
+    results['status'] = result.status
+    if not result.applied:
+        results['proposed_' + count_key] = results[count_key]
+        results[count_key] = 0
+        results['pending_path'] = str(result.staged_path)
+        results['reason'] = result.reason
+
+
 def compress_session_timeline(note_path: Path, dry_run: bool = True) -> Optional[dict]:
     """
     Compress verbose timeline in a session note.
@@ -110,7 +125,7 @@ def compress_session_timeline(note_path: Path, dry_run: bool = True) -> Optional
     if not note_path.exists():
         return None
 
-    content = note_path.read_text(encoding="utf-8")
+    content = mutation.read_text(note_path, vault_root=config.VAULT_ROOT)
     lines = content.split("\n")
 
     # Find Timeline section
@@ -182,10 +197,7 @@ def compress_session_timeline(note_path: Path, dry_run: bool = True) -> Optional
         )
         new_content = "\n".join(new_lines)
 
-        # Atomic write
-        temp_path = note_path.with_suffix(".tmp")
-        temp_path.write_text(new_content, encoding="utf-8")
-        temp_path.rename(note_path)
+        _apply_cleanup(note_path, content, new_content, results, 'saved_bytes')
 
     return results
 
@@ -217,7 +229,7 @@ def dedupe_inbox(inbox_path: Path = None, similarity_threshold: float = 0.7, dry
     if not inbox_path.exists():
         return results
 
-    content = inbox_path.read_text(encoding="utf-8")
+    content = mutation.read_text(inbox_path, vault_root=config.VAULT_ROOT)
 
     # Parse entries
     entry_pattern = re.compile(
@@ -304,10 +316,7 @@ def dedupe_inbox(inbox_path: Path = None, similarity_threshold: float = 0.7, dry
                 # Remove from start of ## to start of next ## (or EOF)
                 new_content = new_content[:entry["start"]] + new_content[entry["end"]:]
 
-            # Atomic write
-            temp_path = inbox_path.with_suffix(".tmp")
-            temp_path.write_text(new_content, encoding="utf-8")
-            temp_path.rename(inbox_path)
+            _apply_cleanup(inbox_path, content, new_content, results, 'entries_removed')
 
     return results
 
@@ -334,7 +343,8 @@ def consolidate_managed_blocks(note_path: Path, dry_run: bool = True) -> dict:
     if not note_path.exists():
         return results
 
-    block_ids = managed_blocks.list_managed_blocks(note_path)
+    original = mutation.read_text(note_path, vault_root=config.VAULT_ROOT)
+    block_ids = managed_blocks.BLOCK_START_PATTERN.findall(original)
     results["total_blocks"] = len(block_ids)
 
     if len(block_ids) < 2:
@@ -343,7 +353,8 @@ def consolidate_managed_blocks(note_path: Path, dry_run: bool = True) -> dict:
     # Read content of each block
     blocks = []
     for block_id in block_ids:
-        content = managed_blocks.read_managed_block(note_path, block_id)
+        located = managed_blocks._locate(original, block_id)
+        content = located[2] if located else None
         if content:
             blocks.append({
                 "id": block_id,
@@ -385,10 +396,13 @@ def consolidate_managed_blocks(note_path: Path, dry_run: bool = True) -> dict:
 
     # If not dry run, remove redundant blocks (keep first)
     if not dry_run and groups:
+        proposed = original
         for group in groups:
-            # Keep the first block, delete the rest
             for block in group[1:]:
-                managed_blocks.delete_managed_block(note_path, block["id"])
+                located = managed_blocks._locate(proposed, block['id'])
+                if located:
+                    proposed = proposed[:located[0]] + proposed[located[1]:]
+        _apply_cleanup(note_path, original, proposed, results, 'blocks_removed')
 
     return results
 
@@ -548,5 +562,9 @@ def format_clean_results(results: dict) -> str:
     else:
         lines.append("Topic notes: (none had redundant blocks)")
         lines.append("")
+
+    for item in [*results['sessions'], results['inbox'], *results['topics']]:
+        if item and item.get('status') == 'staged':
+            lines.append(f"Staged for review: {item['pending_path']} ({item['reason']})")
 
     return "\n".join(lines)

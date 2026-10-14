@@ -10,7 +10,7 @@ from unittest import mock
 
 os.environ.setdefault("CLAUDE_NOTE_VAULT_ROOT", tempfile.mkdtemp())
 
-from claude_note import cleaner, config, ingest, knowledge_pack, managed_blocks, models, note_router, note_writer, provenance, push, qmd_search
+from claude_note import cleaner, config, ingest, knowledge_pack, managed_blocks, models, mutation, note_router, note_writer, provenance, push, qmd_search
 
 
 class VaultTestCase(unittest.TestCase):
@@ -200,7 +200,12 @@ class InboxAndSessionTests(VaultTestCase):
         state.session_id = "legacy-b"
         legacy = self.vault / note_writer.get_note_filename(state)
         legacy.write_text("# Legacy\n\n## Summary\n\nManual summary.\n\n## Timeline\n\nold\n\n## Decisions\n\nManual decision.\n")
-        self.assertEqual(note_writer.update_session_note(state), legacy)
+        with self.assertRaises(mutation.MutationConflict) as staged:
+            note_writer.update_session_note(state)
+        proposed = json.loads(staged.exception.result.staged_path.read_text())["content"]
+        self.assertIn("Manual summary.", proposed)
+        self.assertIn("Manual decision.", proposed)
+        self.assertIn("old", legacy.read_text())
         self.assertIn("Manual summary.", legacy.read_text())
         self.assertIn("Manual decision.", legacy.read_text())
         self.assertFalse((self.vault / "sessions" / legacy.name).exists())
@@ -258,13 +263,17 @@ class IngestQualityTests(VaultTestCase):
         path = ingest.create_source_note(self.extraction, self.source, self.literature, "2026-10-10", concept_paths=[actual, missing])
         path.write_text(path.read_text() + "\nHuman annotation.\n")
         self.extraction["source_summary"] = "Updated evidence."
-        ingest.create_source_note(self.extraction, self.source, self.literature, "2026-10-11", concept_paths=[actual])
+        with self.assertRaises(mutation.MutationConflict) as staged:
+            ingest.create_source_note(self.extraction, self.source, self.literature, "2026-10-11", concept_paths=[actual])
         text = path.read_text()
+        proposal = json.loads(staged.exception.result.staged_path.read_text())["content"]
         self.assertIn("[[literature/lit-existing-concept]]", text)
         self.assertNotIn("lit-missing", text)
         self.assertIn("Human annotation.", text)
-        self.assertEqual(text.count("Updated evidence."), 1)
-        self.assertNotIn("\nEvidence.\n", text)
+        self.assertNotIn("Updated evidence.", text)
+        self.assertIn("\nEvidence.\n", text)
+        self.assertEqual(proposal.count("Updated evidence."), 1)
+        self.assertIn("Human annotation.", proposal)
 
     def test_source_file_collision_never_replaces_an_existing_note(self):
         path = self.literature / "lit-study-2026.md"
@@ -326,16 +335,22 @@ class CleanerPreservationTests(VaultTestCase):
         entry = note_router.format_inbox_entry(pack)
         config.INBOX_PATH.write_text("# Inbox\n\n" + entry + entry + entry + "Human annotation.\n")
         result = cleaner.dedupe_inbox(dry_run=False)
-        self.assertEqual(result["entries_removed"], 1)
-        self.assertEqual(config.INBOX_PATH.read_text().count("Verified finding"), 2)
-        self.assertIn("Human annotation.", config.INBOX_PATH.read_text())
+        self.assertEqual(result["entries_removed"], 0)
+        self.assertEqual(result["proposed_entries_removed"], 1)
+        self.assertEqual(config.INBOX_PATH.read_text().count("Verified finding"), 3)
+        proposal = json.loads(Path(result["pending_path"]).read_text())["content"]
+        self.assertEqual(proposal.count("Verified finding"), 2)
+        self.assertIn("Human annotation.", proposal)
 
     def test_legacy_exact_body_duplicates_keep_latest_entry(self):
         config.INBOX_PATH.write_text("# Inbox\n\n## 2026-10-09 - Old title\n\nSame evidence.\n\n## 2026-10-10 - New title\n\nSame evidence.\n")
         result = cleaner.dedupe_inbox(dry_run=False)
-        self.assertEqual(result["entries_removed"], 1)
-        self.assertIn("New title", config.INBOX_PATH.read_text())
-        self.assertNotIn("Old title", config.INBOX_PATH.read_text())
+        self.assertEqual(result["entries_removed"], 0)
+        self.assertEqual(result["proposed_entries_removed"], 1)
+        self.assertIn("Old title", config.INBOX_PATH.read_text())
+        proposal = json.loads(Path(result["pending_path"]).read_text())["content"]
+        self.assertIn("New title", proposal)
+        self.assertNotIn("Old title", proposal)
 
     def test_pending_retry_and_unreadable_states_survive_retention(self):
         config.STATE_DIR.mkdir()
@@ -370,9 +385,13 @@ class CleanerPreservationTests(VaultTestCase):
         for block_id, text in (("first", old), ("correction", correction), ("duplicate", old)):
             managed_blocks.write_managed_block(note, block_id, text, create_if_missing=True)
         result = cleaner.consolidate_managed_blocks(note, dry_run=False)
-        self.assertEqual(result["blocks_removed"], 1)
+        self.assertEqual(result["blocks_removed"], 0)
+        self.assertEqual(result["proposed_blocks_removed"], 1)
         self.assertIn(correction, note.read_text())
-        self.assertEqual(note.read_text().count(old), 1)
+        self.assertEqual(note.read_text().count(old), 2)
+        proposal = json.loads(Path(result["pending_path"]).read_text())["content"]
+        self.assertIn(correction, proposal)
+        self.assertEqual(proposal.count(old), 1)
 
 
 if __name__ == "__main__":
