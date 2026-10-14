@@ -203,3 +203,124 @@ memory file can never count as the right answer, and "first" is a floor for that
   model before searching. It took 27 to 67 seconds on a 15,000-note index, against an 8 second
   budget for the whole hook, and loading that model inside an agent turn has taken a server down
   before. Not usable in a prompt hook; revisit when vector search can run without expansion.
+
+## Isolated task controls and their limits
+
+`eval agent-tasks` plans seven conditions: no memory, frozen static instructions,
+scoped lexical retrieval, **dense-only**, the pinned pre-change hybrid, the current
+corrected hybrid, and bounded history. The suite is `isolated-agent-code-v2`;
+previous six-condition runs are retained as a different comparison. Planning
+validates the complete schedule and finite budgets before preparing any fixture:
+
+```bash
+claude-note eval agent-tasks --cases 1
+```
+
+This prints seven scheduled cells and calls no model. `--prepare-retrieval`
+writes only synthetic notes/configuration into an empty directory. Actual task
+execution additionally requires `--execute`, an explicit model and budget,
+available account capacity, and the tools needed by each selected condition.
+An unchanged account/quota failure stops later model callbacks; it is not retried.
+
+The dense condition requires an existing local embedding model. Hybrids also
+require an existing reranker; only `current_hybrid` requires a read-only checkout
+at `5c1ec7e079eae7d6fe2f82b149a2f22b9bfc073a`. Missing old-checkout or reranker
+requirements fail the affected condition without disabling a healthy dense
+condition. Failure of the common public index preparation affects all vector
+conditions and remains visible in their scheduled rows.
+
+Dense-only sends the raw semantic request with no lexical rungs and consumes the
+server's vector order and exact `scored_text` passages. It calls neither BM25,
+fusion nor reranking, and has no lexical/CLI fallback. The original public file
+inventory and hashes are checked before and after retrieval. Source-authored
+status/generation fields remain evidence; an answer label or approval oracle does
+not select or rank the dense candidates. Wrong scope/revision/anchor, missing
+vector readiness and partial or malformed responses are unavailable outcomes.
+An available empty result is a miss. Whole anchored passages form a prefix that
+fits the same 4,096-character delivered-context cap; no replacement passage is
+filled from another retrieval method.
+
+Actual retrieval preparation is lazy and serialized: at most one disposable
+native server owner is admitted at once. Switching conditions first requires
+same-PGID absence, leader reap and drained-pipe proof. Adjacent cells of the same
+condition may reuse that owner. A failed `(condition, case ID)` is latched for the
+context and cannot start another operation; a later distinct cell may activate
+only after cleanup is proved. Shared index-preparation failure remains terminal
+for that context. Activation, teardown, provisioning, warmup and client attempts
+stay in the run, including bounded diagnostics, transport and known cleanup
+receipts when an operation fails. Actual queue/degradation observations remain
+separate from stable comparability fingerprints. An unreadable optional reranker
+does not disable embedding-only work. A
+cleanup failure blocks replacement and retains the public fixture for inspection.
+These receipts cover the owned process group, not detached descendants or native
+accelerator allocation lifetimes.
+
+Each activation records one readiness probe and one vector warmup. Hybrid
+activations add one rank warmup; the pinned legacy server also has its original
+implicit vector warmup, which is counted separately. The corrected rank warmup
+requires a positive configured-model, complete passage-ID scoring contract;
+nonempty legacy scores are explicitly weaker evidence. Warmups and provisioning
+are reported separately, and task elapsed time includes preparation spent for
+that cell. Randomized condition order may therefore deliberately create multiple
+recorded activations. This is not a cold-start reliability experiment.
+
+The actual adapter requires a macOS deny-default filesystem/network fence. Its
+children may read the explicit SDK, source, existing weights and public fixture,
+write only the disposable cache/tmp/data areas, and use the declared loopback
+port. Port 8182 is never a legal target. Unsupported hosts fail closed. Command
+pipes are capped at 256 KiB each. Evaluation children use `OPENSSL_CONF=/dev/null`
+so Node startup does not need to read the host's default OpenSSL configuration.
+The filesystem read boundary stays unchanged. The adapter creates its disposable
+database parent and data directory before provisioning. Commands use 15-second identity or
+180-second update/embed bounds; retrieval clients use 12 seconds; the outer
+server bootstrap ceiling is 90 seconds and does not change the server's internal
+startup or query deadlines. A native owner has a 600-second lifetime and cleanup
+has a five-second deadline shared with metadata checks. OS process construction
+is not hard-cancellable by this in-process timer; process metadata is captured
+before its size check, and no hard parent/native-memory ceiling is claimed.
+
+`stage_counts` and `stage_definitions` distinguish the denominators:
+
+- `scheduled` includes every declared task × condition cell.
+- `attempted` means the task cell was admitted after the account halt guard;
+  it does not mean a task completed.
+- `retrieval_attempted/completed` describe condition-memory assembly, including
+  no-memory, static and history controls. `external_backend_invoked` means a
+  vector callback was entered, not that an HTTP/SDK/model operation occurred.
+- `model_called/model_responded` mean the ask callback was entered/returned.
+  They are not independently attested provider transport counts.
+- `verification_attempted/completed` mean the trusted parent verifier was
+  entered/returned an object. `verified_success` additionally requires all named
+  checks to pass and no task error.
+
+Each stage's skipped cells and reasons remain visible. Provider budget reservation
+is conservative; missing reported cost is unknown, not zero. Partial, unavailable,
+failed and budget-stopped cells cannot disappear from all-scheduled task-success
+rates. HTTP observations and preparation events are separate from callback counts.
+
+### Native feasibility checkpoint (14 October 2026)
+
+This control is experimental. The latest isolated public-fixture attempt completed
+QMD indexing and embedding, started one server and passed its readiness probe.
+Its single vector warmup hit the eight-second client timeout; the task search
+was skipped. The scheduled cell is unavailable, with zero task-query successes,
+and was not retried. The two earlier failed preparation attempts remain recorded.
+All five owned process groups were confirmed empty with their leaders reaped and
+pipes drained. Teardown required TERM and KILL for the server; those receipts do
+not prove native allocator or detached-descendant lifetimes. Successful dense
+retrieval and comparative task benefit remain unproven by this checkpoint.
+
+The [chronological phase journal](longitudinal-evals.md) provides durable stage
+intentions, immutable prior-receipt views and cooperative cost/deadline gates.
+It is a library contract; production capture, extraction and indexed next-action
+adapters remain separate work.
+
+Pure adapter tests and trusted disposable process/fence tests establish software
+contracts. They do not establish that the new native backend has been exercised
+with QMD/weights, that memory improved a task, or that a real host delivered
+context. The current phase fixtures start from author-supplied memories and run
+independent constrained edits. Each arm's own chronological capture → extraction
+→ durable mutation → indexed retrieval → next-action chain, an actual isolated
+host loop, project/topic/time holdouts and paired task-benefit measurements remain
+separate requirements. No full-goal or productivity claim follows from adding
+this seventh condition.

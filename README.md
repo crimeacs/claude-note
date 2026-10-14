@@ -6,6 +6,27 @@ Claude Note captures what Claude Code, Codex, Cursor and ChatGPT sessions learn,
 Markdown notes, and puts the right notes in front of the agent *before* it acts: on every prompt,
 and again the moment a command fails.
 
+<a id="install"></a>
+
+## Quick install
+
+Requirements: Python 3.11+, [uv](https://docs.astral.sh/uv/), [QMD](https://github.com/tobi/qmd)
+for search, and the [Claude CLI](https://code.claude.com/docs/en/overview) for synthesis.
+
+```bash
+git clone https://github.com/crimeacs/claude-note.git ~/src/claude-note
+cd ~/src/claude-note
+scripts/install-from-checkout.sh --non-interactive \
+  --vault ~/Documents/notes --author you@example.com --claude-hooks
+
+claude-note setup --codex      # index, recall + sentinel hooks, agent rules, hourly refresh
+claude-note doctor             # prove it works
+```
+
+[Setup and upgrade details](#setup-and-upgrades).
+
+## Overview
+
 Version 2.1 preserves source evidence, scopes retrieval before truncation, and stages changes
 that would replace human edits. Structured claims carry applicability and separate local
 attestations; authored approval text never grants authority. See the
@@ -63,20 +84,7 @@ rule; the hook found the note, the agent opened it, and answered from it:
 Without recall, the same model answered "You can, but…". Codex, with the same hook, answered "No"
 and linked the note. Both runs are in [docs/demo.md](docs/demo.md).
 
-## Install
-
-Requirements: Python 3.11+, [uv](https://docs.astral.sh/uv/), [QMD](https://github.com/tobi/qmd)
-for search, and the [Claude CLI](https://code.claude.com/docs/en/overview) for synthesis.
-
-```bash
-git clone https://github.com/crimeacs/claude-note.git ~/src/claude-note
-cd ~/src/claude-note
-scripts/install-from-checkout.sh --non-interactive \
-  --vault ~/Documents/notes --author you@example.com --claude-hooks
-
-claude-note setup --codex      # index, recall + sentinel hooks, agent rules, hourly refresh
-claude-note doctor             # prove it works
-```
+## Setup and upgrades
 
 Upgrades retain the installed tool's external Python. Use `--python 3.11` with
 the checkout installer, or set `UV_PYTHON=3.11` with either installer, to reselect
