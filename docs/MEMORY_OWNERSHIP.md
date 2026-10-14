@@ -94,6 +94,14 @@ another model operation beside it. Search and reranking are separate queue jobs,
 so another search can consume the remaining rerank budget. These boundaries do
 not establish cold-process or concurrent-request latency.
 
+Runtime readiness settles once, including when close or a fatal event occurs
+before startup finishes. A terminal proxy ignores late worker messages before
+they can change its manifest. Its default 15-second startup budget uses one
+monotonic deadline from proxy creation, checked again when readiness arrives;
+this excludes earlier process startup and Worker construction. Readiness
+rejection and a worker termination request do not prove native cancellation or
+child reaping, and do not authorize a replacement native owner.
+
 The rerank operation also owns its observation: only a complete, finite scoring
 response naming the configured model may establish current readiness. SDK
 fallback, unknown model, partial scores and malformed results cannot borrow a

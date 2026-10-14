@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { Worker } from 'node:worker_threads';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -195,6 +196,179 @@ test('late start after queued expiry poisons runtime; acknowledged never-started
   cancelled.emit('message', { id: cancelled.sent[0].id, error: 'deadline' });
   assert.equal(clean.capabilities().queue.pending, 0); assert.equal(cleanFatal, 0); assert.equal(clean.capabilities().ok, true);
   clean.close();
+});
+
+test('runtime proxy startup has one monotonic readiness lifetime', async t => {
+  const flush = async () => { for (let n = 0; n < 8; n++) await Promise.resolve(); };
+  const observe = promise => {
+    const value = { state: 'pending', settlements: 0 };
+    promise.then(() => Object.assign(value, { state: 'fulfilled', settlements: value.settlements + 1 }),
+      error => Object.assign(value, { state: 'rejected', code: error.code, settlements: value.settlements + 1 }));
+    return value;
+  };
+  const initial = { ok: true, lexical_ready: true, index: { generation: 'initial' } };
+  const late = { ...initial, index: { generation: 'late' } };
+  async function fixture(child, run) {
+    let mono = 100, wall = 1700000000000, sequence = 0;
+    const timers = new Map(), proxies = [];
+    child.mock.method(performance, 'now', () => mono);
+    child.mock.method(Date, 'now', () => wall);
+    child.mock.method(globalThis, 'setTimeout', (fn, delay) => {
+      const id = ++sequence; timers.set(id, { due: mono + Number(delay), fn }); return id;
+    });
+    child.mock.method(globalThis, 'clearTimeout', id => timers.delete(id));
+    const advance = async (ms, callbacks = true) => {
+      const target = mono + ms;
+      if (callbacks) for (;;) {
+        const item = [...timers].filter(([, timer]) => timer.due <= target)
+          .sort((a, b) => a[1].due - b[1].due || a[0] - b[0])[0];
+        if (!item) break;
+        wall += item[1].due - mono; mono = item[1].due;
+        timers.delete(item[0]); item[1].fn(); await flush();
+      }
+      wall += target - mono; mono = target; await flush();
+    };
+    const make = () => {
+      class FakeWorker extends EventEmitter {
+        sent = []; terminations = 0;
+        postMessage(message) { this.sent.push(message); }
+        // Deliberately never acknowledges termination. Settlement cannot depend on exit.
+        terminate() { this.terminations++; return new Promise(() => {}); }
+      }
+      const worker = new FakeWorker(); let fatal = 0;
+      const proxy = createRuntimeProxy(worker, { startupMs: 20, onFatal: () => fatal++ });
+      proxies.push(proxy);
+      return { worker, proxy, ready: observe(proxy.ready), fatal: () => fatal };
+    };
+    try { await run({ make, advance, wallNow: () => wall, changeWall: delta => { wall += delta; } }); }
+    finally {
+      for (const proxy of proxies) proxy.close();
+      await flush(); assert.equal(timers.size, 0, 'no startup or request timer survives close');
+      child.mock.restoreAll();
+    }
+  }
+  const run = (name, fn) => t.test(name, child => fixture(child, fn));
+  await run('normal ready settles once without model readiness', async ({ make, advance }) => {
+    const { worker, proxy, ready, fatal } = make(); await advance(5);
+    worker.emit('message', { ready: true, manifest: initial }); await flush();
+    worker.emit('message', { ready: true, manifest: late }); await advance(100);
+    assert.deepEqual(ready, { state: 'fulfilled', settlements: 1 });
+    assert.equal(proxy.capabilities().index.generation, 'initial'); assert.equal(fatal(), 0);
+    assert.equal(proxy.capabilities().vector_ready, false); assert.equal(proxy.capabilities().rerank_ready, false);
+  });
+  for (const [event, code] of [['startup_error', 'startup'], ['error', 'fixture_error'], ['exit', 'closed']]) {
+    await run(`${event} rejects startup once`, async ({ make, advance }) => {
+      const { worker, proxy, ready, fatal } = make();
+      if (event === 'startup_error') worker.emit('message', { startup_error: 'synthetic startup failure' });
+      else if (event === 'error') worker.emit('error', Object.assign(new Error('fixture'), { code }));
+      else worker.emit('exit', 1);
+      await advance(100); proxy.close(); worker.emit('exit', 1); await flush();
+      assert.deepEqual(ready, { state: 'rejected', code, settlements: 1 });
+      assert.equal(worker.terminations, 1); assert.equal(fatal(), 1);
+    });
+  }
+  await run('startup deadline rejects once', async ({ make, advance }) => {
+    const { worker, ready, fatal } = make(); await advance(20);
+    assert.deepEqual(ready, { state: 'rejected', code: 'deadline', settlements: 1 });
+    assert.equal(worker.terminations, 1); assert.equal(fatal(), 1);
+  });
+  await run('close settles startup without termination acknowledgement', async ({ make, advance }) => {
+    const { worker, proxy, ready, fatal } = make(); proxy.close(); proxy.close(); await advance(100);
+    assert.deepEqual(ready, { state: 'rejected', code: 'closed', settlements: 1 });
+    assert.equal(worker.terminations, 1); assert.equal(fatal(), 0);
+  });
+  await run('close ignores late ready before manifest mutation', async ({ make }) => {
+    const { worker, proxy, ready } = make(); proxy.close();
+    worker.emit('message', { ready: true, manifest: late }); await flush();
+    assert.equal(ready.code, 'closed'); assert.equal(ready.settlements, 1);
+    assert.equal(proxy.capabilities().index, undefined); assert.equal(proxy.capabilities().ok, false);
+  });
+  await run('fatal settles unresolved startup immediately', async ({ make }) => {
+    const { worker, ready, fatal } = make(); worker.emit('message', { fatal: true }); await flush();
+    assert.deepEqual(ready, { state: 'rejected', code: 'poisoned', settlements: 1 });
+    assert.equal(worker.terminations, 1); assert.equal(fatal(), 1);
+  });
+  await run('fatal ignores late ready and identity', async ({ make }) => {
+    const { worker, proxy, ready } = make(); worker.emit('message', { fatal: true });
+    worker.emit('message', { ready: true, manifest: late }); await flush();
+    assert.equal(ready.code, 'poisoned'); assert.equal(proxy.capabilities().index, undefined);
+  });
+  await run('expired startup ignores late ready and identity', async ({ make, advance }) => {
+    const { worker, proxy, ready } = make(); await advance(20);
+    worker.emit('message', { ready: true, manifest: late }); await flush();
+    assert.equal(ready.code, 'deadline'); assert.equal(proxy.capabilities().index, undefined);
+  });
+  await run('close rejects pending job and ignores late result identity', async ({ make, wallNow }) => {
+    const { worker, proxy } = make(); worker.emit('message', { ready: true, manifest: initial }); await flush();
+    const job = observe(proxy.request('/search', { deadline_at_ms: wallNow() + 10 }));
+    proxy.close(); worker.emit('message', { id: worker.sent[0].id, result: {}, manifest: late }); await flush();
+    assert.deepEqual(job, { state: 'rejected', code: 'closed', settlements: 1 });
+    assert.equal(proxy.capabilities().index.generation, 'initial');
+  });
+  await run('started request deadline poisons without replacing owner', async ({ make, advance, wallNow }) => {
+    const { worker, proxy, fatal } = make(); worker.emit('message', { ready: true, manifest: initial }); await flush();
+    const job = observe(proxy.request('/search', { deadline_at_ms: wallNow() + 10 }));
+    worker.emit('message', { started: String(worker.sent[0].id) }); await advance(10);
+    assert.equal(job.code, 'deadline'); assert.equal(job.settlements, 1);
+    await assert.rejects(proxy.request('/search', {}), error => error.code === 'poisoned');
+    assert.equal(worker.terminations, 1); assert.equal(fatal(), 1); assert.equal(worker.sent.length, 1);
+  });
+  await run('never-started expiry acknowledgement preserves owner', async ({ make, advance, wallNow }) => {
+    const { worker, proxy, fatal } = make(); worker.emit('message', { ready: true, manifest: initial }); await flush();
+    const job = observe(proxy.request('/search', { deadline_at_ms: wallNow() + 10 }));
+    const id = worker.sent[0].id; await advance(10); assert.equal(proxy.capabilities().queue.pending, 1);
+    worker.emit('message', { id, error: 'deadline' }); await flush();
+    assert.equal(job.code, 'deadline'); assert.equal(proxy.capabilities().queue.pending, 0);
+    assert.equal(proxy.capabilities().ok, true); assert.equal(worker.terminations, 0); assert.equal(fatal(), 0);
+  });
+  await run('late start after queued expiry poisons owner', async ({ make, advance, wallNow }) => {
+    const { worker, proxy, fatal } = make(); worker.emit('message', { ready: true, manifest: initial }); await flush();
+    const job = observe(proxy.request('/search', { deadline_at_ms: wallNow() + 10 }));
+    const id = worker.sent[0].id; await advance(10); worker.emit('message', { started: String(id) }); await flush();
+    assert.equal(job.code, 'deadline'); assert.equal(worker.terminations, 1); assert.equal(fatal(), 1);
+    assert.equal(proxy.capabilities().ok, false);
+  });
+  await run('exit after ready rejects pending job', async ({ make, wallNow }) => {
+    const { worker, proxy, ready } = make(); worker.emit('message', { ready: true, manifest: initial }); await flush();
+    const job = observe(proxy.request('/search', { deadline_at_ms: wallNow() + 10 })); worker.emit('exit', 1); await flush();
+    assert.equal(ready.state, 'fulfilled'); assert.equal(job.code, 'poisoned'); assert.equal(job.settlements, 1);
+  });
+  await run('close exposes no native reap or replacement acknowledgement', async ({ make }) => {
+    const { worker, proxy, ready } = make(); assert.equal(proxy.close(), undefined); await flush();
+    assert.equal(ready.code, 'closed'); assert.equal(worker.terminations, 1); assert.equal(worker.sent.length, 0);
+    await assert.rejects(proxy.request('/search', {}), error => error.code === 'poisoned');
+  });
+  await run('default budget begins at proxy creation', async ({ make, advance }) => {
+    await advance(30); const { worker, ready } = make(); await advance(5);
+    worker.emit('message', { ready: true, manifest: initial }); await flush(); assert.equal(ready.state, 'fulfilled');
+  });
+  await run('ready at deadline rejects even before timer callback', async ({ make, advance }) => {
+    const { worker, proxy, ready } = make(); await advance(20, false);
+    worker.emit('message', { ready: true, manifest: late }); await flush();
+    assert.equal(ready.code, 'deadline'); assert.equal(proxy.capabilities().index, undefined);
+  });
+  await run('delayed timer cannot accept late ready', async ({ make, advance }) => {
+    const { worker, ready } = make(); await advance(21, false);
+    worker.emit('message', { ready: true, manifest: initial }); await flush(); assert.equal(ready.code, 'deadline');
+  });
+  await run('wall-clock jumps do not extend or expire monotonic startup', async ({ make, advance, changeWall }) => {
+    const { worker, ready } = make(); changeWall(3600000); await advance(5);
+    worker.emit('message', { ready: true, manifest: initial }); await flush(); assert.equal(ready.state, 'fulfilled');
+    const next = make(); changeWall(-7200000); await advance(20, false);
+    next.worker.emit('message', { ready: true, manifest: initial }); await flush(); assert.equal(next.ready.code, 'deadline');
+  });
+  await t.test('close before any ready consumer does not cause unhandled rejection', async child => {
+    class FakeWorker extends EventEmitter { terminate() { return new Promise(() => {}); } }
+    const unhandled = [];
+    const listener = error => unhandled.push(error);
+    process.on('unhandledRejection', listener);
+    const proxy = createRuntimeProxy(new FakeWorker()); proxy.close();
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(unhandled, []);
+      await assert.rejects(proxy.ready, error => error.code === 'closed');
+    } finally { process.off('unhandledRejection', listener); proxy.close(); }
+  });
 });
 
 test('resolved reranker with no finite scores does not claim readiness', async () => {
