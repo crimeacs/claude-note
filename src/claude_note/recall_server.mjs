@@ -8,6 +8,7 @@ import { homedir } from 'node:os';
 import { join, dirname, basename, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { readFileSync, readdirSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 
@@ -580,9 +581,21 @@ if (!isMainThread && workerData?.kind === 'claude-note-runtime') {
 // The parent event loop performs no QMD/SQLite/model calls. It can therefore
 // enforce a deadline even when a native SDK call blocks the runtime's loop.
 export function createRuntimeProxy(worker, { onFatal = () => {}, startupMs = 15000, queueLimit = 8 } = {}) {
+  // This is the proxy lifetime, not a process-spawn or Worker-construction watchdog.
+  const startupDeadline = performance.now() + startupMs;
   const pending = new Map(), expiredJobs = new Map();
   let serial = 0, poisoned = false, manifest = { ok: false }, refreshPromise, expired = 0, rejected = 0;
-  function poison() {
+  let acceptReady, rejectReady, startupTimer, readySettled = false;
+  const ready = new Promise((accept, reject) => { acceptReady = accept; rejectReady = reject; });
+  // Close can precede a caller awaiting startup. The returned promise still rejects.
+  void ready.catch(() => {});
+  function settleReady(error) {
+    if (readySettled) return;
+    readySettled = true; clearTimeout(startupTimer);
+    if (error) rejectReady(error); else acceptReady();
+  }
+  function poison(reason = err('poisoned', 'Runtime requires restart')) {
+    settleReady(reason);
     if (poisoned) return;
     poisoned = true;
     void worker.terminate();
@@ -590,13 +603,19 @@ export function createRuntimeProxy(worker, { onFatal = () => {}, startupMs = 150
     expiredJobs.clear();
     onFatal();
   }
-  let acceptReady, rejectReady;
-  const ready = new Promise((accept, reject) => { acceptReady = accept; rejectReady = reject; });
-  const startupTimer = setTimeout(() => { rejectReady(err('deadline', 'Runtime startup deadline')); poison(); }, startupMs);
+  startupTimer = setTimeout(() => poison(err('deadline', 'Runtime startup deadline')),
+    Math.max(1, startupDeadline - performance.now()));
   worker.on('message', message => {
+    if (poisoned) return;
+    if (message.ready) {
+      if (readySettled) return;
+      // A delayed timer callback cannot let late readiness win the deadline race.
+      if (performance.now() >= startupDeadline) { poison(err('deadline', 'Runtime startup deadline')); return; }
+      if (message.manifest) manifest = message.manifest;
+      settleReady(); return;
+    }
     if (message.manifest) manifest = message.manifest;
-    if (message.ready) { clearTimeout(startupTimer); acceptReady(); return; }
-    if (message.startup_error) { clearTimeout(startupTimer); rejectReady(err('startup', message.startup_error)); poison(); return; }
+    if (message.startup_error) { poison(err('startup', message.startup_error)); return; }
     if (message.fatal) { poison(); return; }
     if (message.started) {
       const id = Number(message.started), job = pending.get(id);
@@ -611,8 +630,8 @@ export function createRuntimeProxy(worker, { onFatal = () => {}, startupMs = 150
     if (message.error) job.reject(err(message.error, 'Runtime request failed'));
     else job.resolve(message.result);
   });
-  worker.on('error', error => { clearTimeout(startupTimer); rejectReady(error); poison(); });
-  worker.on('exit', () => { clearTimeout(startupTimer); rejectReady(err('closed', 'Runtime exited')); poison(); });
+  worker.on('error', error => poison(error));
+  worker.on('exit', () => poison(err('closed', 'Runtime exited')));
   function dispatch(route, body, deadline, fatalOnTimeout) {
     if (poisoned) return Promise.reject(err('poisoned', 'Runtime requires restart'));
     const id = ++serial;
@@ -660,7 +679,9 @@ export function createRuntimeProxy(worker, { onFatal = () => {}, startupMs = 150
       return dispatch(route, { ...body, deadline_at_ms: deadline }, deadline, true);
     },
     close() {
-      clearTimeout(startupTimer); poisoned = true; void worker.terminate();
+      settleReady(err('closed', 'Runtime closed'));
+      if (poisoned) return;
+      poisoned = true; void worker.terminate();
       for (const job of pending.values()) { clearTimeout(job.timer); job.reject(err('closed', 'Runtime closed')); }
       pending.clear(); expiredJobs.clear();
     },
