@@ -10,7 +10,6 @@ from __future__ import annotations
 import ast
 from contextlib import contextmanager
 import hashlib
-import importlib.util
 import json
 import math
 import os
@@ -21,9 +20,11 @@ import signal
 import selectors
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections import Counter
 from decimal import Decimal
@@ -38,12 +39,188 @@ try:
 except ImportError:
     resource = None
 
-SUITE = "isolated-agent-code-v1"
-BASELINES = ("no_memory", "static_instructions", "scoped_lexical", "current_hybrid", "corrected_hybrid", "bounded_history")
+SUITE = "isolated-agent-code-v2"
+BASELINES = ("no_memory", "static_instructions", "scoped_lexical", "dense_only",
+             "current_hybrid", "corrected_hybrid", "bounded_history")
+VECTOR_BASELINES = ("dense_only", "current_hybrid", "corrected_hybrid")
 SCHEMA = {"type": "object", "additionalProperties": False, "required": ["files"], "properties": {
     "files": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"type": "object",
         "additionalProperties": False, "required": ["path", "content"], "properties": {
             "path": {"type": "string", "enum": ["app.py"]}, "content": {"type": "string", "maxLength": 24000}}}}}}
+
+
+def plan(*, model="", budget_usd=1.0, per_attempt_usd=.25, timeout=90,
+         split="dev", max_cases=4, seed=17, baselines=BASELINES, execute=False):
+    """Validate the whole schedule before fixture preparation or external activity."""
+    if (not isinstance(baselines, (tuple, list)) or not baselines or
+            not all(isinstance(name, str) and name in BASELINES for name in baselines) or
+            len(set(baselines)) != len(baselines)):
+        raise ValueError("unique known nonempty baselines are required")
+    if (not all(type(value) in (int, float) and math.isfinite(value) and value > 0
+                for value in (budget_usd, per_attempt_usd, timeout)) or
+            type(max_cases) is not int or max_cases < 1 or type(seed) is not int or
+            split not in ("dev", "holdout", "all") or not isinstance(model, str) or
+            (execute and not model.strip())):
+        raise ValueError("valid split, integer cases/seed, model and positive finite budgets are required")
+    cases = [c for c in fixtures() if split == "all" or c["split"] == split][:max_cases]
+    dependencies = {name: (["embed_model"] + ([] if name == "dense_only" else ["rerank_model"]) +
+                          (["baseline_checkout"] if name == "current_hybrid" else []))
+                    for name in baselines if name in VECTOR_BASELINES}
+    return {"suite": SUITE, "tasks": [c["id"] for c in cases], "baselines": list(baselines),
+            "scheduled_attempts": len(cases) * len(baselines), "dependencies": dependencies,
+            "budget_usd": budget_usd, "per_attempt_usd": per_attempt_usd,
+            "timeout": timeout, "seed": seed, "split": split, "model": model,
+            "measurement": "authored_memory_independent_tasks_not_own_learning_or_host_delivery"}
+
+
+def _valid_identity(value):
+    return (isinstance(value, str) and bool(value) and value.strip() == value and
+            value not in ("fallback", "unknown") and len(value.encode("utf-8")) <= 1024 and
+            not any(ord(c) < 32 or ord(c) == 127 for c in value))
+
+
+def _runtime_observation(response):
+    """Keep bounded actual runtime fields outside normalized identities."""
+    if not isinstance(response, dict):
+        return {}
+    manifest = response.get('manifest', response.get('manifest_runtime'))
+    manifest = manifest if isinstance(manifest, dict) else {}
+    bounded = lambda value: ''.join(c if c in '\n\t' or ord(c) >= 32 else '?' for c in str(value))[:160]
+    observed = {}
+    for key in ('status','error','coverage','reranked','deadline_exhausted'):
+        value = response.get(key)
+        if type(value) is bool or isinstance(value, str):
+            observed[key] = bounded(value)[:160] if isinstance(value, str) else value
+        elif key == 'coverage' and isinstance(value, dict):
+            observed[key] = {k:bounded(v)[:160] for k,v in list(value.items())[:16]
+                             if isinstance(k,str) and len(k)<=80 and isinstance(v,str)}
+    runtime = {}
+    for key in ('uptime_s','loaded_ms','asof_ms'):
+        value = manifest.get(key)
+        if type(value) in (int,float) and math.isfinite(value):
+            runtime[key] = value
+    queue = manifest.get('queue')
+    if isinstance(queue, dict):
+        runtime['queue'] = {k:queue[k] for k in ('active','pending','limit','expired','rejected')
+            if type(queue.get(k)) is bool or type(queue.get(k)) in (int,float) and math.isfinite(queue[k])}
+    degradation = manifest.get('degradation')
+    if isinstance(degradation, list):
+        runtime['degradation'] = [bounded(v)[:160] for v in degradation[:64] if isinstance(v,str)]
+    index = manifest.get('index')
+    revision = index.get('config_revision') if isinstance(index,dict) else manifest.get('config_revision')
+    if isinstance(revision,str):
+        runtime['config_revision'] = bounded(revision)[:160]
+    observed['manifest_runtime'] = runtime
+    return observed
+
+
+def dense_result(response, *, collection, documents, expected_model, context_budget=4096):
+    """Validate and present ordered vector passages only, without a label oracle.
+
+    documents maps exact public fixture URIs to frozen original UTF-8 text. It
+    retains source-authored status/generation metadata. No expected task answers,
+    external approval oracle or other-arm history selects or ranks its passages.
+    """
+    if type(context_budget) is not int or not 1 <= context_budget <= 4096:
+        raise ValueError("dense context budget must be in1..4096")
+    try:
+        if not isinstance(response, dict) or response.get("error"):
+            raise ValueError("dense search unavailable")
+        manifest, coverage = response.get("manifest"), response.get("coverage")
+        if not isinstance(manifest, dict) or not isinstance(coverage, dict):
+            raise ValueError("missing dense manifest/coverage")
+        model = manifest.get("models", {}).get("embed", {})
+        if (manifest.get("ok") is not True or manifest.get("protocol_version") != 2 or
+                manifest.get("index", {}).get("id") != "default" or
+                manifest.get("vector_ready") is not True or model.get("ready") is not True or
+                not _valid_identity(expected_model) or model.get("id") != expected_model or
+                coverage.get("semantic") != "complete_scoped_exact_vectors" or
+                response.get("partial") is not False or response.get("lex") != []):
+            raise ValueError("dense scope/model/coverage is unverified")
+        rows = response.get("vec")
+        if not isinstance(rows, list) or len(rows) > 100:
+            raise ValueError("invalid dense vector rows")
+        packets, ids, sources, delivered = [], set(), set(), []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("invalid dense passage")
+            uri, revision, text, anchor = (row.get(k) for k in ("file", "revision", "scored_text", "anchor"))
+            if (not isinstance(uri, str) or not uri.startswith(f"qmd://{collection}/") or
+                    uri not in documents or row.get("source_id") != uri or
+                    not isinstance(revision, str) or not re.fullmatch(r"[a-f0-9]{64}", revision) or
+                    type(row.get("score")) not in (int, float) or not math.isfinite(row["score"]) or
+                    row.get("lexical_evidence") is not False or
+                    not isinstance(text, str) or not text or len(text.encode()) > 16000 or
+                    not isinstance(anchor, dict) or set(anchor) != {"start_char", "end_char", "start_line", "end_line"} or
+                    any(type(value) is not int for value in anchor.values())):
+                raise ValueError("invalid or out-of-scope dense passage")
+            original = documents[uri]
+            if not isinstance(original, str) or hashlib.sha256(original.encode()).hexdigest() != revision:
+                raise ValueError("dense source revision differs from frozen fixture")
+            # Server offsets are JavaScript UTF-16 code units, not Python code points.
+            encoded = original.encode("utf-16-le")
+            a, b = anchor["start_char"], anchor["end_char"]
+            if not 0 <= a < b <= len(encoded) // 2:
+                raise ValueError("invalid dense anchor")
+            prefix, excerpt = encoded[:2*a].decode("utf-16-le"), encoded[2*a:2*b].decode("utf-16-le")
+            normalized = re.sub(r"\s+", " ", re.sub(r"^#+\s*", "", excerpt, flags=re.M)).strip()
+            if (normalized != text or anchor["start_line"] != prefix.count("\n") + 1 or
+                    anchor["end_line"] != (prefix + excerpt).count("\n") + 1):
+                raise ValueError("dense scored passage is not its anchored source")
+            identity = hashlib.sha256(json.dumps([uri, revision, anchor, text], ensure_ascii=False,
+                                                separators=(",", ":")).encode()).hexdigest()
+            if row.get("passage_id") != identity or identity in ids or uri in sources:
+                raise ValueError("duplicate or mismatched dense identity")
+            ids.add(identity); sources.add(uri)
+            packets.append({"source_id": uri, "revision": revision, "revision_kind": "source_file_sha256",
+                            "passage_id": identity, "anchor": anchor, "text": text})
+        for packet in packets:
+            trial = json.dumps(delivered + [packet], ensure_ascii=False, separators=(",", ":"))
+            if len(trial) > context_budget:
+                break  # Keep a prefix of vector order, never refill using lexical results.
+            delivered.append(packet)
+        return {"available": True, "status": "hit" if delivered else "miss", "reason": "",
+                "context": json.dumps(delivered, ensure_ascii=False, separators=(",", ":")) if delivered else "",
+                "evidence": delivered, "source_ids": [p["source_id"] for p in delivered],
+                "manifest": manifest, "reranked": False,
+                "coverage": {**coverage, "lexical": "not_run", "rerank": "not_run",
+                             "context": "complete" if len(delivered) == len(packets) else "budget_limited"}}
+    except (ValueError, TypeError, AttributeError, UnicodeError, OverflowError):
+        return {"available": False, "status": "unavailable", "reason": "unverified_dense_response",
+                "context": "", "evidence": [], "source_ids": [], "reranked": False}
+
+
+def dense_retrieve(case, settings, *, documents, expected_model, post=None):
+    """One raw-semantic search; no CLI, lexical, fusion, rerank or retry path."""
+    collection = "cn-agent-" + case["id"].replace("_", "-")
+    response = (post or recall.server_post)(settings, "/search", {
+        "question": case["request"], "rungs": [], "collections": [collection],
+        "index_id": "default", "vec_limit": settings.search_n,
+        "passage_chars": settings.snippet_chars}, min(settings.budget, settings.timeout))
+    observed = _runtime_observation(response)
+    result = dense_result(response, collection=collection, documents=documents, expected_model=expected_model)
+    result["runtime_observation"] = observed
+    result["server_calls"] = [response["client_transport"]] if isinstance(response, dict) and isinstance(response.get("client_transport"), dict) else []
+    return result
+
+
+def positive_rerank(response, passages, expected_model):
+    """Current warmup evidence must satisfy the same positive scoring contract."""
+    try:
+        ids = [p["passage_id"] for p in passages]
+        model = response["manifest"]["models"]["rerank"]
+        scores, confirmed = response["passage_scores"], response["scored_passage_ids"]
+        return bool(ids) and len(set(ids)) == len(ids) and (
+            not response.get("error") and response["manifest"].get("ok") is True and
+            response["manifest"].get("protocol_version") == 2 and
+            _valid_identity(expected_model) and response["model"] == model["id"] == expected_model and
+            response["rerank_status"] == "scored" and response["coverage"] == "exact_passage" and
+            response["manifest"]["rerank_ready"] is True and model["ready"] is True and
+            isinstance(scores, dict) and set(scores) == set(ids) and
+            isinstance(confirmed, list) and len(confirmed) == len(ids) and set(confirmed) == set(ids) and
+            all(type(v) in (int, float) and math.isfinite(v) for v in scores.values()))
+    except (KeyError, TypeError, AttributeError, ValueError, UnicodeError):
+        return False
 
 
 def _file_sha256(path: Path) -> str:
@@ -80,8 +257,12 @@ def prepare_retrieval_fixture(destination: Path, *, embed_model: str = "", reran
     # Ordinary YAML is also understood by the pinned pre-change Python resolver.
     config = "collections:\n" + "".join(f"  {name}:\n    path: {json.dumps(value['path'])}\n    pattern: '*.md'\n"
                                          for name, value in collections.items())
-    if embed_model and rerank_model:
-        config += f"models:\n  embed: {json.dumps(embed_model)}\n  rerank: {json.dumps(rerank_model)}\n"
+    if embed_model or rerank_model:
+        config += "models:\n"
+        if embed_model:
+            config += f"  embed: {json.dumps(embed_model)}\n"
+        if rerank_model:
+            config += f"  rerank: {json.dumps(rerank_model)}\n"
     (destination / "qmd/index.yml").write_text(config)
     manifest = {"suite": SUITE, "fixture_digest": _digest(fixtures()), "files": snapshots,
                 "collections": list(collections), "synthetic_corpus": True}
@@ -154,11 +335,18 @@ with patch.object(Path,'home',return_value=Path(options['fixture_home'])):
     settings=module.Settings(engine='server',server_url=options['server_url'],qmd=options['qmd'],log=False,
                              collections=[options['collection']],memory_collections=[])
     started=time.monotonic()
-    result=module.recall(options['request'],settings)
-    print(json.dumps({'available':result.status in ('hit','miss'),'reason':result.reason,
+    if options.get('baseline') == 'dense_only':
+        from claude_note import agent_tasks
+        result=agent_tasks.dense_retrieve(options['case'],settings,documents=options['documents'],expected_model=options['expected_model'])
+        result['elapsed_ms']=int((time.monotonic()-started)*1000)
+        print(json.dumps(result))
+    else:
+        result=module.recall(options['request'],settings)
+        print(json.dumps({'available':result.status in ('hit','miss'),'reason':result.reason,
         'context':module.format_context(result),'manifest':getattr(result,'manifest',{}),
         'status':result.status,'elapsed_ms':int((time.monotonic()-started)*1000),
         'coverage':getattr(result,'coverage',{}),'reranked':result.reranked,
+        'server_calls':getattr(result,'server_calls',[]),'deadline_exhausted':getattr(result,'deadline_exhausted',False),
         'source_ids':[hit.uri for hit in result.hits],
         'evidence':[{'source_id':getattr(hit,'source_id',hit.uri),'revision':getattr(hit,'revision','unknown'),
                      'revision_kind':getattr(hit,'revision_kind','unknown'),'path':hit.path,
@@ -167,146 +355,700 @@ with patch.object(Path,'home',return_value=Path(options['fixture_home'])):
     return driver
 
 
-@contextmanager
-def isolated_hybrid_backends(*, embed_model: Path, rerank_model: Path, baseline_checkout: Path,
-                             startup_timeout: int = 90):
-    """Actual old/new QMD servers, isolated public index and existing local weights only.
+def _group_members(pgid, timeout=.5):
+    """Only PID/PGID/state metadata; never inspect process arguments or environment."""
+    result = subprocess.run(["/bin/ps", "-axo", "pid=,pgid=,stat="], capture_output=True,
+                            text=True, timeout=timeout, check=True)
+    if len(result.stdout) > 2_000_000:
+        raise RuntimeError("process metadata exceeds bound")
+    rows = []
+    for line in result.stdout.splitlines():
+        values = line.split()
+        if len(values) == 3 and values[1] == str(pgid):
+            rows.append((int(values[0]), values[2]))
+    return rows
 
-    This opt-in context runs QMD update/embed and disposable foreground processes. It never
-    installs services, changes HOME, reads a personal index, or downloads model weights.
+
+class _OwnedGroup:
+    """Bounded child group. Keep its leader unreaped until signaling is closed.
+
+    This prevents PID/PGID reuse while a timer can signal. Cleanup failure is
+    explicit; callers must not admit another native owner until proof succeeds.
     """
-    for model in (embed_model, rerank_model):
-        if not model.is_absolute() or not model.is_file():
-            raise ValueError("absolute existing local GGUF model paths are required")
-        with model.open("rb") as stream:
-            if stream.read(4) != b"GGUF":
-                raise ValueError("invalid local GGUF model")
-    baseline_commit = subprocess.check_output(["git", "-C", str(baseline_checkout), "rev-parse", "HEAD"], text=True).strip()
-    if baseline_commit != "5c1ec7e079eae7d6fe2f82b149a2f22b9bfc073a":
-        raise ValueError("current_hybrid must use the pinned pre-change source")
-    for path in ("src/claude_note/recall.py", "src/claude_note/recall_server.mjs"):
-        expected = subprocess.check_output(["git", "-C", str(baseline_checkout), "show", baseline_commit + ":" + path])
-        if (baseline_checkout / path).read_bytes() != expected:
-            raise ValueError("current_hybrid source differs from its pinned Git blob")
-    baseline_source = baseline_checkout / "src/claude_note/recall.py"
-    spec = importlib.util.spec_from_file_location("claude_note_eval_baseline", baseline_source)
-    old = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = old
-    spec.loader.exec_module(old)
-    qmd, node = setup_recall.qmd_exe(), setup_recall.real_node()
-    sdk = setup_recall.qmd_sdk(qmd) if qmd else None
-    cli = sdk.parent / "cli/qmd.js" if sdk else None
-    if not qmd or not node or not sdk or not cli.is_file():
-        raise RuntimeError("unavailable: installed QMD SDK and Node are required for actual hybrid baselines")
-    processes, streams = [], []
-    with tempfile.TemporaryDirectory(prefix="claude-note-hybrid-public-") as directory:
-        fixture = Path(directory).resolve()
-        manifest = prepare_retrieval_fixture(fixture, embed_model=str(embed_model), rerank_model=str(rerank_model))
-        guard, guard_digest = _model_guard(fixture, sdk, (embed_model, rerank_model))
-        driver = _retrieval_driver(fixture)
-        provisioning = {"runtime_guard_sha256": guard_digest,
-                        "qmd_config_sha256": hashlib.sha256((fixture / "qmd/index.yml").read_text().replace(str(fixture), "synthetic://fixture").encode()).hexdigest(),
-                        "sdk_sha256": hashlib.sha256(b"".join((sdk.parent / name).read_bytes()
-                                             for name in ("index.js", "llm.js", "store.js"))).hexdigest(),
-                        "models": {kind: _file_sha256(model)
-                                   for kind, model in (("embed", embed_model), ("rerank", rerank_model))},
-                        "corpus_files": manifest["files"],
-                        "warmup": "bounded public vector and rerank operations before task measurement"}
-        cache = fixture / "cache"
-        environment = {"XDG_CONFIG_HOME": str(fixture), "XDG_CACHE_HOME": str(cache), "QMD_CONFIG_DIR": str(fixture / "qmd"),
-                       "QMD_DB_PATH": str(cache / "qmd/index.sqlite"), "QMD_EMBED_MODEL": str(embed_model),
-                       "QMD_RERANK_MODEL": str(rerank_model), "CLAUDE_NOTE_RECALL_LOG": "0",
-                       "GGML_METAL_NO_RESIDENCY": "1", "NODE_LLAMA_CPP_SKIP_DOWNLOAD": "1",
-                       "NODE_OPTIONS": "--import=" + str(guard)}
-        environment.update({"CLAUDE_NOTE_VAULT": str(fixture / "notes"), "CLAUDE_NOTE_VAULT_ROOT": str(fixture / "notes")})
-        tool_env = {key: value for key, value in os.environ.items() if key in ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL")}
-        tool_env.update(environment)
-        # Check the effective path before any indexing command can mutate state.
-        # Bypass QMD's Node/Bun runner selection so this exact preload applies.
-        qmd_command = [node, str(cli)]
-        help_ = subprocess.run(qmd_command + ["--help"], capture_output=True, text=True, timeout=15, cwd=fixture, env=tool_env)
-        expected_db = cache / "qmd/index.sqlite"
-        if str(expected_db) not in help_.stdout:
-            raise RuntimeError("QMD did not honor the isolated index path; refusing indexing")
-        version = subprocess.run(qmd_command + ["--version"], capture_output=True, text=True, timeout=15, cwd=fixture, env=tool_env)
-        if "2.8.3" not in version.stdout:
-            raise RuntimeError("actual hybrid baselines require inspected QMD2.8.3")
-        for command in (qmd_command + ["update"], qmd_command + ["embed"]):
-            result = subprocess.run(command, capture_output=True, text=True, timeout=180, cwd=fixture, env=tool_env)
-            if result.returncode:
-                raise RuntimeError(f"isolated public QMD preparation failed (exit {result.returncode})")
-        if not expected_db.is_file():
-            raise RuntimeError("isolated QMD index was not created at the asserted path")
+    def __init__(self, command, *, cwd, env, seconds, body=None, registry=None):
+        self.lock = threading.RLock()
+        self.signaling_closed = self.retired = False
+        self.overflow = threading.Event()
+        self.expired = threading.Event()
+        self.output = {"stdout": bytearray(), "stderr": bytearray()}
+        self.threads = []
+        self.uncertain_starts = set()
+        self.timer = None
+        self.spawned = time.monotonic()
+        self.signals = []
+        self.process = subprocess.Popen(command, cwd=cwd, env=env, start_new_session=True,
+            stdin=subprocess.PIPE if body is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.pgid = self.process.pid
+        if registry is not None:
+            registry.append(self)  # Ownership survives a failed constructor.
         try:
-            backends = {}
-            servers = {"current_hybrid": (old, baseline_checkout / "src/claude_note/recall_server.mjs", baseline_commit),
-                       "corrected_hybrid": (recall, Path(__file__).with_name("recall_server.mjs"),
-                                            "sha256:" + hashlib.sha256(Path(recall.__file__).read_bytes()
-                                                + Path(__file__).with_name("recall_server.mjs").read_bytes()).hexdigest())}
-            for name, (module, server, revision) in servers.items():
-                with socket.socket() as listener:
-                    listener.bind(("127.0.0.1", 0))
-                    port = listener.getsockname()[1]
-                log = (fixture / (name + ".log")).open("w+")
-                streams.append(log)
-                process = subprocess.Popen([node, str(server), str(sdk), str(port), str(expected_db), str(fixture / "qmd/index.yml")],
-                                           cwd=fixture, env=tool_env, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
-                processes.append(process)
-                settings = module.Settings(engine="server", server_url=f"http://127.0.0.1:{port}", qmd=qmd, log=False)
-                started = time.monotonic()
-                while not recall.server_capabilities(settings, timeout=.2):
-                    if process.poll() is not None or time.monotonic() - started >= startup_timeout:
-                        raise RuntimeError(f"unavailable: {name} disposable server did not become ready")
-                    time.sleep(.1)
-                probe_collection = manifest["collections"][0]
-                probe = recall.server_post(settings, "/search", {"question": "payment replay deployment identity contract", "rungs": ["deployment"],
-                    "collections": [probe_collection], "index_id": "default", "lex_limit": 4, "vec_limit": 4}, 8)
-                vectors = (probe or {}).get("vec") or []
+            self.timer = threading.Timer(seconds, self._expire)
+            self.timer.daemon = True
+            for kind in ("stdout", "stderr"):
+                thread = threading.Thread(target=self._drain, args=(kind,), daemon=True)
+                self.start_thread(thread)
+            self.start_thread(self.timer)
+            if body is not None:
+                if len(body) > 256 * 1024:
+                    raise ValueError("owned input exceeds bound")
+                thread = threading.Thread(target=self._feed, args=(body,), daemon=True)
+                self.start_thread(thread)
+        except BaseException:
+            self.signal(signal.SIGKILL)
+            self.close()
+            raise
+
+    def start_thread(self, thread):
+        # Thread.start can be interrupted after launching but before returning.
+        # Track first; an ambiguous start never earns cleanup/retirement proof.
+        self.threads.append(thread)
+        self.uncertain_starts.add(thread)
+        thread.start()
+        self.uncertain_starts.discard(thread)
+
+    def _feed(self, body):
+        try:
+            self.process.stdin.write(body); self.process.stdin.close()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+
+    def _drain(self, kind):
+        stream = getattr(self.process, kind)
+        try:
+            while block := stream.read1(8192):
+                space = max(0, 256 * 1024 - len(self.output[kind]))
+                self.output[kind].extend(block[:space])
+                if len(block) > space:
+                    self.overflow.set(); self.signal(signal.SIGKILL)
+        finally:
+            stream.close()
+
+    def _expire(self):
+        self.expired.set(); self.signal(signal.SIGKILL)
+
+    def signal(self, value):
+        with self.lock:
+            if self.signaling_closed or self.retired:
+                return
+            try:
+                os.killpg(self.pgid, value)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                if self.live():
+                    raise
+            self.signals.append(int(value))
+
+    def live(self, deadline=None):
+        # No Popen.poll/wait/communicate before the signal boundary is retired.
+        return [row for row in self.members(deadline) if not row[1].startswith("Z")]
+
+    def members(self, deadline=None):
+        remaining = .5 if deadline is None else min(.5, deadline - time.monotonic())
+        if remaining <= 0:
+            raise RuntimeError("owned metadata cleanup deadline exhausted")
+        return _group_members(self.pgid, timeout=remaining)
+
+    def close(self, seconds=5):
+        deadline = time.monotonic() + seconds
+        with self.lock:
+            if self.retired:
+                return self.receipt
+        if self.live(deadline):
+            self.signal(signal.SIGTERM)
+            until = min(deadline, time.monotonic() + .25)
+            while time.monotonic() < until and self.live(deadline):
+                time.sleep(.01)
+        if self.live(deadline):
+            self.signal(signal.SIGKILL)
+        while time.monotonic() < deadline and self.live(deadline):
+            time.sleep(.01)
+        if self.live(deadline):
+            raise RuntimeError("owned group not quiescent; no replacement admitted")
+        with self.lock:
+            # Both the timer and drain callbacks share this linearization point.
+            self.signaling_closed = True
+            if self.timer is not None:
+                self.timer.cancel()
+            self.process.wait(timeout=max(.001, deadline - time.monotonic()))
+        while time.monotonic() < deadline and self.members(deadline):
+            time.sleep(.01)
+        for thread in self.threads:
+            if thread.ident is not None:
+                thread.join(max(0, deadline - time.monotonic()))
+                if not thread.is_alive():
+                    self.uncertain_starts.discard(thread)
+        if (self.members(deadline) or self.uncertain_starts or
+                any(t.is_alive() for t in self.threads if t.ident is not None)):
+            raise RuntimeError("owned group/pipes cleanup unproven; no replacement admitted")
+        for kind in ("stdin", "stdout", "stderr"):
+            stream = getattr(self.process, kind)
+            if stream is not None and not stream.closed:
+                try: stream.close()
+                except (OSError, ValueError): pass
+        with self.lock:
+            self.retired = True
+            self.receipt = {"pid": self.process.pid, "pgid": self.pgid,
+                "group_empty": True, "pipes_drained": True, "leader_reaped": True,
+                "returncode": self.process.returncode, "signals": self.signals,
+                "elapsed_ms": round((time.monotonic() - self.spawned) * 1000)}
+        return self.receipt
+
+
+def _owned_command(command, *, cwd, env, seconds, body=None, registry=None):
+    group = _OwnedGroup(command, cwd=cwd, env=env, seconds=seconds, body=body, registry=registry)
+    deadline = group.spawned + seconds
+    try:
+        while group.live() and time.monotonic() < deadline and not group.overflow.is_set():
+            time.sleep(.01)
+    finally:
+        cleanup = group.close()
+    if group.expired.is_set() or group.overflow.is_set():
+        raise RuntimeError("owned command deadline/output limit")
+    return {"returncode": cleanup["returncode"],
+            **{kind: bytes(value).decode("utf-8", errors="strict") for kind, value in group.output.items()},
+            "cleanup": cleanup}
+
+
+def _sandbox_profile(fixture, *, read_paths, port=None, server=False, write_paths=None):
+    """macOS deny-default filesystem/network fence; unsupported hosts fail closed."""
+    if sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").is_file():
+        raise RuntimeError("actual retrieval requires the reviewed macOS sandbox fence")
+    quoted = lambda path: json.dumps(str(Path(path).resolve()))
+    reads = [f'(subpath {quoted(p)})' for p in read_paths]
+    reads += [f'(subpath {json.dumps(p)})' for p in ("/System", "/usr", "/bin", "/sbin",
+        "/Library/Apple", "/private/var/db/dyld", "/opt/homebrew/Cellar")]
+    profile = '(version 1)\n(deny default)\n(allow process*)\n(allow sysctl-read)\n(allow mach-lookup)\n(allow process-info*)\n(allow signal (target self))\n(allow file-read-metadata)\n'
+    profile += '(allow file-read* ' + ' '.join(reads) + ' (literal "/") (literal "/dev/null") (literal "/dev/urandom") (literal "/dev/random"))\n'
+    writes = [fixture] if write_paths is None else write_paths
+    profile += '(allow file-write* ' + ' '.join(f'(subpath {quoted(p)})' for p in writes) + ' (literal "/dev/null"))\n'
+    profile += '(allow iokit-open (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOGPUDeviceUserClient") (iokit-user-client-class "AGXCommandQueue"))\n'
+    if port is not None:
+        if type(port) is not int or not 1024 <= port <= 65535 or port == 8182:
+            raise ValueError("invalid isolated port")
+        direction = 'network-inbound' if server else 'network-outbound'
+        endpoint = 'local' if server else 'remote'
+        profile += f'(allow {direction} ({endpoint} ip "localhost:{port}"))\n'
+        if server:
+            profile += f'(allow network-bind (local ip "localhost:{port}"))\n'
+    return profile
+
+
+def _frozen_documents(corpus, manifest):
+    """Read the exact original fixture inventory through no-follow descriptors."""
+    expected = manifest['files']
+    actual, documents = {}, {}
+    root = os.open(corpus, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    def walk(fd, relative=''):
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                name = relative + entry.name
+                if entry.is_dir(follow_symlinks=False):
+                    child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                    try: walk(child, name + '/')
+                    finally: os.close(child)
+                else:
+                    key = 'notes/' + name
+                    if key not in expected or len(actual) >= len(expected):
+                        raise ValueError('public fixture inventory changed')
+                    file = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                    try:
+                        before = os.fstat(file)
+                        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 1024*1024:
+                            raise ValueError('invalid public fixture source')
+                        raw = b''
+                        while block := os.read(file, min(65536, 1024*1024 + 1 - len(raw))):
+                            raw += block
+                            if len(raw) > 1024*1024:
+                                raise ValueError('public fixture source exceeds bound')
+                        after = os.fstat(file)
+                        if (before.st_ino,before.st_size,before.st_mtime_ns) != (after.st_ino,after.st_size,after.st_mtime_ns):
+                            raise ValueError('public fixture source changed during read')
+                    finally: os.close(file)
+                    digest = hashlib.sha256(raw).hexdigest()
+                    if digest != expected[key]:
+                        raise ValueError('public fixture source differs from original snapshot')
+                    actual[key] = digest
+                    collection, filename = name.split('/',1)
+                    documents[f'qmd://{collection}/{filename}'] = raw.decode('utf-8',errors='strict')
+    try:
+        notes = os.open('notes', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+        try: walk(notes)
+        finally: os.close(notes)
+    finally: os.close(root)
+    if actual != expected:
+        raise ValueError('public fixture source missing')
+    return documents
+
+
+@contextmanager
+def isolated_hybrid_backends(*, embed_model=None, rerank_model=None, baseline_checkout=None,
+                             baselines=VECTOR_BASELINES, startup_timeout=90):
+    """Opt-in actual public retrieval, with one native owner at a time.
+
+    Each activation and warmup is recorded; a failed cell is never retried. This
+    runs models only when a selected backend is called. macOS filesystem/network
+    fencing is mandatory. No service, owner index, download or HOME change.
+    """
+    selected = tuple(name for name in baselines if name in VECTOR_BASELINES)
+    plan(baselines=baselines)
+    if type(startup_timeout) not in (int, float) or not 0 < startup_timeout <= 90:
+        raise ValueError("startup timeout must be in0..90 seconds")
+    events, failed_cells, groups = [], {}, []
+    state = {"active": None, "blocked": False, "common": None, "common_error": ""}
+    class Backends(dict):
+        pass
+    backends = Backends()
+    backends.lifecycle = {"events": events,
+                          "proof_limit": "owned process/protocol/model contracts, not native kernel tracing",
+                          "max_simultaneous_native_owners": 1, "cleanup_proven": True,
+                          "startup_supervision_seconds": startup_timeout,
+                          "native_owner_absolute_lifetime_seconds": 600,
+                          "server_internal_startup_budget_unchanged": True}
+    directory = tempfile.mkdtemp(prefix="claude-note-eval-public-")
+    controls = tempfile.mkdtemp(prefix="claude-note-eval-controls-")
+    try:
+        fixture, control = Path(directory).resolve(), Path(controls).resolve()
+        (fixture / "tmp").mkdir()
+        paths = {"embed_model": embed_model, "rerank_model": rerank_model,
+                 "baseline_checkout": baseline_checkout}
+        dependency_names = plan(baselines=baselines)["dependencies"]
+
+        def bounded_diagnostic(value):
+            if isinstance(value, (bytes, bytearray)):
+                value = bytes(value).decode('utf-8', errors='replace')
+            return ''.join(c if c in '\n\t' or ord(c) >= 32 else '?' for c in str(value))[:4096]
+
+        def group_observations(owned):
+            observed = []
+            for group in owned:
+                receipt = getattr(group, 'receipt', None)
+                item = {'pid': group.process.pid, 'pgid': group.pgid,
+                    'cleanup_status': 'proven' if isinstance(receipt, dict) and group.retired and
+                        all(receipt.get(k) is True for k in ('group_empty','pipes_drained','leader_reaped')) else 'unproven',
+                    'retired': group.retired, 'signaling_closed': group.signaling_closed,
+                    'returncode': group.process.returncode if type(getattr(group.process, 'returncode', None)) is int else None,
+                    'expired': group.expired.is_set(), 'output_limit': group.overflow.is_set()}
+                if isinstance(receipt, dict):
+                    item['cleanup'] = dict(receipt)
+                for kind in ('stdout', 'stderr'):
+                    item[kind] = bounded_diagnostic(group.output.get(kind, b''))
+                observed.append(item)
+            return observed
+
+        def command_attempt(event, command, **arguments):
+            # Record entry before execution: exceptions still retain their owner
+            # and its actual bounded diagnostics/proof, never invented success.
+            events.append(event)
+            start = len(groups)
+            event['status'] = 'attempted'
+            try:
+                result = _owned_command(command, registry=groups, **arguments)
+                event.update(status='returned', returncode=result['returncode'],
+                    cleanup=result['cleanup'], stderr=bounded_diagnostic(result.get('stderr', '')),
+                    stdout=bounded_diagnostic(result.get('stdout', '')))
+                return result
+            except Exception as exc:
+                event.update(status='raised', error=bounded_diagnostic(f'{type(exc).__name__}: {exc}'))
+                raise
+            finally:
+                event['owned_groups'] = group_observations(groups[start:])
+
+        runtime_observation = _runtime_observation
+
+        def transport_observations(value):
+            rows = [value] if isinstance(value,dict) else value if isinstance(value,list) else []
+            observed = []
+            for transport in rows[:8]:
+                if not isinstance(transport,dict):
+                    continue
+                safe = {key:transport[key] for key in ('elapsed_ms','http_status')
+                        if type(transport.get(key)) is int}
+                safe.update({key:bounded_diagnostic(transport[key])[:80]
+                             for key in ('route','request_id','outcome')
+                             if isinstance(transport.get(key),str)})
+                observed.append(safe)
+            return observed
+
+        def warmup_attempt(active, route, payload, purpose):
+            event = {'event': purpose, 'activation': active['ordinal'], 'route': route,
+                     'status': 'attempted', 'server_calls': []}
+            events.append(event)
+            try:
+                response = recall.server_post(active['settings'], route, payload, 8)
+                event['status'] = 'returned'
+                if isinstance(response, dict):
+                    event['runtime_observation'] = runtime_observation(response)
+                    if response.get('error'):
+                        event['response_error'] = bounded_diagnostic(response['error'])[:80]
+                    transport = response.get('client_transport')
+                    if isinstance(transport, dict):
+                        event['server_calls'] = transport_observations(transport)
+                return response
+            except Exception as exc:
+                event.update(status='raised', error=bounded_diagnostic(f'{type(exc).__name__}: {exc}'))
+                raise
+
+        def model_path(kind):
+            path = paths[kind]
+            if path is None:
+                raise ValueError("missing " + kind)
+            path = Path(path)
+            if not path.is_absolute() or not path.is_file():
+                raise ValueError("absolute existing " + kind + " is required")
+            with path.open("rb") as stream:
+                if stream.read(4) != b"GGUF":
+                    raise ValueError("invalid " + kind)
+            return path.resolve()
+
+        def fence(command, name, *, port=None, server=False, extra_reads=()):
+            profile = control / (name + ".sb")
+            common = state["common"]
+            profile.write_text(_sandbox_profile(fixture, read_paths=[fixture, control,
+                Path(__file__).parent, Path(sys.base_prefix), Path(sys.executable).resolve().parent.parent,
+                Path(common["node"]).resolve().parent.parent, common["sdk"].parents[3],
+                *extra_reads], port=port, server=server, write_paths=[fixture/"cache", fixture/"tmp", fixture/"data"]))
+            return ["/usr/bin/sandbox-exec", "-f", str(profile), *command]
+
+        def retire():
+            active = state["active"]
+            if active is None:
+                return
+            try:
+                proof = active["group"].close()
+                events.append({"event": "teardown", "activation": active["ordinal"], **proof,
+                               "owned_groups":group_observations([active['group']])})
+                state["active"] = None
+            except Exception:
+                state["blocked"] = True
+                backends.lifecycle["cleanup_proven"] = False
+                events.append({"event": "teardown_unproven", "activation": active["ordinal"],
+                               "owned_groups":group_observations([active['group']])})
+                raise RuntimeError("prior native owner cleanup unproven; activation blocked")
+
+        def common_prepare():
+            if state["common_error"]:
+                raise RuntimeError(state["common_error"])
+            if state["common"] is not None:
+                return state["common"]
+            started = time.monotonic()
+            embed = model_path("embed_model")
+            # Every optional rank read/hash/stat belongs to its own dependency
+            # boundary; an IO failure must not poison common embedding work.
+            rank, rank_digest, rank_stat, rank_error = None, None, None, ''
+            if any(n != "dense_only" for n in selected) and rerank_model:
+                try:
+                    candidate = model_path("rerank_model")
+                    rank_digest = _file_sha256(candidate)
+                    info = candidate.stat()
+                    rank_stat = (info.st_ino,info.st_size,info.st_mtime_ns)
+                    rank = candidate
+                except (OSError, ValueError) as exc:
+                    rank_error = bounded_diagnostic(f'{type(exc).__name__}: {exc}')[:200]
+                    events.append({'event':'optional_dependency_unavailable','dependency':'rerank_model','error':rank_error})
+            qmd, node = setup_recall.qmd_exe(), setup_recall.real_node()
+            sdk = setup_recall.qmd_sdk(qmd) if qmd else None
+            if not node or not sdk or not (sdk.parent / "cli/qmd.js").is_file():
+                raise RuntimeError("inspected QMD SDK and Node are required")
+            package_bytes = (sdk.parent.parent/'package.json').read_bytes()
+            if json.loads(package_bytes).get('version') != '2.8.3':
+                raise ValueError('exact QMD2.8.3 package is required')
+            manifest = prepare_retrieval_fixture(fixture / "corpus", embed_model=str(embed),
+                                                rerank_model=str(rank) if rank else "")
+            corpus = fixture / "corpus"
+            guard, guard_digest = _model_guard(control, sdk, tuple(p for p in (embed, rank) if p))
+            cache, database = fixture / "cache", fixture / "cache/qmd/index.sqlite"
+            database.parent.mkdir(parents=True)
+            (fixture / "data").mkdir()
+            environment = {key: value for key, value in os.environ.items()
+                           if key in ("PATH", "HOME", "LANG", "LC_ALL")}
+            environment.update({"TMPDIR": str(fixture / "tmp"), "XDG_CONFIG_HOME": str(fixture),
+                "XDG_CACHE_HOME": str(cache), "XDG_DATA_HOME": str(fixture / "data"),
+                "QMD_CONFIG_DIR": str(corpus / "qmd"), "QMD_DB_PATH": str(database), "INDEX_PATH": str(database),
+                "QMD_EMBED_MODEL": str(embed), "QMD_RERANK_MODEL": str(rank or fixture / "absent-rerank.gguf"),
+                "CLAUDE_NOTE_RECALL_LOG": "0", "NODE_LLAMA_CPP_SKIP_DOWNLOAD": "1",
+                "OPENSSL_CONF": "/dev/null",
+                "NODE_OPTIONS": "--import=" + str(guard), "GGML_METAL_NO_RESIDENCY": "1",
+                "CLAUDE_NOTE_VAULT": str(corpus / "notes"), "CLAUDE_NOTE_VAULT_ROOT": str(corpus / "notes")})
+            state["common"] = {"embed": embed, "rank": rank, "qmd": qmd, "node": node, "sdk": sdk,
+                "database": database, "environment": environment, "corpus": corpus,
+                "manifest": manifest, "guard": guard_digest, "rank_error":rank_error,
+                "provisioning": {"runtime_guard_sha256": guard_digest,
+                    "models": {"embed": _file_sha256(embed)}, "corpus_files": manifest["files"],
+                    "qmd_config_sha256": hashlib.sha256((corpus/'qmd/index.yml').read_text().replace(str(fixture),'synthetic://fixture').encode()).hexdigest(),
+                    "sdk_sha256": hashlib.sha256(b''.join((sdk.parent/name).read_bytes() for name in ('index.js','store.js','llm.js'))).hexdigest(),
+                    "sdk_package_sha256": hashlib.sha256(package_bytes).hexdigest(),
+                    "qmd_version": "2.8.3", "warmup_policy": "one vector probe per activation; hybrid adds one rank probe"}}
+            if rank:
+                state["common"]["provisioning"]["models"]["rerank"] = rank_digest
+            state["common"]["config_bytes"] = (corpus/'qmd/index.yml').read_bytes()
+            info = embed.stat()
+            state["common"]["model_stats"] = {str(embed): (info.st_ino,info.st_size,info.st_mtime_ns)}
+            if rank:
+                state["common"]["model_stats"][str(rank)] = rank_stat
+            command = [node, str(sdk.parent / "cli/qmd.js")]
+            for ordinal, (arguments, seconds) in enumerate(((['--help'],15),(['--version'],15),(['update'],180),(['embed'],180))):
+                result = command_attempt({'event':'provision','command':arguments[0],'seconds':seconds},
+                    fence(command + arguments, f"provision-{ordinal}", extra_reads=(embed,) + ((rank,) if rank else ())),
+                    cwd=fixture, env=environment, seconds=seconds)
+                if result["returncode"] or (ordinal == 0 and str(database) not in result["stdout"]) or (
+                        ordinal == 1 and "2.8.3" not in result["stdout"]):
+                    raise RuntimeError("isolated QMD version/path/provisioning failed")
+            if not database.is_file():
+                raise RuntimeError("isolated index absent")
+            events.append({"event": "common_preparation", "elapsed_ms": round((time.monotonic()-started)*1000)})
+            return state["common"]
+
+        def inputs_unchanged(name):
+            common = state['common']
+            if (common['corpus']/'qmd/index.yml').read_bytes() != common['config_bytes']:
+                raise ValueError('public index configuration changed')
+            for path, expected in common['model_stats'].items():
+                if name == 'dense_only' and path != str(common['embed']):
+                    continue
+                current = Path(path).stat()
+                if (current.st_ino,current.st_size,current.st_mtime_ns) != expected:
+                    raise ValueError('configured model file metadata changed')
+            sdk_hash = hashlib.sha256(b''.join((common['sdk'].parent/name).read_bytes()
+                                               for name in ('index.js','store.js','llm.js'))).hexdigest()
+            if sdk_hash != common['provisioning']['sdk_sha256']:
+                raise ValueError('SDK source changed')
+            if hashlib.sha256((common['sdk'].parent.parent/'package.json').read_bytes()).hexdigest() != common['provisioning']['sdk_package_sha256']:
+                raise ValueError('SDK package metadata changed')
+            return _frozen_documents(common['corpus'], common['manifest'])
+
+        def activate(name):
+            if state["blocked"]:
+                raise RuntimeError("prior owner cleanup unproven")
+            for required in dependency_names[name]:
+                if paths[required] is None:
+                    raise ValueError("missing " + required)
+            if name != "dense_only":
+                model_path("rerank_model")
+                if state['common'] is not None and state['common']['rank'] is None:
+                    raise ValueError('reranker absent from frozen common configuration: ' + state['common']['rank_error'])
+            old_source, server = None, Path(__file__).with_name("recall_server.mjs")
+            revision = "sha256:" + hashlib.sha256(Path(__file__).read_bytes() +
+                Path(recall.__file__).read_bytes() + server.read_bytes()).hexdigest()
+            if name == "current_hybrid":
+                checkout = Path(baseline_checkout)
+                commit = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True, timeout=5).strip()
+                if commit != "5c1ec7e079eae7d6fe2f82b149a2f22b9bfc073a":
+                    raise ValueError("current_hybrid requires pinned5c1ec7e checkout")
+                for path in ("src/claude_note/recall.py", "src/claude_note/recall_server.mjs"):
+                    raw = subprocess.check_output(["git", "-C", str(checkout), "show", commit + ':' + path], timeout=5)
+                    if (checkout/path).read_bytes() != raw:
+                        raise ValueError("old baseline blob mismatch")
+                old_source, server, revision = checkout/'src/claude_note/recall.py', checkout/'src/claude_note/recall_server.mjs', commit
+            if state["active"] and state["active"]["name"] == name:
+                group = state["active"]["group"]
+                if not group.live() or group.overflow.is_set() or group.expired.is_set():
+                    retire()
+                    raise RuntimeError("existing runtime expired/exited")
+                return state["active"]
+            retire()
+            try:
+                common = common_prepare()
+            except Exception as exc:
+                state["common_error"] = str(exc)[:200]
+                raise
+            inputs_unchanged(name)
+            if name!='dense_only' and common['rank'] is None:
+                raise ValueError('reranker absent from frozen common configuration: ' + common['rank_error'])
+            # The reservation socket closes before the fenced child binds. A
+            # collision fails this activation; never choose another port/retry.
+            with socket.socket() as reservation:
+                reservation.bind(("127.0.0.1", 0)); port = reservation.getsockname()[1]
+            environment = dict(common["environment"])
+            read_models = [common["embed"]]
+            if name != "dense_only":
+                read_models.append(common["rank"])
+            else:
+                environment["QMD_RERANK_MODEL"] = str(fixture/'absent-rerank.gguf')
+            ordinal = 1 + sum(e["event"] == 'activation' for e in events)
+            command = fence([common["node"], str(server), str(common["sdk"]), str(port),
+                str(common["database"]), str(common["corpus"]/'qmd/index.yml')], f"server-{ordinal}",
+                port=port, server=True, extra_reads=[server.parent, *read_models])
+            activation_event = {"event": "activation", "ordinal": ordinal, "baseline": name,
+                "status":"attempted", "native_owner_limit": 1, "vector_warmups": 0, "rerank_warmups": 0,
+                "legacy_implicit_vector_warmups": 1 if name=='current_hybrid' else 0, "readiness_probes": 0}
+            events.append(activation_event)
+            group_start = len(groups)
+            try:
+                group = _OwnedGroup(command, cwd=fixture, env=environment, seconds=600, registry=groups)
+            except Exception as exc:
+                activation_event.update(status='raised', error=bounded_diagnostic(f'{type(exc).__name__}: {exc}'),
+                    owned_groups=group_observations(groups[group_start:]))
+                raise
+            active = state["active"] = {"name": name, "group": group, "ordinal": ordinal,
+                "port": port, "revision": revision, "old_source": old_source, "environment": environment}
+            activation_event['status'] = 'constructed'
+            active["settings"] = recall.Settings(engine='server', server_url=f'http://127.0.0.1:{port}', qmd=common['qmd'], log=False)
+            started = time.monotonic()
+            try:
+                marker = f'claude-note recall server on 127.0.0.1:{port} '.encode()
+                # A response from an unrelated listener cannot establish that
+                # this owned group bound the reserved port successfully.
+                while marker not in group.output['stderr']:
+                    if not group.live() or group.overflow.is_set() or time.monotonic()-started >= startup_timeout:
+                        raise RuntimeError("disposable server startup unavailable")
+                    time.sleep(.05)
+                activation_event['readiness_probes'] = 1
+                readiness_event = {'event':'readiness_probe','activation':ordinal,'status':'attempted'}
+                events.append(readiness_event)
+                try:
+                    observed = recall.server_capabilities(active['settings'], timeout=1)
+                except Exception as exc:
+                    readiness_event.update(status='raised',error=bounded_diagnostic(f'{type(exc).__name__}: {exc}'))
+                    raise
+                readiness_event['status'] = 'returned'
+                readiness_event['runtime_observation'] = runtime_observation({'manifest':observed})
+                if not observed or observed.get('ok') is not True:
+                    raise RuntimeError('owned listener readiness unavailable; no retry')
+                if name!='current_hybrid' and (observed.get('protocol_version')!=2 or
+                        observed.get('index',{}).get('db_path')!=str(common['database']) or
+                        observed.get('index',{}).get('config_path')!=str(common['corpus']/'qmd/index.yml')):
+                    raise RuntimeError('owned listener index/config identity mismatch')
+                probe_case = fixtures()[0]
+                probe_collection = 'cn-agent-' + probe_case['id'].replace('_','-')
+                activation_event['vector_warmups'] = 1
+                probe = warmup_attempt(active, '/search', {'question':probe_case['request'],
+                    'rungs': [] if name=='dense_only' else ['deployment'], 'collections':[probe_collection],
+                    'index_id':'default','lex_limit':4,'vec_limit':4,'passage_chars':260}, 'vector_warmup')
+                vectors = (probe or {}).get('vec') or []
                 if not vectors:
-                    raise RuntimeError(f"unavailable: {name} did not demonstrate actual vector results")
-                ranked = recall.server_post(settings, "/rerank", {"question": "payment replay identity",
-                    "files": [row["file"] for row in vectors[:2]], "collections": [probe_collection], "index_id": "default", "chars": 1000}, 8)
-                if not (ranked or {}).get("scores"):
-                    raise RuntimeError(f"unavailable: {name} did not demonstrate actual reranker scores")
-                observed = recall.server_capabilities(settings, timeout=1)
-                if module is recall and not (observed.get("vector_ready") and observed.get("rerank_ready")):
-                    raise RuntimeError("unavailable: corrected hybrid manifest did not confirm observed model readiness")
-                if module is recall:
-                    provisioning["index"] = _fixture_identity(observed.get("index", {}), fixture)
-                proof = {"vector_results": len(vectors), "reranker_scores": len(ranked["scores"])}
-                def retrieve(case, module=module, settings=settings, revision=revision, process=process, observed=observed, proof=proof):
-                    if process.poll() is not None:
-                        return {"available": False, "reason": "fixture server exited", "synthetic_corpus": True, "code_revision": revision}
-                    collection = "cn-agent-" + case["id"].replace("_", "-")
-                    options = {"package_src": str(Path(__file__).parent.parent), "fixture_home": str(fixture / "home"),
-                               "baseline_source": str(baseline_source) if module is old else "", "qmd": qmd,
-                               "server_url": settings.server_url, "collection": collection, "request": case["request"]}
-                    child = subprocess.run([sys.executable, "-I", str(driver)], input=json.dumps(options), capture_output=True,
-                                           text=True, timeout=12, cwd=fixture, env=tool_env)
-                    if child.returncode or len(child.stdout) > 2_000_000:
-                        raise RuntimeError(f"isolated public Python recall failed (exit {child.returncode})")
-                    result = json.loads(child.stdout)
-                    if any(not uri.startswith(f"qmd://{collection}/") for uri in result["source_ids"]):
-                        raise ValueError("retrieval returned a source outside the synthetic task collection")
-                    return {**_fixture_identity(result, fixture), "synthetic_corpus": True, "code_revision": revision,
-                            "fixture_digest": manifest["fixture_digest"], "qmd_version": version.stdout.strip(),
-                            "provisioning": provisioning, "observed_readiness": {key: observed.get(key) for key in ("vector_ready", "rerank_ready")},
-                            "model_operations_observed": proof,
-                            "settings": {"engine": "server", "collections": [collection], "memory_collections": [],
-                                         "vector": True, "rerank": True, "budget": settings.budget, "timeout": settings.timeout}}
-                backends[name] = retrieve
+                    raise RuntimeError("vector warmup unavailable")
+                if name != 'current_hybrid':
+                    metadata = (probe or {}).get('manifest',{}).get('models',{}).get('embed',{})
+                    if metadata.get('id') != str(common['embed']) or metadata.get('revision') != common['provisioning']['models']['embed']:
+                        raise RuntimeError("embedding identity unverified")
+                if name != 'dense_only':
+                    activation_event['rerank_warmups'] = 1
+                    payload = {'question':probe_case['request'],'collections':[probe_collection],'index_id':'default'}
+                    passages = [{**row,'text':row.get('scored_text','')} for row in vectors[:2]]
+                    payload.update({'files':[r['file'] for r in vectors[:2]],'chars':1000} if name=='current_hybrid' else {'passages':passages})
+                    ranked = warmup_attempt(active, '/rerank', payload, 'rerank_warmup')
+                    if name=='current_hybrid':
+                        if not (ranked or {}).get('scores'):
+                            raise RuntimeError("legacy scoring warmup unavailable")
+                        active['warmup_contract']='legacy_nonempty_scores_not_positive_execution_proof'
+                    elif not positive_rerank(ranked, passages, str(common['rank'])):
+                        raise RuntimeError("positive configured-model rerank warmup unavailable")
+                    else:
+                        active['warmup_contract']='positive_configured_model_exact_passages'
+                activation_event.update(status='ready', elapsed_ms=round((time.monotonic()-started)*1000))
+                return active
+            except Exception as exc:
+                activation_event.update(status='failed', error=bounded_diagnostic(f'{type(exc).__name__}: {exc}'))
+                try: retire()
+                finally: activation_event['owned_groups'] = group_observations(groups[group_start:])
+                raise
+
+        def retrieve(name, case):
+            cell = (name, case['id'])
+            if cell in failed_cells:
+                return {**failed_cells[cell], 'cell_retry_blocked':True,
+                        'new_operation_attempts':0}
+            before = len(events); started = time.monotonic()
+            previous_owner = state['active']
+            stage = 'activation'
+            try:
+                active = activate(name); common = state['common']
+                stage = 'input_validation'
+                documents = inputs_unchanged(name)
+                options = {'package_src':str(Path(__file__).parent.parent),'fixture_home':str(fixture/'home'),
+                    'baseline_source':str(active['old_source'] or ''),'qmd':common['qmd'],
+                    'server_url':active['settings'].server_url,'collection':'cn-agent-'+case['id'].replace('_','-'),
+                    'request':case['request'],'baseline':name,'case':case,'documents':documents,
+                    'expected_model':str(common['embed'])}
+                driver = _retrieval_driver(control)
+                command = fence([sys.executable,'-I',str(driver)],'client-'+str(len(events)),
+                    port=active['port'],extra_reads=([active['old_source'].parent] if active['old_source'] else []))
+                stage = 'query'
+                client_event = {'event':'client_attempt','baseline':name,'case_id':case['id'],'seconds':12}
+                result = command_attempt(client_event,
+                    command,cwd=fixture,env=active['environment'],seconds=12,body=json.dumps(options).encode())
+                if result['returncode']:
+                    raise RuntimeError('isolated retrieval client failed')
+                answer = json.loads(result['stdout'])
+                # Observe the actual query before any source/state rejection.
+                # These fields never admit its passages into memory or identity.
+                client_event['runtime_observation'] = runtime_observation(
+                    answer.get('runtime_observation',answer) if isinstance(answer,dict) else answer)
+                client_event['server_calls'] = transport_observations(
+                    answer.get('server_calls') if isinstance(answer,dict) else None)
+                inputs_unchanged(name)
+                collection=options['collection']
+                if any(not uri.startswith(f'qmd://{collection}/') for uri in answer.get('source_ids',[])):
+                    raise RuntimeError('retrieval escaped public task collection')
+                if not answer.get('available'):
+                    retire()
+                response = {**_fixture_identity(answer,fixture),'runtime_observation':client_event['runtime_observation'],
+                    'server_calls':client_event['server_calls'],
+                    'synthetic_corpus':True,'code_revision':active['revision'],
+                    'fixture_digest':common['manifest']['fixture_digest'],'qmd_version':'2.8.3',
+                    'provisioning':common['provisioning'],'backend':name,
+                    'preparation_events':list(events[before:]),'retrieval_total_ms':round((time.monotonic()-started)*1000),
+                    'settings':{'engine':'server','vector':True,'rerank':name!='dense_only','collections':[collection]},
+                    'warmup_contract':active.get('warmup_contract','vector_only_no_rerank')}
+                if not answer.get('available'):
+                    failed_cells[cell] = response
+                return response
+            except Exception as exc:
+                # A failed query may leave a poisoned native owner. Retire it;
+                # cleanup failure prevents every future activation in this context.
+                native_group = state['active']['group'] if state['active'] else None
+                if any(not group.retired for group in groups if group is not native_group):
+                    state['blocked'] = True
+                    backends.lifecycle['cleanup_proven'] = False
+                # A purely missing dependency in another arm has not borrowed
+                # the healthy owner's runtime and need not force its cold reload.
+                untouched_owner = (stage=='activation' and state['active'] is previous_owner
+                                   and previous_owner is not None and len(events)==before)
+                if not untouched_owner:
+                    try: retire()
+                    except RuntimeError: pass
+                response = {'available':False,'status':'unavailable','context':'','evidence':[],'source_ids':[],
+                    'synthetic_corpus':True,
+                    'code_revision':SUITE,'backend':name,'reason':f'{type(exc).__name__}: {exc}'[:200],
+                    'failure_stage':stage,
+                    'preparation_events':list(events[before:]),
+                    'server_calls':[call for event in events[before:] for call in event.get('server_calls',[])],
+                    'runtime_observation':{'stages':[event['runtime_observation'] for event in events[before:]
+                        if 'runtime_observation' in event]},
+                    'cleanup_proven':backends.lifecycle['cleanup_proven']}
+                failed_cells[cell] = response
+                return response
+        for name in selected:
+            backends[name] = lambda case, name=name: retrieve(name,case)
+        try:
             yield backends
         finally:
-            for process in processes:
-                process.terminate()
-                try:
-                    process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=3)
-            for stream in streams:
-                stream.close()
-
+            try: retire()
+            except RuntimeError: backends.lifecycle['cleanup_proven']=False
+            for group in groups:
+                try: group.close()
+                except Exception: backends.lifecycle['cleanup_proven']=False
+            backends.lifecycle['unproven_groups'] = [
+                {'pid':group.process.pid,'pgid':group.pgid,'signaling_closed':group.signaling_closed}
+                for group in groups if not group.retired]
+    finally:
+        if backends.lifecycle['cleanup_proven']:
+            shutil.rmtree(directory); shutil.rmtree(controls)
+        else:
+            backends.lifecycle['retained_public_fixture']=directory
+            backends.lifecycle['retained_controls']=controls
 
 def _digest(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
@@ -426,16 +1168,24 @@ def _expected(case: dict, payload: dict):
     return {"content": content}
 
 
+class _RetrievalUnavailable(RuntimeError):
+    def __init__(self, result):
+        super().__init__("unavailable: " + str(result.get("reason", "vector retrieval failed")))
+        self.details = {key: result[key] for key in ("backend", "code_revision", "status", "reason",
+            "preparation_events", "server_calls", "coverage", "retrieval_total_ms", "runtime_observation",
+            "cleanup_proven", "cell_retry_blocked", "new_operation_attempts") if key in result}
+
+
 def _memory(case: dict, baseline: str, budget: int, retrievers: dict) -> dict:
-    if baseline in ("current_hybrid", "corrected_hybrid"):
+    if baseline in VECTOR_BASELINES:
         backend = retrievers.get(baseline)
         if backend is None:
-            raise RuntimeError("unavailable: dedicated synthetic hybrid backend not configured")
+            raise RuntimeError("unavailable: dedicated synthetic vector backend not configured")
         result = backend(case)
         if not result.get("synthetic_corpus") or not result.get("code_revision"):
             raise ValueError("retrieval backend must pin its code and attest the synthetic corpus")
         if not result.get("available"):
-            raise RuntimeError("unavailable: " + str(result.get("reason", "hybrid retrieval failed")))
+            raise _RetrievalUnavailable(result)
         result["context"] = str(result.get("context", ""))[:budget]
         return result
     notes = case["lessons"]
@@ -635,10 +1385,9 @@ def run(*, model: str, budget_usd: float, per_attempt_usd: float = .25, timeout:
         split: str = "dev", max_cases: int = 4, seed: int = 17, baselines: tuple = BASELINES,
         retrievers: Optional[dict[str, Callable]] = None, ask: Callable = call_claude,
         verify: Callable = verify_code, progress: Optional[Callable] = None) -> dict:
-    if not model or not all(math.isfinite(value) and value > 0 for value in (budget_usd, per_attempt_usd, timeout)) or max_cases < 1:
-        raise ValueError("model, positive budgets and positive case limit are required")
-    if not baselines or len(set(baselines)) != len(baselines) or any(b not in BASELINES for b in baselines):
-        raise ValueError("unknown or empty baseline list")
+    schedule = plan(model=model, budget_usd=budget_usd, per_attempt_usd=per_attempt_usd,
+                    timeout=timeout, split=split, max_cases=max_cases, seed=seed,
+                    baselines=baselines, execute=True)
     cases = [c for c in fixtures() if split == "all" or c["split"] == split][:max_cases]
     if not cases:
         raise ValueError("no cases in selected split")
@@ -653,13 +1402,30 @@ def run(*, model: str, budget_usd: float, per_attempt_usd: float = .25, timeout:
                   "checks": [], "trace": [], "fingerprint": {"suite": SUITE, "fixture_digest": _digest(case),
                   "model": model, "seed": seed, "split": split, "timeout": timeout, "per_attempt_usd": per_attempt_usd,
                   "memory_budget_chars": 4096, "tools": [], "hooks": False, "mcp": False}, "model_called": False,
-                  "model_responded": False, "attempted": False}
+                  "model_responded": False, "attempted": False,
+                  "retrieval_attempted": False, "retrieval_completed": False,
+                  "external_backend_invoked": False,
+                  "verification_attempted": False, "verification_completed": False}
         try:
             if halt_model_reason:
                 raise RuntimeError(halt_model_reason)
             record["attempted"] = True
-            memory = _memory(case, baseline, 4096, retrievers or {})
-            record["fingerprint"]["retrieval"] = {k: v for k, v in memory.items() if k != "context"}
+            if budget_usd - reserved < .01:
+                raise RuntimeError("budget exhausted before retrieval or model call")
+            record["retrieval_attempted"] = True
+            cell_retrievers = dict(retrievers or {})
+            backend = cell_retrievers.get(baseline)
+            if baseline in VECTOR_BASELINES and callable(backend):
+                def invoke_backend(case, backend=backend):
+                    record['external_backend_invoked'] = True
+                    return backend(case)
+                cell_retrievers[baseline] = invoke_backend
+            memory = _memory(case, baseline, 4096, cell_retrievers)
+            record["retrieval_completed"] = True
+            record["fingerprint"]["retrieval"] = {k: v for k, v in memory.items() if k not in (
+                "context", "preparation_events", "retrieval_total_ms", "elapsed_ms", "server_calls", "runtime_observation")}
+            record["retrieval_observation"] = {k: memory[k] for k in (
+                "preparation_events", "retrieval_total_ms", "elapsed_ms", "server_calls", "runtime_observation") if k in memory}
             record["fingerprint"]["context_digest"] = _digest(memory["context"])
             record["trace"].append({"stage": "retrieval", "baseline": baseline, "context_chars": len(memory["context"])})
             remaining = budget_usd - reserved
@@ -673,14 +1439,26 @@ def run(*, model: str, budget_usd: float, per_attempt_usd: float = .25, timeout:
             record["model_called"] = True
             reply = ask(prompt, model=model, budget=cap, timeout=timeout)
             record["model_responded"] = True
+            observed = reply.get('observed_model_ids') if isinstance(reply, dict) else None
+            safe_ids = (isinstance(observed, list) and 0 < len(observed) <= 8 and
+                        all(isinstance(value, str) and len(value) <= 200 and _valid_identity(value)
+                            for value in observed))
+            record['observed_model_ids'] = list(observed) if safe_ids else []
+            record['model_identity_complete'] = bool(safe_ids and
+                all(re.search(r'\d{8}$', value) for value in observed))
             code = validate_edits(reply["output"])
             record["trace"].append({"stage": "constrained_edit", "path": "app.py", "sha256": hashlib.sha256(code.encode()).hexdigest()})
+            record["verification_attempted"] = True
             check = verify(code, case, seed)
+            if not isinstance(check, dict):
+                raise ValueError("invalid parent verifier record")
+            record["verification_completed"] = True
             record.update(completed=True, checks=[check], usage=reply.get("usage", {}), cost_usd=reply.get("cost_usd"),
-                          observed_model_ids=reply.get("observed_model_ids", []),
                           edit={"path": "app.py", "content": code})
         except Exception as exc:
             record["error"] = f"{type(exc).__name__}: {exc}"[:300]
+            if isinstance(exc, _RetrievalUnavailable):
+                record["retrieval_observation"] = exc.details
             if record["model_called"] and not record["model_responded"]:
                 from .sentinel import classify_failure
                 failure = classify_failure({}, record["error"])
@@ -692,6 +1470,18 @@ def run(*, model: str, budget_usd: float, per_attempt_usd: float = .25, timeout:
         if progress:
             progress(record)
     score = evals.score_task_traces(records, [c["id"] for c in cases], list(baselines), suite=SUITE)
+    stages = {}
+    for baseline in baselines:
+        rows = [r for r in records if r["baseline"] == baseline]
+        stages[baseline] = {"scheduled": len(rows),
+            **{key: sum(r[key] is True for r in rows) for key in (
+                "attempted", "retrieval_attempted", "retrieval_completed", "model_called",
+                "model_responded", "verification_attempted", "verification_completed", "external_backend_invoked")},
+            "model_skipped": sum(r["model_called"] is False for r in rows),
+            "task_skipped": sum(r["attempted"] is False for r in rows),
+            "retrieval_skipped": sum(r["retrieval_attempted"] is False for r in rows),
+            "verification_skipped": sum(r["verification_attempted"] is False for r in rows),
+            "verified_success": sum(r["passed"] is True for r in score['rows'] if r['baseline']==baseline)}
     live = ask is call_claude and verify is verify_code
     identities = sorted({identity for record in records for identity in record.get("observed_model_ids", [])})
     fingerprint = {"suite": SUITE, "task_ids": [c["id"] for c in cases], "baselines": list(baselines),
@@ -699,6 +1489,8 @@ def run(*, model: str, budget_usd: float, per_attempt_usd: float = .25, timeout:
                    "client": client, "seed": seed, "split": split, "timeout": timeout,
                    "per_attempt_usd": per_attempt_usd, "budget_usd": budget_usd,
                    "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                   "recall_client_sha256": hashlib.sha256(Path(recall.__file__).read_bytes()).hexdigest(),
+                   "scorer_sha256": hashlib.sha256(Path(evals.__file__).read_bytes()).hexdigest(),
                    "scorer_version": evals.SCORER_VERSION,
                    "evidence": [{"task_id": record["task_id"], "baseline": record["baseline"],
                                  "retrieval": record["fingerprint"].get("retrieval"),
@@ -706,15 +1498,31 @@ def run(*, model: str, budget_usd: float, per_attempt_usd: float = .25, timeout:
                                 for record in sorted(records, key=lambda r: (r["task_id"], r["baseline"]))]}
     # Provider weights are unavailable. A fixed, observed API model ID is the
     # comparison boundary; aliases/absent model metadata cannot join a trend.
-    complete = live and client["complete"] and bool(identities) and all(re.search(r"\d{8}$", m) for m in identities)
+    complete = live and client["complete"] and bool(identities) and all(
+        not record['model_responded'] or record.get('model_identity_complete') is True for record in records)
     complete = complete and all(record["fingerprint"].get("retrieval") for record in records)
     measurement = ("real_model_constrained_code_edits_with_parent_executable_verifiers" if any(r["completed"] for r in records)
                    else "real_model_invocation_attempts_no_executable_outcomes") if live else "injected_runner_or_verifier_not_live_agent_outcomes"
     return {**score, "measurement": measurement,
+            "schedule": schedule, "stage_counts": stages,
+            "stage_definitions": {
+                "scheduled": "declared task x baseline cells, including failed and skipped cells",
+                "attempted": "task cell admitted after provider/account halt guard; not completed task",
+                "retrieval_attempted": "condition memory assembly entered, including no_memory/static/history",
+                "retrieval_completed": "condition memory assembly returned available; includes valid empty miss",
+                "external_backend_invoked": "vector backend callback entered; not attested HTTP/SDK/model request",
+                "model_called": "ask callback entered; not independently attested provider network invocation",
+                "model_responded": "ask callback returned; not independently attested provider response",
+                "verification_attempted": "trusted parent verifier callback entered after edit admission",
+                "verification_completed": "parent verifier returned an object, whether pass or fail",
+                "verified_success": "completed/no-error task and all named parent verifier checks passed",
+                "skipped": "stage flag false; reason is retained per record; never counted as stage attempted"},
             "fingerprint": fingerprint, "comparable": bool(complete), "model_identity_boundary": "observed_fixed_API_model_ID; provider_weight_digest_unavailable",
             "fixture_digest": _digest(fixtures()), "split": split, "seed": seed, "records": records,
             "model_calls": sum(r["model_called"] for r in records), "reserved_budget_usd": round(reserved, 6),
             "model_responses": sum(r["model_responded"] for r in records),
             "halted_model_reason": halt_model_reason,
             "limits": ["synthetic deployment tasks, not production productivity", "memories supplied by fixture author, not extracted by capture loop",
-                       "holdout families are frozen by digest, not claimed unseen to the fixture author", "unavailable hybrid backends remain in denominator"]}
+                       "holdout families are frozen by digest, not claimed unseen to the fixture author",
+                       "unavailable vector backends remain in denominator",
+                       "attempted means task cell admitted before retrieval; provider calls/responses and verifier stages are separate"]}

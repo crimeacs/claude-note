@@ -15,6 +15,7 @@ ANSWERS_LAST = evals.EVAL_DIR / "last-answers.json"
 
 
 def add_parser(sub) -> None:
+    from .agent_tasks import BASELINES
     e = sub.add_parser("eval", help="Measure recall: labelled runs, live signals, answer A/B, dashboard")
     es = e.add_subparsers(dest="eval_command")
 
@@ -76,7 +77,7 @@ def add_parser(sub) -> None:
     agent.add_argument("--split", choices=["dev", "holdout", "all"], default="dev")
     agent.add_argument("--cases", type=int, default=4)
     agent.add_argument("--seed", type=int, default=17)
-    agent.add_argument("--baselines", default="no_memory,static_instructions,scoped_lexical,current_hybrid,corrected_hybrid,bounded_history")
+    agent.add_argument("--baselines", default=",".join(BASELINES))
     agent.add_argument("--embed-model", help="Absolute existing local GGUF; never downloaded by harness")
     agent.add_argument("--rerank-model", help="Absolute existing local GGUF; never downloaded by harness")
     agent.add_argument("--baseline-checkout", help="Read-only checkout pinned at5c1ec7e for the old hybrid baseline")
@@ -180,17 +181,17 @@ def main(args) -> int:
     cmd = args.eval_command
     if cmd == "agent-tasks":
         from . import agent_tasks
+        baselines = tuple(b.strip() for b in args.baselines.split(",") if b.strip())
+        schedule = agent_tasks.plan(model=args.model, budget_usd=args.budget_usd,
+            per_attempt_usd=args.per_attempt_usd, timeout=args.timeout, split=args.split,
+            max_cases=args.cases, seed=args.seed, baselines=baselines, execute=args.execute)
         if args.prepare_retrieval:
             out = agent_tasks.prepare_retrieval_fixture(Path(args.prepare_retrieval), embed_model=args.embed_model or "",
                                                        rerank_model=args.rerank_model or "")
             print(json.dumps(out, indent=2))
             return 0
-        baselines = tuple(b.strip() for b in args.baselines.split(",") if b.strip())
-        cases = [c for c in agent_tasks.fixtures() if args.split == "all" or c["split"] == args.split][:args.cases]
         if not args.execute:
-            print(json.dumps({"mode": "plan_no_model_calls", "suite": agent_tasks.SUITE, "tasks": [c["id"] for c in cases],
-                              "baselines": baselines, "scheduled_attempts": len(cases) * len(baselines),
-                              "budget_usd": args.budget_usd, "model": args.model or "required for --execute"}, indent=2))
+            print(json.dumps({"mode": "plan_no_model_calls", **schedule}, indent=2))
             return 0
         out = run_agent_tasks(vars(args))
         target = Path(args.out).expanduser()
@@ -319,30 +320,24 @@ def main(args) -> int:
 
 def run_agent_tasks(options: dict) -> dict:
     from . import agent_tasks
-    from contextlib import ExitStack, nullcontext
     baseline_names = options.get("baselines", ",".join(agent_tasks.BASELINES))
     baselines = tuple(b.strip() for b in baseline_names.split(",") if b.strip()) if isinstance(baseline_names, str) else tuple(baseline_names)
-    paths = [options.get(k) for k in ("embed_model", "rerank_model", "baseline_checkout")]
-    if any(paths) and not all(paths):
-        raise ValueError("embed_model, rerank_model and baseline_checkout must be provided together")
-    context = agent_tasks.isolated_hybrid_backends(embed_model=Path(paths[0]), rerank_model=Path(paths[1]), baseline_checkout=Path(paths[2])) if all(paths) else nullcontext({})
-    with ExitStack() as stack:
-        setup_error = ""
-        try:
-            retrievers = stack.enter_context(context)
-        except (RuntimeError, ValueError, OSError) as exc:
-            setup_error = f"{type(exc).__name__}: {exc}"[:300]
-            def unavailable(case):
-                return {"available": False, "reason": setup_error, "synthetic_corpus": True,
-                        "code_revision": "setup-unavailable"}
-            retrievers = {name: unavailable for name in ("current_hybrid", "corrected_hybrid")}
+    agent_tasks.plan(model=options.get("model", ""), budget_usd=options.get("budget_usd", 1.0),
+        per_attempt_usd=options.get("per_attempt_usd", .25), timeout=options.get("timeout", 90),
+        split=options.get("split", "dev"), max_cases=options.get("cases", 4), seed=options.get("seed", 17),
+        baselines=baselines, execute=True)
+    paths = {k: Path(options[k]) if options.get(k) else None
+             for k in ("embed_model", "rerank_model", "baseline_checkout")}
+    with agent_tasks.isolated_hybrid_backends(**paths, baselines=baselines) as retrievers:
         result = agent_tasks.run(model=options.get("model", ""), budget_usd=options.get("budget_usd", 1.0),
             per_attempt_usd=options.get("per_attempt_usd", .25), timeout=options.get("timeout", 90),
             split=options.get("split", "dev"), max_cases=options.get("cases", 4), seed=options.get("seed", 17),
             baselines=baselines, retrievers=retrievers)
-        if setup_error:
-            result["retrieval_setup_error"] = setup_error
-        return result
+    result["retrieval_lifecycle"] = retrievers.lifecycle
+    if not retrievers.lifecycle["cleanup_proven"]:
+        result["comparable"] = False
+        result["retrieval_cleanup_error"] = "owned cleanup unproven; results retained, no replacement admitted"
+    return result
 
 
 def agent_task_regressions(run: dict, history: list[dict]) -> list[str]:

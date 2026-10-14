@@ -99,7 +99,7 @@ class ModelBoundaryTests(unittest.TestCase):
         ask = mock.Mock(return_value={'output': {'files': [{'path': 'app.py', 'content': 'def solve(p): return {}'}]}})
         verify = lambda *args: {'name': 'unit synthetic', 'passed': True, 'verifier': 'injected-test-only'}
         run = agent_tasks.run(model='unit-only', budget_usd=.1, per_attempt_usd=.1, max_cases=1, ask=ask, verify=verify)
-        self.assertEqual(sum(m['scheduled'] for m in run['metrics'].values()), 6)
+        self.assertEqual(sum(m['scheduled'] for m in run['metrics'].values()), 7)
         self.assertEqual(run['model_calls'], 1)
         self.assertEqual(ask.call_count, 1)
         self.assertEqual(run['metrics']['current_hybrid']['success_rate'], 0)
