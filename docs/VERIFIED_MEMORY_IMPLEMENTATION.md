@@ -50,6 +50,8 @@ source = "/absolute/authorized-source/*"
 audiences = ["local", "host", "model"]
 ```
 
+Version 2.1.2 also enforces claim audiences on assembled payloads and every source in their lineage. A missing audience remains host-only. Protected artifact restrictions intersect across managed writes and ancestor ledgers; a broader source grant cannot override them. Managed replacement records existing controls before removing them. Restrictions already removed manually before being recorded require local owner reconciliation; there is no automatic reconstruction or whole-vault migration. Candidate catalog paths and tags are included only after the same source/artifact checks.
+
 Secret redaction is an additional boundary and cannot identify ordinary business confidentiality. Staging revocation records are surfaced for reconciliation; the external destination must acknowledge removal before a revocation is considered complete. No organizational authorization or remote canonical consolidation service is claimed.
 
 ## Deliberately deferred designs
@@ -59,6 +61,8 @@ A graph database, hosted memory framework, learned utility policy, general OCR/l
 ## Exercised evidence and limits (October 13, 2026)
 
 The settled source passed 341 isolated Python 3.11 regressions and all 12 Node server contracts using the installed QMD SDK. The Sweat Assistant release checkout passed both TypeScript checks, 8,625 frontend tests and 714 Swift tests. Independent review fixes include source-origin privacy, claim dependency/conflict propagation, canonical passage anchors, index-generation acknowledgement and failed-answer denominators.
+
+The 2.1.2 patch passed 372 isolated Python 3.11 regressions, including artifact audience intersection, alternate claim formatting, concurrent lineage writers and catalog metadata exclusion. No provider calls or private fixtures were used for these checks. The retrieval and task-outcome measurements below remain the separate 2.1.0 experiment.
 
 The final corrected public synthetic hybrid preflight returned the current contract source in 16/16 cases versus 14/16 for the pinned 2.0.2 baseline. All 32 queries were available. On this warm, small corpus, median latency was 262 ms versus 43.5 ms and nearest-rank p95 was 379 ms versus 84 ms. The corrected route exercised actual local embeddings/reranking and returned exact source revisions and passage anchors. This is source reach, not completed-task correctness: ordinary proposed prose appeared in three of four poison cases, and other-environment prose could appear as an unverified lead. Only structured claims with earned authority receive enforced governing applicability.
 

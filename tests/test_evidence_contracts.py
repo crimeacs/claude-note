@@ -80,10 +80,35 @@ class EvidenceContracts(unittest.TestCase):
 
     def test_catalog_is_bounded(self):
         index = vault_indexer.VaultIndex(notes={str(i): vault_indexer.NoteIndex(f'note-{i}.md', f'note {i}', tags=[str(i)]) for i in range(10000)})
-        with mock.patch.object(egress, 'audiences', return_value={'model'}):
+        with mock.patch.object(egress, 'audiences', return_value={'model'}), \
+             mock.patch.object(egress, 'prepare', return_value='') as prepare:
             view = synthesizer._format_vault_summary(index, 'note 9999')
         self.assertLessEqual(len(view), 8000)
         self.assertIn('note-9999.md', view)
+        self.assertEqual(prepare.call_count, 100)
+
+    def test_catalog_filters_artifact_and_lineage_controls_before_metadata(self):
+        public = self.root / 'public.md'
+        public.write_text('Synthetic public evidence')
+        host = self.root / 'host.md'
+        host.write_text(verified_claims.Claim('host', 'Synthetic host-only fact').marker())
+        private = self.root / 'private.md'
+        private.write_text('---\nprivate: true\n---\nSynthetic private evidence')
+        derived = self.root / 'derived.md'
+        derived.write_text('---\nderivation_sources:\n  - ' + json.dumps(str(private)) + '\n---\nSynthetic derivative')
+        index = vault_indexer.VaultIndex(notes={path.name: vault_indexer.NoteIndex(
+            path.name, path.stem, tags=[path.stem + '-tag']) for path in (public, host, private, derived)})
+        sources = set()
+        with mock.patch.object(egress, 'policy', return_value={'default': ['host', 'model']}):
+            view = synthesizer._format_vault_summary(index, sources=sources)
+            self.assertEqual(egress.prepare(view, audience='model', sources=sources), view)
+        self.assertIn('public.md', view)
+        self.assertIn('public-tag', view)
+        self.assertIn('Eligible notes in this bounded catalog: 1.', view)
+        for name in ('host', 'private', 'derived'):
+            self.assertNotIn(name + '.md', view)
+            self.assertNotIn(name + '-tag', view)
+        self.assertEqual(sources, {str(public)})
 
     def test_schema_and_source_support_reject_before_mutation(self):
         content = transcript_reader.TranscriptContent('real', source_path='/public/transcript')

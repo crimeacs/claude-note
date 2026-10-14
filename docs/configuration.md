@@ -127,6 +127,14 @@ also retains restrictive lineage in local protected state. Removing its visible 
 does not declassify it. Grant `staging` separately only when those source owners authorize the
 configured destination. Existing generated notes without known lineage are deferred.
 
+Claim `audiences` further restrict source grants; a missing claim audience means `host`.
+Every claim in a payload or source must permit the external destination. Managed writes
+persist these restrictions, including existing controls before replacement, and later writes
+cannot broaden them. Malformed controls require owner reconciliation. The synthesis catalog
+omits notes whose artifact or origin denies model access before including their paths or tags.
+Legacy origin-only records remain compatible; controls removed manually before any restriction
+was recorded cannot be reconstructed automatically. Inspect and reconcile those files locally.
+
 Normalized chat imports retain the original export ZIP or native database as a restrictive
 origin. Granting the generated transcript folder cannot override a deny on that origin.
 New ZIP sweeps retain the original file and archive a copy only when new conversations are
