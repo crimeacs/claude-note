@@ -298,6 +298,23 @@ is conservative; missing reported cost is unknown, not zero. Partial, unavailabl
 failed and budget-stopped cells cannot disappear from all-scheduled task-success
 rates. HTTP observations and preparation events are separate from callback counts.
 
+### Native feasibility checkpoint (14 October 2026)
+
+This control is experimental. The latest isolated public-fixture attempt completed
+QMD indexing and embedding, started one server and passed its readiness probe.
+Its single vector warmup hit the eight-second client timeout; the task search
+was skipped. The scheduled cell is unavailable, with zero task-query successes,
+and was not retried. The two earlier failed preparation attempts remain recorded.
+All five owned process groups were confirmed empty with their leaders reaped and
+pipes drained. Teardown required TERM and KILL for the server; those receipts do
+not prove native allocator or detached-descendant lifetimes. Successful dense
+retrieval and comparative task benefit remain unproven by this checkpoint.
+
+The [chronological phase journal](longitudinal-evals.md) provides durable stage
+intentions, immutable prior-receipt views and cooperative cost/deadline gates.
+It is a library contract; production capture, extraction and indexed next-action
+adapters remain separate work.
+
 Pure adapter tests and trusted disposable process/fence tests establish software
 contracts. They do not establish that the new native backend has been exercised
 with QMD/weights, that memory improved a task, or that a real host delivered

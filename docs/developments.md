@@ -1,5 +1,21 @@
 # Developments
 
+## 2.1.11 — install first, preserve evaluation lifetimes (14 October 2026)
+
+Quick install now follows the README introduction, with the existing install
+anchor and setup/upgrade details retained. Isolated agent-task planning adds a
+dense-only control, explicit unavailable outcomes, operation receipts and owned
+process-group cleanup. A chronological phase journal records durable intentions,
+immutable prior evidence and cooperative budgets, and refuses close while an
+operation borrows it.
+
+The native public-fixture checkpoint indexed and embedded successfully but timed
+out during its vector warmup, before any task search. Dense feasibility and
+memory's effect on task success remain unproven; see [evaluation limits](evals.md#native-feasibility-checkpoint-14-october-2026).
+The phase journal does not yet connect each condition's production capture,
+extraction, durable mutation and indexed next action.
+
+
 ## 2.1.7 — verify import evidence when a session needs work (14 October 2026)
 
 Queue polling checks canonical receipts and exact delivery metadata for every
