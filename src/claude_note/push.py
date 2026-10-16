@@ -352,6 +352,88 @@ def _put_once_more_if_transient(client, path: str, content: str, metadata: dict)
     return status, body
 
 
+def _record_reason(counts: dict, key: str, reason: str) -> None:
+    reasons = counts.setdefault(key, {})
+    reasons[reason] = reasons.get(reason, 0) + 1
+
+
+def _revocation_reasons(revocations: list) -> dict:
+    reasons = {}
+    for revocation in revocations:
+        reason = revocation.get("reason") if isinstance(revocation, dict) else None
+        reason = reason if isinstance(reason, str) and reason else "unknown"
+        reasons[reason] = reasons.get(reason, 0) + 1
+    return reasons
+
+
+def _queue_revocation(state: dict, destination: Optional[dict], source: str,
+                      reason: str, revision: str) -> None:
+    # Bind new withdrawals to the known remote bytes. Do not stack an identical
+    # legacy request merely because its older schema did not record a revision.
+    for existing in state["revocations"]:
+        if (isinstance(existing, dict) and existing.get("source") == source
+                and existing.get("destination") == destination and existing.get("reason") == reason
+                and existing.get("revision", revision) == revision):
+            existing.setdefault("revision", revision)
+            return
+    state["revocations"].append({"source": source, "destination": destination,
+                                 "reason": reason, "revision": revision})
+
+
+def _clear_restored_revocations(state: dict, destination: Optional[dict], source: str,
+                                sha: str, receipts: dict) -> int:
+    """Cancel only a known source's unchanged, fully reauthorized queued withdrawal.
+
+    Called after every ordinary eligibility, provenance and staging-policy check.
+    A new version cannot prove the old remote bytes are authorized, and unknown
+    reasons or another endpoint, tenant, vault or owner are not ours to clear.
+    This does not withdraw or edit a remote document.
+    """
+    if destination is None or source not in receipts:
+        return 0
+    retained = []
+    cleared = 0
+    for revocation in state["revocations"]:
+        if (isinstance(revocation, dict) and revocation.get("source") == source
+                and revocation.get("destination") == destination
+                and isinstance(revocation.get("reason"), str)
+                and revocation["reason"] in {"eligibility-revoked", "audience-revoked"}):
+            # Freeze the existing receipt before any newer upload changes it.
+            # This is a known push hash, never invented derivation provenance.
+            revocation.setdefault("revision", receipts[source])
+            if revocation["revision"] == sha == receipts[source]:
+                cleared += 1
+                continue
+        retained.append(revocation)
+    state["revocations"] = retained
+    return cleared
+
+
+def _run_problems(counts: dict) -> list[str]:
+    problems = []
+    for key, label in (("policy_denied", "note(s) denied by staging policy"),
+                       ("legacy_deferred", "legacy receipt(s) deferred until destination is confirmed"),
+                       ("unknown_outcomes", "write outcome(s) need reconciliation"),
+                       ("revocations_pending", "queued revocation(s) need review"),
+                       ("skipped", "note(s) could not be inspected"),
+                       ("errors", "upload error(s)")):
+        if counts.get(key):
+            problems.append(f"{counts[key]} {label}")
+    for key, label in (("policy_denied_reasons", "staging policy"),
+                       ("revocation_reasons", "revocation"), ("skipped_reasons", "inspection")):
+        for reason, count in sorted(counts.get(key, {}).items()):
+            problems.append(f"{label}: {reason} ({count})")
+    if counts.get("stopped"):
+        problems.append(counts["stopped"])
+    return problems
+
+
+def _write_attempt(counts: dict, status: str, started_at: str) -> None:
+    atomic_json(HEARTBEAT.with_suffix(".json"), {"schema_version": 1,
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "started_at": started_at,
+        "status": status, "counts": counts})
+
+
 def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit: int = 0,
         resend_legacy: bool = False) -> dict:
     vault = Path(vault or config.VAULT_ROOT)
@@ -360,12 +442,20 @@ def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit:
     laptop = socket.gethostname().split(".")[0]
     state = _load_state()
     counts = {"pushed": 0, "unchanged": 0, "redacted": 0, "skipped": 0, "skipped_stub": 0,
-              "errors": 0, "not_eligible": 0, "legacy_deferred": 0, "policy_denied": 0, "unknown_outcomes": 0}
+              "errors": 0, "not_eligible": 0, "local_only": 0, "legacy_deferred": 0,
+              "policy_denied": 0, "unknown_outcomes": 0, "revocations_cleared": 0,
+              "policy_denied_reasons": {}, "skipped_reasons": {}}
+    started_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    if not dry_run:
+        _write_attempt(counts, "running", started_at)
     if client is None:
         try:
             client = Client(json.loads(FORESYN_CONFIG.read_text()))
         except (OSError, ValueError, KeyError):
             if not dry_run:
+                counts["errors"] += 1
+                counts["problems"] = ["push destination configuration is unavailable"]
+                _write_attempt(counts, "blocked", started_at)
                 raise
     destination = _destination(client, vault, person, email)
     receipts = _receipts(state, destination)
@@ -381,20 +471,27 @@ def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit:
         try:
             text = path.read_text(encoding="utf-8")
             note_type = eligible(rel, text)
-        except (OSError, UnicodeDecodeError):
+        except (OSError, UnicodeDecodeError) as exc:
             counts["skipped"] += 1
+            _record_reason(counts, "skipped_reasons", f"read: {type(exc).__name__}")
             continue
         if not note_type:
             counts["not_eligible"] += 1
             if rel.as_posix() in receipts:
-                revocation = {"source": rel.as_posix(), "destination": destination, "reason": "eligibility-revoked"}
-                if revocation not in state["revocations"]:
-                    state["revocations"].append(revocation)
+                _queue_revocation(state, destination, rel.as_posix(), "eligibility-revoked", receipts[rel.as_posix()])
             continue
         if is_stub(text):
             counts["skipped_stub"] += 1
             continue
         try:
+            # An owner grants staging per source. Notes outside that selected
+            # scope are intentionally local, including old generated notes.
+            # Previously shared bytes still need their queued withdrawal.
+            if "staging" not in egress.audiences(str(path)):
+                counts["local_only"] += 1
+                if rel.as_posix() in receipts:
+                    _queue_revocation(state, destination, rel.as_posix(), "audience-revoked", receipts[rel.as_posix()])
+                continue
             from .verified_claims import parse as parse_claims
             if frontmatter(text).get("assistant") and not egress.derivations(text):
                 raise egress.EgressDenied("Generated note has no bound derivation sources")
@@ -402,18 +499,20 @@ def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit:
                 raise egress.EgressDenied("Derived claim does not permit staging")
             _, n = redact(text)
             content = egress.prepare(text, audience="staging", sources=[str(path)])
-        except egress.EgressDenied:
+        except egress.EgressDenied as exc:
             counts["policy_denied"] += 1
+            _record_reason(counts, "policy_denied_reasons", str(exc))
             if rel.as_posix() in receipts:
-                revocation = {"source": rel.as_posix(), "destination": destination, "reason": "audience-revoked"}
-                if revocation not in state["revocations"]:
-                    state["revocations"].append(revocation)
+                _queue_revocation(state, destination, rel.as_posix(), "audience-revoked", receipts[rel.as_posix()])
             continue
-        except Exception:
+        except Exception as exc:
             counts["skipped"] += 1  # never upload a note the scanner did not finish
+            _record_reason(counts, "skipped_reasons", f"inspection: {type(exc).__name__}")
             continue
         sha = hashlib.sha256(content.encode()).hexdigest()
         source = rel.as_posix()
+        if not dry_run:
+            counts["revocations_cleared"] += _clear_restored_revocations(state, destination, source, sha, receipts)
         if receipts.get(source) == sha:
             counts["unchanged"] += 1
             continue
@@ -469,16 +568,19 @@ def run(dry_run: bool = False, vault: Optional[Path] = None, client=None, limit:
     if not dry_run:
         _save_state(state)
     counts["revocations_pending"] = len(state["revocations"])
+    counts["revocation_reasons"] = _revocation_reasons(state["revocations"])
     if counts["legacy_deferred"]:
         print(f"{counts['legacy_deferred']} legacy push receipts have no recorded destination; "
               "unchanged notes were not resent. Check the configured destination, then run "
               "`claude-note push --resend-legacy` to send them there explicitly.", file=sys.stderr)
         if not dry_run:
             _save_state(state)
-    # Touched on every clean run, including one with nothing to push: the
-    # owner's app alerts when this file is older than 26 h.
-    if (not dry_run and counts["errors"] == 0 and not stop_reason and not counts["legacy_deferred"]
-            and not counts["unknown_outcomes"] and not counts["revocations_pending"]):
-        HEARTBEAT.parent.mkdir(parents=True, exist_ok=True)
-        HEARTBEAT.write_text(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "counts": counts}))
+    counts["problems"] = _run_problems(counts)
+    counts["clean"] = not counts["problems"]
+    # Record every attempt separately; denied or uninspected notes are not a
+    # clean idle run, even when the HTTP error count is zero.
+    if not dry_run:
+        _write_attempt(counts, "clean" if counts["clean"] else "blocked", started_at)
+        if counts["clean"]:
+            atomic_json(HEARTBEAT, {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "counts": counts})
     return counts

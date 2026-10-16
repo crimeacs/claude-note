@@ -44,6 +44,7 @@ The model string above is the existing code default, not a claim about the newes
 | `author` | Resolved | Human provenance. Resolution: environment → TOML → optional Foresyn config → global git email. |
 | `synthesis.mode` | `route` | `log` records sessions; `inbox` synthesizes into review inbox; `route` applies structured note operations. |
 | `synthesis.timeout` | `300` | Timeout for the synthesis subprocess. |
+| `synthesis.resume_after` | Empty | ISO timestamp with timezone for a provider cooldown. Capture continues; background and forced synthesis defer without consuming retries, then resume when the timestamp expires. `CLAUDE_NOTE_RESUME_AFTER` overrides TOML. |
 | `qmd.enabled` | `true` | Enables optional retrieval when QMD is available. |
 | `qmd.collection` | Empty | Exact registered collection for this vault. Empty disables QMD prompt injection and semantic ingestion merges. |
 | `qmd.search_mode` | `keyword` | BM25 synthesis retrieval; `vector` explicitly enables embedding search. |
@@ -137,6 +138,51 @@ was recorded cannot be reconstructed automatically. Inspect and reconcile those 
 
 Normalized chat imports retain the original export ZIP or native database as a restrictive
 origin. Granting the generated transcript folder cannot override a deny on that origin.
+
+Codex stores different projects together. To authorize only one project, add a `project`
+predicate to its transcript rule instead of granting the whole session store:
+
+```toml
+[[egress.rules]]
+source = "/Users/owner/.codex/sessions/*"
+project = "/Users/owner/Documents/approved-project"
+native = "codex"
+audiences = ["local", "host", "model"]
+```
+
+The predicate requires a regular, singly linked `.jsonl` source whose strict first
+record is native Codex `session_meta` and whose `payload.cwd` resolves to that exact
+project or a descendant. Missing, oversized, duplicate-key or malformed metadata,
+source symlinks and neighboring projects receive no grant. This is a source selection
+rule; every source, authored privacy restriction and transitive ancestor is still
+checked before egress. Imported snapshot sources need their own matching rule.
+`native = "codex"` requires the first-record native proof directly, without a
+provenance fallback. A native Codex source declaring another working directory cannot
+borrow project ancestry in a note or snapshot either.
+
+The same predicate can select generated notes and captured snapshots by complete
+provenance. Every leaf of their bounded, acyclic recorded and visible ancestry must
+resolve inside the project, satisfy the native Codex predicate, or match an explicit
+owner-configured `project_sources` anchor. Missing, unknown or cyclic lineage is not
+project evidence. For an existing project-specific Claude Code transcript directory,
+an owner can configure only that directory as an additional anchor:
+
+```toml
+[[egress.rules]]
+source = "/Users/owner/Documents/claude-notes/*.md"
+project = "/Users/owner/Documents/approved-project"
+project_sources = ["/Users/owner/.claude/projects/-Users-owner-Documents-approved-project/*"]
+audiences = ["local", "host", "model", "staging"]
+```
+
+This does not infer a project from a note's filename or prose, adopt legacy notes
+without ancestry, or grant the ancestors themselves. Each origin still needs its
+own audience grant, and private controls and `share: false` continue to restrict use.
+
+Media-heavy native origins above 256 MiB are inspected record by record, retaining
+only restrictive controls and lineage for policy evaluation. Original files remain
+authoritative and unchanged. Each record is limited to 64 MiB and the complete source
+to 8 GiB; malformed records, private metadata and unsupported controls fail closed.
 New ZIP sweeps retain the original file and archive a copy only when new conversations are
 imported; deleting an origin pauses external use of its derivatives. Legacy imports with an
 unknown origin require reimport or owner reconciliation rather than an inferred grant.
