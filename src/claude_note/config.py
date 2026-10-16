@@ -223,6 +223,7 @@ INDEX_REFRESH_INTERVAL = int(_get_config_value("index_refresh_interval", default
 SYNTH_MODEL = _get_config_value("model", section="synthesis", default="claude-sonnet-4-5-20250929")
 SYNTH_MAX_TOKENS = int(_get_config_value("max_tokens", section="synthesis", default=4096))
 SYNTH_TIMEOUT = int(_get_config_value("timeout", section="synthesis", default=300))  # 120 s timed out 1 in 4 sessions (2026-10-05)
+SYNTH_RESUME_AFTER = _get_config_value("resume_after", section="synthesis", default="")
 
 # =============================================================================
 # Cleanup Configuration

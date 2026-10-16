@@ -22,7 +22,115 @@ class EgressDenied(ValueError):
     pass
 
 
+class UnresolvedSourceControls(EgressDenied):
+    """Stable local bytes may be retained, but never authorized externally."""
+
+
 LINEAGE_LOCK_TIMEOUT = 5.0
+NATIVE_SOURCE_BYTES = 256 * 1024 * 1024
+NATIVE_JSONL_BYTES = 8 * 1024 * 1024 * 1024
+NATIVE_RECORD_BYTES = 64 * 1024 * 1024
+
+
+def _large_jsonl_restrictions(descriptor, expected_revision=None):
+    """Inspect every native record while retaining only restrictive metadata.
+
+    Media-heavy sessions can exceed the normal source bound even though each
+    record is manageable. The original stays authoritative: a projected
+    transcript cannot hide a private marker, claim or ancestor in a later
+    record. Strict UTF-8/JSON and explicit per-record/control bounds fail closed.
+    """
+    from .mutation import MAX_NOTE_BYTES
+
+    allowed, origins = None, set()
+    controls, nodes = 0, 0
+    digest = hashlib.sha256()
+    unresolved = None
+
+    def unique(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise EgressDenied('Duplicate native source key')
+            value[key] = item
+        return value
+
+    def restrict(constraint):
+        nonlocal allowed
+        if constraint is not None:
+            allowed = constraint if allowed is None else allowed & constraint
+
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    with os.fdopen(os.dup(descriptor), 'rb') as stream:
+        while True:
+            raw = stream.readline(NATIVE_RECORD_BYTES + 1)
+            if not raw:
+                break
+            if len(raw) > NATIVE_RECORD_BYTES:
+                raise EgressDenied('Native source record exceeds policy inspection bound')
+            digest.update(raw)
+            if b'\0' in raw:
+                raise EgressDenied('Unsupported binary derivation source')
+            try:
+                record = json.loads(raw.decode('utf-8'), object_pairs_hook=unique)
+            except (ValueError, UnicodeError, RecursionError) as exc:
+                raise EgressDenied('Cannot inspect native source record') from exc
+            if not isinstance(record, dict):
+                raise EgressDenied('Native source record must be an object')
+            pending = [record]
+            while pending:
+                value = pending.pop()
+                nodes += 1
+                if nodes > 10_000_000:
+                    raise EgressDenied('Native source metadata exceeds inspection bound')
+                if isinstance(value, dict):
+                    # Native metadata may carry an explicit privacy control;
+                    # decoding must not turn it into an uninspected envelope.
+                    for key, item in value.items():
+                        if key.casefold() == 'private' and not (item is False or item == 'false'):
+                            restrict({'local', 'host'})
+                        if key.casefold() == 'derivation_sources':
+                            if (not isinstance(item, list) or len(item) > 2000
+                                    or any(not isinstance(source, str) for source in item)):
+                                unresolved = UnresolvedSourceControls('Malformed native source provenance')
+                            elif not unresolved:
+                                origins.update(item)
+                                if len(origins) > 2000:
+                                    unresolved = UnresolvedSourceControls('Native source origins exceed inspection bound')
+                        pending.append(item)
+                elif isinstance(value, list):
+                    pending.extend(value)
+                elif isinstance(value, str):
+                    if unresolved:
+                        continue
+                    try:
+                        constraint = _artifact_audiences(value)
+                        sources = derivations(value)
+                    except EgressDenied as exc:
+                        unresolved = UnresolvedSourceControls('Native source controls need owner reconciliation')
+                        unresolved.__cause__ = exc
+                        continue
+                    if constraint is not None or sources:
+                        controls += len(value.encode('utf-8'))
+                        if controls > MAX_NOTE_BYTES:
+                            unresolved = UnresolvedSourceControls('Native source controls exceed inspection bound')
+                            continue
+                    restrict(constraint)
+                    origins.update(sources)
+                    if len(origins) > 2000:
+                        unresolved = UnresolvedSourceControls('Native source origins exceed inspection bound')
+    if expected_revision is not None and digest.hexdigest() != expected_revision:
+        raise EgressDenied('Native origin revision changed before restriction capture')
+    if unresolved is not None:
+        raise unresolved
+    summary = ''
+    if origins:
+        summary = '---\nderivation_sources: ' + json.dumps(sorted(origins)) + '\n---\n'
+    if allowed is not None:
+        summary += '<!-- claude-note:claim ' + json.dumps({'audiences': sorted(allowed)}) + ' -->\n'
+    if len(summary.encode('utf-8')) > MAX_NOTE_BYTES:
+        raise EgressDenied('Native source controls exceed inspection bound')
+    return summary
 
 
 def external_allowed(text):
@@ -63,6 +171,119 @@ def policy():
         return {}
 
 
+def _codex_project_source(source, project, *, _classified=False):
+    """A path glob alone cannot authorize every project in Codex's shared store."""
+    from .mutation import _FILE_FLAGS, _parent, _vault, resolve_note_path
+
+    descriptor = None
+    def reject():
+        return (False, False) if _classified else False
+    try:
+        if not isinstance(project, str) or not Path(project).is_absolute():
+            return reject()
+        root = Path(project).resolve(strict=True)
+        if not root.is_dir():
+            return reject()
+        supplied = Path(source)
+        if not supplied.is_absolute() or supplied.suffix.casefold() != '.jsonl':
+            return reject()
+        parent = _vault(supplied.parent)
+        path = resolve_note_path(supplied.name, parent, allow_protected=True)
+        with _parent(parent, path.relative_to(parent)) as (directory, name):
+            descriptor = os.open(name, _FILE_FLAGS, dir_fd=directory)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            return reject()
+        # First-record metadata is intentionally much smaller than a media
+        # record. Never consult a later user-authored cwd or an unbounded line.
+        with os.fdopen(os.dup(descriptor), 'rb') as stream:
+            raw = stream.readline(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            return reject()
+
+        def unique(pairs):
+            value = {}
+            for key, item in pairs:
+                if key in value:
+                    raise ValueError('Duplicate native metadata key')
+                value[key] = item
+            return value
+
+        record = json.loads(raw.decode('utf-8'), object_pairs_hook=unique)
+        after = os.fstat(descriptor)
+        identity = lambda info: (info.st_dev, info.st_ino, info.st_nlink, info.st_size,
+                                 info.st_mtime_ns, info.st_ctime_ns)
+        if identity(before) != identity(after) or not isinstance(record, dict) or record.get('type') != 'session_meta':
+            return reject()
+        payload = record.get('payload')
+        cwd = payload.get('cwd') if isinstance(payload, dict) else None
+        if not isinstance(cwd, str) or not cwd or not Path(cwd).is_absolute():
+            return (True, False) if _classified else False
+        matches = Path(cwd).resolve().is_relative_to(root)
+        return (True, matches) if _classified else matches
+    except (OSError, ValueError, RuntimeError, RecursionError, UnicodeError):
+        return reject()
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _project_source(source, project, project_sources=()):
+    """Require a complete, acyclic ancestry ending at owner-selected project sources."""
+    from .mutation import _vault, resolve_note_path
+
+    try:
+        if not isinstance(project, str) or not Path(project).is_absolute():
+            return False
+        root = Path(project).resolve(strict=True)
+        if (not root.is_dir() or not isinstance(project_sources, (list, tuple))
+                or len(project_sources) > 100
+                or any(not isinstance(item, str) or not Path(item).is_absolute() for item in project_sources)):
+            return False
+        active, verified = set(), set()
+        pending = [(str(source), False)]
+        inspected = 0
+        while pending:
+            supplied, finishing = pending.pop()
+            parent = _vault(Path(supplied).absolute().parent)
+            path = resolve_note_path(Path(supplied).name, parent, allow_protected=True)
+            canonical = str(path)
+            if finishing:
+                active.remove(canonical)
+                verified.add(canonical)
+                continue
+            if canonical in active:
+                return False
+            if canonical in verified:
+                continue
+            if len(active) + len(verified) >= 2000 or not path.exists():
+                return False
+            native, native_matches = _codex_project_source(canonical, str(root), _classified=True)
+            if native and not native_matches:
+                return False  # foreign native metadata cannot borrow authored ancestry
+            if (path.is_relative_to(root)
+                    or any(fnmatch.fnmatchcase(canonical, pattern) for pattern in project_sources)
+                    or native_matches):
+                verified.add(canonical)
+                continue
+            if path.is_dir():
+                return False
+            recorded, _ = _recorded_lineage(path)
+            text = _source_restrictions(path, parent)
+            inspected += len(text.encode('utf-8'))
+            if inspected > NATIVE_SOURCE_BYTES:
+                return False
+            origins = list(dict.fromkeys([*recorded, *derivations(text)]))
+            if not origins:
+                return False
+            active.add(canonical)
+            pending.append((canonical, True))
+            pending.extend((origin, False) for origin in origins)
+        return bool(verified)
+    except (OSError, ValueError, RuntimeError, RecursionError, UnicodeError):
+        return False
+
+
 def audiences(source, *, rules=None):
     rules = policy() if rules is None else rules
     allowed = set(rules.get("default", ["host", "local"]))
@@ -70,6 +291,15 @@ def audiences(source, *, rules=None):
     restrictions = []
     for rule in rules.get("rules", []):
         if isinstance(rule, dict) and fnmatch.fnmatchcase(str(source), str(rule.get("source", ""))):
+            if 'project' in rule:
+                if rule.get('native') == 'codex':
+                    permitted = _codex_project_source(source, rule['project'])
+                elif 'native' in rule:
+                    permitted = False
+                else:
+                    permitted = _project_source(source, rule['project'], rule.get('project_sources', ()))
+                if not permitted:
+                    continue
             (restrictions if rule.get("restrict", False) else grants).append(set(rule.get("audiences", [])))
     if grants:
         allowed = set.intersection(*grants)
@@ -132,7 +362,7 @@ def _check_artifact_audience(allowed, audience):
         raise EgressDenied('Artifact audience does not permit this destination')
 
 
-def _source_restrictions(path, parent):
+def _source_restrictions(path, parent, expected_revision=None):
     """Read policy metadata from one confined source descriptor.
 
     Converted PDF/Word inputs retain path and recorded-lineage policy; raw
@@ -142,7 +372,7 @@ def _source_restrictions(path, parent):
     import zipfile
     from .mutation import MAX_NOTE_BYTES, _FILE_FLAGS, _parent
 
-    native_limit = 256 * 1024 * 1024
+    native_limit = NATIVE_SOURCE_BYTES
     suffix = path.suffix.casefold()
     limit = native_limit if suffix in {'.jsonl', '.pdf', '.docx', '.zip', '.vscdb', '.sqlite', '.db'} else MAX_NOTE_BYTES
     with _parent(parent, path.relative_to(parent)) as (directory, name):
@@ -151,7 +381,8 @@ def _source_restrictions(path, parent):
             before = os.fstat(descriptor)
             if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
                 raise EgressDenied('Derivation source must be a regular, singly linked file')
-            if before.st_size > limit:
+            native_jsonl = suffix == '.jsonl'
+            if before.st_size > (NATIVE_JSONL_BYTES if native_jsonl else limit):
                 raise EgressDenied('Derivation source exceeds its inspection bound')
             header = os.read(descriptor, 16)
             binary = False
@@ -189,7 +420,13 @@ def _source_restrictions(path, parent):
                                 raise EgressDenied('ZIP source is not a supported Word document')
                     except (zipfile.BadZipFile, RuntimeError, KeyError, NotImplementedError) as exc:
                         raise EgressDenied('Cannot inspect Word package metadata') from exc
-            if binary:
+            unresolved = None
+            if native_jsonl:
+                try:
+                    text = _large_jsonl_restrictions(descriptor, expected_revision)
+                except UnresolvedSourceControls as exc:
+                    text, unresolved = '', exc
+            elif binary:
                 text = ''
             else:
                 text_limit = native_limit if suffix == '.jsonl' else MAX_NOTE_BYTES
@@ -214,6 +451,8 @@ def _source_restrictions(path, parent):
                                      info.st_mtime_ns, info.st_ctime_ns)
             if identity(before) != identity(after):
                 raise EgressDenied('Derivation source changed during inspection')
+            if unresolved is not None:
+                raise unresolved
             return text
         finally:
             os.close(descriptor)
@@ -323,6 +562,32 @@ def capture_restrictions(snapshot_path, *, origins, captured_text, vault_root=No
     if (len(origins) > 2000 or any(not isinstance(item, str) or not item or len(item) > 32768
                                   for item in origins)):
         raise EgressDenied('Invalid captured source origins')
+    expected_revisions = {}
+    first_end = captured_text.find('\n')
+    first_end = len(captured_text) if first_end < 0 else first_end
+    if captured_text.find('"_native_projection"', 0, first_end) >= 0:
+        if first_end > 1024 * 1024:
+            raise EgressDenied('Native projection metadata exceeds inspection bound')
+        try:
+            def unique(pairs):
+                value = {}
+                for key, item in pairs:
+                    if key in value:
+                        raise ValueError('Duplicate native projection key')
+                    value[key] = item
+                return value
+            first = json.loads(captured_text[:first_end], object_pairs_hook=unique)
+            manifest = first.get('_native_projection') if isinstance(first, dict) else None
+            if manifest is not None:
+                source, revision = manifest.get('source'), manifest.get('revision')
+                if (not isinstance(source, str) or not Path(source).is_absolute()
+                        or Path(source).suffix.casefold() != '.jsonl'
+                        or not isinstance(revision, str) or re.fullmatch(r'[a-f0-9]{64}', revision) is None):
+                    raise ValueError('Invalid native projection identity')
+                expected_revisions[source] = revision
+                origins = list(dict.fromkeys([*origins, source]))
+        except (ValueError, TypeError, AttributeError, RecursionError) as exc:
+            raise EgressDenied('Invalid native projection identity') from exc
     target = _lineage_path(snapshot_path, vault_root)
     descriptor = open_lock(target.with_suffix('.lock'))
     deadline = time.monotonic() + LINEAGE_LOCK_TIMEOUT
@@ -356,11 +621,34 @@ def capture_restrictions(snapshot_path, *, origins, captured_text, vault_root=No
             if constraint is not None:
                 allowed = constraint if allowed is None else allowed & constraint
 
+        def authored(text):
+            nonlocal unknown, failure
+            try:
+                restrict(_artifact_audiences(text))
+                return derivations(text)
+            except EgressDenied as exc:
+                unknown = True
+                failure = UnresolvedSourceControls('Captured source controls need owner reconciliation')
+                failure.__cause__ = exc
+                return []
+
+        def lineage(path):
+            nonlocal unknown, failure
+            try:
+                return _recorded_lineage(path)
+            except EgressDenied as exc:
+                if str(exc) != 'Source lineage needs owner reconciliation':
+                    raise
+                unknown = True
+                failure = UnresolvedSourceControls('Captured source controls need owner reconciliation')
+                failure.__cause__ = exc
+                return [], None
+
         try:
-            restrict(_artifact_audiences(captured_text))
-            recorded, constraint = _recorded_lineage(snapshot_path)
+            authored_origins = authored(captured_text)
+            recorded, constraint = lineage(snapshot_path)
             restrict(constraint)
-            pending = list(found | set(recorded) | set(derivations(captured_text)))
+            pending = list(found | set(recorded) | set(authored_origins))
             visited = set()
             inspected = 0
             while pending:
@@ -382,17 +670,21 @@ def capture_restrictions(snapshot_path, *, origins, captured_text, vault_root=No
                     pending.append(canonical)
                 if not path.exists():
                     raise EgressDenied('Cannot capture restrictions of a missing origin')
-                recorded, constraint = _recorded_lineage(path)
+                recorded, constraint = lineage(path)
                 restrict(constraint)
                 pending.extend(recorded)
                 if path.is_dir():
                     continue
-                text = _source_restrictions(path, parent)
+                try:
+                    text = _source_restrictions(path, parent,
+                        expected_revision=expected_revisions.get(source, expected_revisions.get(canonical)))
+                except UnresolvedSourceControls as exc:
+                    unknown, failure = True, exc
+                    continue
                 inspected += len(text.encode('utf-8'))
                 if inspected > 256 * 1024 * 1024:
                     raise EgressDenied('Captured origin closure exceeds inspection bound')
-                restrict(_artifact_audiences(text))
-                pending.extend(derivations(text))
+                pending.extend(authored(text))
         except (OSError, ValueError, RuntimeError) as exc:
             unknown = True
             failure = exc
@@ -408,7 +700,7 @@ def capture_restrictions(snapshot_path, *, origins, captured_text, vault_root=No
         if allowed is not None:
             record['artifact_audiences'] = sorted(allowed)
         atomic_json(target, record)
-        if failure is not None or unknown:
+        if failure is not None and not isinstance(failure, UnresolvedSourceControls):
             raise EgressDenied('Captured source restrictions need owner reconciliation') from failure
     finally:
         os.close(descriptor)

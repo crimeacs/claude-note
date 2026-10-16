@@ -59,6 +59,39 @@ def _heartbeat(path: Path, stale_after: float) -> dict:
             "age_seconds": int(age), "stale": age > stale_after, "counts": counts}
 
 
+def _push_health() -> dict:
+    """Last attempt and last clean completion are separate offline evidence."""
+    from .state_io import read_json
+    clean = _heartbeat(LOGS / "push.ok", PUSH_STALE_HOURS * 3600)
+    out = {"agent_installed": (LAUNCH_AGENTS / f"{PUSH_LABEL}.plist").exists(),
+           "loaded": _launchd_loaded(PUSH_LABEL), **clean,
+           "clean_counts": clean["counts"], "last_attempt": None,
+           "attempt_age_seconds": None, "attempt_status": None, "problems": []}
+    try:
+        attempt_path = LOGS / "push.json"
+        attempt = read_json(attempt_path)
+        if (not isinstance(attempt, dict) or not isinstance(attempt.get("counts"), dict)
+                or attempt.get("status") not in {"running", "clean", "blocked"}):
+            raise ValueError("invalid push attempt")
+        mtime = attempt_path.stat().st_mtime
+        age = max(0, int(time.time() - mtime))
+        out.update({"last_attempt": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(mtime)),
+                    "attempt_age_seconds": age, "attempt_status": attempt.get("status"),
+                    "counts": attempt["counts"]})
+        problems = attempt["counts"].get("problems", [])
+        if isinstance(problems, list):
+            out["problems"] = [p for p in problems if isinstance(p, str)]
+        if attempt.get("status") == "running" and age > 45 * 60:
+            out["problems"].append("latest push attempt did not complete; see the push log")
+        elif attempt.get("status") == "blocked" and not out["problems"]:
+            out["problems"].append("latest push attempt is blocked; see the push log")
+    except FileNotFoundError:
+        pass  # Older installations have only a clean heartbeat.
+    except (OSError, ValueError, TypeError):
+        out["problems"] = ["cannot inspect latest push attempt; see the push log"]
+    return out
+
+
 def _hooks_installed(path: Path) -> bool:
     try:
         data = json.loads(path.read_text())
@@ -252,9 +285,7 @@ def report() -> dict:
         installed_from = None
 
     worker_plist = LAUNCH_AGENTS / f"{WORKER_LABEL}.plist"
-    push_plist = LAUNCH_AGENTS / f"{PUSH_LABEL}.plist"
-    push = {"agent_installed": push_plist.exists(), "loaded": _launchd_loaded(PUSH_LABEL),
-            **_heartbeat(LOGS / "push.ok", PUSH_STALE_HOURS * 3600)}
+    push = _push_health()
     sweep = _heartbeat(LOGS / "import-sweep.ok", IMPORT_STALE_SECONDS)
     sweep_counts = sweep.pop("counts")
     try:
@@ -309,6 +340,7 @@ def report() -> dict:
             pass  # installed but has not reached 03:00 yet: not a problem
         elif push["stale"]:
             problems.append(f"last clean push {push['age_seconds'] // 3600} h ago; see {LOGS}/push.log")
+    problems.extend(f"push: {p}" for p in push["problems"])
     if not any(out["hooks"].values()) and (sweep["last_ok"] is None or sweep["stale"]):
         problems.append("capture not configured: install assistant hooks or run a clean import sweep")
     if not out["binaries"]["claude"] and out["synth_mode"] not in (None, "log"):
@@ -318,6 +350,14 @@ def report() -> dict:
         problems.append(f"synthesis is off (mode = \"log\" from {mode_source}): sessions are logged "
                         "but never become notes; set mode = \"route\"")
     model_granted = out["model_egress"]["default_authorized"] or out["model_egress"]["has_source_grant"]
+    from .synthesis_schedule import remaining
+    resume_after = os.environ.get("CLAUDE_NOTE_RESUME_AFTER", (cfg.get("synthesis") or {}).get("resume_after", ""))
+    out["synthesis_resume_after"] = str(resume_after) if resume_after is not None else ""
+    try:
+        if remaining(resume_after):
+            problems.append(f"external synthesis deferred until {resume_after}: provider cooldown configured")
+    except ValueError as error:
+        problems.append(str(error))
     if out["synth_mode"] not in (None, "log") and not model_granted:
         problems.append("external synthesis paused: configure model source audiences in [egress]; "
                         "local capture and recall remain available")

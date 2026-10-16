@@ -17,7 +17,7 @@ class CapturedRestrictionsTests(unittest.TestCase):
         self.source.write_text('Public synthetic evidence.')
         self.snapshot = self.root / 'snapshots' / 'fixed.jsonl'
         self.snapshot.parent.mkdir()
-        self.snapshot.write_text('Captured synthetic evidence.')
+        self.snapshot.write_text(json.dumps({'type': 'user', 'message': {'content': 'Captured synthetic evidence.'}}) + '\n')
 
     def capture(self, *, origins=None, text=None):
         egress.capture_restrictions(self.snapshot, origins=origins or [str(self.source)],
@@ -154,14 +154,12 @@ class CapturedRestrictionsTests(unittest.TestCase):
     def test_failed_inspection_is_durable_unknown_and_does_not_modify_snapshot(self):
         before = self.snapshot.read_bytes()
         self.source.write_text('<!-- claude-note:claim {bad-json} -->')
-        with self.assertRaises(egress.EgressDenied):
-            self.capture()
+        self.capture()  # stable local evidence remains capturable
         ledger = state_io.read_json(egress._lineage_path(self.snapshot, self.root))
         self.assertTrue(ledger['unknown'])
         self.assertEqual(self.snapshot.read_bytes(), before)
         self.source.write_text('Malformed control removed.')
-        with self.assertRaises(egress.EgressDenied):
-            self.capture()
+        self.capture()  # replay cannot clear the protected unknown restriction
         with self.assertRaises(egress.EgressDenied):
             self.prepare()
 
@@ -176,8 +174,7 @@ class CapturedRestrictionsTests(unittest.TestCase):
         many = [str(self.root / ('source-' + str(i))) for i in range(2001)]
         # Already captured input metadata is subject to the same closure bound.
         text = '---\nderivation_sources: ' + json.dumps(many) + '\n---\nSynthetic facts.'
-        with self.assertRaises(egress.EgressDenied):
-            self.capture(text=text)
+        self.capture(text=text)  # oversized authored controls stay local and unknown
         self.assertTrue(state_io.read_json(egress._lineage_path(self.snapshot, self.root))['unknown'])
 
 

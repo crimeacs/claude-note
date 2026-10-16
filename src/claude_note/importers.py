@@ -556,6 +556,11 @@ def sweep_cursor(seen: dict, since_ts: float, db_path: Path = None, *, problems=
             try:
                 row = db.execute('select value from cursorDiskKV where key=?', (key,)).fetchone()
                 value = row[0] if row else None
+                # Cursor leaves SQL NULL tombstones for deleted composers.
+                # They are not corrupt conversations or oversized payloads.
+                if row and value is None:
+                    _counter(local, 'skipped_deleted_composers')
+                    continue
                 if not isinstance(value, (str, bytes)) or len(value.encode() if isinstance(value, str) else value) > MAX_IMPORT_PAYLOAD_BYTES:
                     raise ValueError('Cursor source exceeds 256 MiB')
                 comp = json.loads(value) if value else None
@@ -628,7 +633,7 @@ def sweep_cursor(seen: dict, since_ts: float, db_path: Path = None, *, problems=
 # --------------------------------------------------------------------------
 
 def sweep_codex(seen: dict, since_ts: float, sessions_dir: Path = None, *, problems=None) -> int:
-    from .transcript_reader import check_transcript_size, codex_session_meta, read_transcript
+    from .transcript_reader import capture_native_transcript, codex_session_meta, read_transcript
     from . import session_tracker, import_publication
 
     sessions_dir = sessions_dir or CODEX_SESSIONS
@@ -646,23 +651,24 @@ def sweep_codex(seen: dict, since_ts: float, sessions_dir: Path = None, *, probl
         if seen.get(key) == mtime:
             continue
         try:
-            check_transcript_size(path)
-            meta = codex_session_meta(path, strict=True)
+            captured = capture_native_transcript(path)
+            meta = codex_session_meta(path, captured, strict=True)
             session_id = meta.get("id")
             if meta.get("background"):
                 seen[key] = mtime
                 continue
-            if (key not in seen and session_tracker.get_state_file(session_id).exists()
+            if (captured is None and key not in seen and session_tracker.get_state_file(session_id).exists()
                     and not import_publication.has_history('codex', session_id)):
                 seen[key] = mtime  # the hook already delivered this session
                 continue
-            content = read_transcript(path)
+            content = read_transcript(path, captured_bytes=captured)
             _validate_native_content(content)
             if meta != codex_session_meta(path, content._source_bytes, strict=True):
                 raise ValueError('Native source metadata changed before capture')
             if content.user_prompts and content.assistant_texts:
                 queued += _enqueue(session_id, path, meta.get("cwd", ""), content.user_prompts[0], "codex",
-                                   raw=content._source_bytes, origin_sources=[str(path.absolute())])
+                                   raw=content._source_bytes, origin_sources=[str(path.absolute())],
+                                   logical_revision=content.coverage.get('native_projection', {}).get('revision'))
             seen[key] = mtime
         except Exception as error:
             errors.append(_source_problem('codex', path, error))
@@ -700,7 +706,7 @@ def sweep_claude_code(seen: dict, since_ts: float, projects_dir: Path = None,
     transcripts live one level deeper and are not globbed. Newest first, at most
     `limit` per sweep; the rest stay unseen for the next sweep.
     """
-    from .transcript_reader import check_transcript_size, read_transcript
+    from .transcript_reader import capture_native_transcript, read_transcript
     from . import session_tracker, import_publication
 
     projects_dir = projects_dir or CLAUDE_PROJECTS
@@ -723,23 +729,24 @@ def sweep_claude_code(seen: dict, since_ts: float, projects_dir: Path = None,
             break
         key = f"claude-code:{path.stem}"
         try:
-            check_transcript_size(path)
-            meta = _claude_code_meta(path)
+            captured = capture_native_transcript(path)
+            meta = _claude_code_meta(path, captured)
             session_id = meta.get("id") or path.stem
             if str(meta.get("entrypoint", "")).startswith("sdk"):
                 seen[key] = mtime
                 continue
-            if (key not in seen and session_tracker.get_state_file(session_id).exists()
+            if (captured is None and key not in seen and session_tracker.get_state_file(session_id).exists()
                     and not import_publication.has_history('claude-code', session_id)):
                 seen[key] = mtime  # the hook already delivered this session
                 continue
-            content = read_transcript(path)
+            content = read_transcript(path, captured_bytes=captured)
             _validate_native_content(content)
             if meta != _claude_code_meta(path, content._source_bytes):
                 raise ValueError('Native source metadata changed before capture')
             if content.user_prompts and content.assistant_texts:
                 queued += _enqueue(session_id, path, meta.get("cwd", ""), content.user_prompts[0], "claude-code",
-                                   raw=content._source_bytes, origin_sources=[str(path.absolute())])
+                                   raw=content._source_bytes, origin_sources=[str(path.absolute())],
+                                   logical_revision=content.coverage.get('native_projection', {}).get('revision'))
             seen[key] = mtime
         except Exception as error:
             errors.append(_source_problem('claude-code', path, error))
