@@ -120,36 +120,53 @@ function indexMetadata(db) {
     scopes.set(row.collection, (scopes.get(row.collection) || 0) + 1);
   }
   let vectorRows = 0, vectorModels = [], scopedVectors = [];
-  try {
+  if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='content_vectors'").get()) {
     const rows = db.prepare('SELECT model,COUNT(*) AS n FROM content_vectors GROUP BY model ORDER BY model').all();
     vectorRows = rows.reduce((n, row) => n + row.n, 0); vectorModels = rows.map(row => row.model);
     scopedVectors = db.prepare(`SELECT d.collection,COUNT(*) AS rows FROM content_vectors cv
       JOIN documents d ON d.hash=cv.hash AND d.active=1 GROUP BY d.collection ORDER BY d.collection`).all();
-  } catch { /* A lexical-only schema is supported. */ }
+  } // A lexical-only schema without content_vectors is supported.
   const corpus_digest = hash.digest('hex');
   return { corpus_digest, corpus_digest_kind: 'indexed_document_hashes', generation: digest(JSON.stringify([corpus_digest, vectorRows, vectorModels])),
     collections: [...scopes].map(([name, documents]) => ({ name, documents,
       vector_rows: scopedVectors.find(c => c.collection === name)?.rows || 0 })), vector_rows: vectorRows, vector_models: vectorModels };
 }
 
+export function createIndexSnapshotReader(db) {
+  let cached;
+  return (readRows = () => []) => {
+    try {
+      db.exec('BEGIN');
+      // This read establishes the SQLite snapshot. data_version belongs to this
+      // connection and changes for external commits, including vector-only
+      // updates. Neither file mtimes nor corpus hashes cover that boundary.
+      const version = db.pragma('data_version', { simple: true });
+      const metadata = cached?.version === version ? cached.metadata : indexMetadata(db);
+      const rows = readRows();
+      db.exec('COMMIT');
+      // A failed metadata/query/commit never publishes a cache entry. The next
+      // transaction rechecks data_version before reusing a successful snapshot.
+      cached = { version, metadata };
+      return { rows, metadata };
+    } catch (error) {
+      try { db.exec('ROLLBACK'); } catch { /* closed connection */ }
+      throw error;
+    }
+  };
+}
+
 if (!isMainThread && workerData?.kind === 'claude-note-scoped-fts') {
   let db;
   try { db = openReadOnly(workerData); }
   catch (e) { parentPort.postMessage({ error: e.code || 'adapter_unavailable' }); }
+  const readSnapshot = db && createIndexSnapshotReader(db);
   if (db) parentPort.on('message', async msg => {
     try {
-      db.exec('BEGIN');
-      const metadata = indexMetadata(db);
-      let rows = [];
-      if (msg.kind === 'search') rows = scopedLexical(db, msg.query, msg.collections, msg.limit);
-      else if (msg.kind === 'sdk_fallback') {
-        const sdkStore = await import(pathToFileURL(workerData.sdkStorePath).href);
-        rows = sdkStore.searchFTS(db, msg.query, msg.limit, msg.collections.length ? msg.collections : undefined);
-      }
-      db.exec('COMMIT');
-      parentPort.postMessage({ id: msg.id, rows, metadata });
+      const sdkStore = msg.kind === 'sdk_fallback' ? await import(pathToFileURL(workerData.sdkStorePath).href) : null;
+      const snapshot = readSnapshot(() => msg.kind === 'search' ? scopedLexical(db, msg.query, msg.collections, msg.limit)
+        : sdkStore ? sdkStore.searchFTS(db, msg.query, msg.limit, msg.collections.length ? msg.collections : undefined) : []);
+      parentPort.postMessage({ id: msg.id, ...snapshot });
     } catch (e) {
-      try { db.exec('ROLLBACK'); } catch { /* closed connection */ }
       parentPort.postMessage({ id: msg.id, error: e.code || 'adapter_query_failed' });
     }
   });
@@ -202,7 +219,7 @@ export class ScopedLexicalWorker {
 }
 
 export function createRecallService({ store, llm, lexical, manifest = {}, queueLimit = 8, maxRequestMs = 8000,
-  modelAvailable = () => true, fallbackLexical, onFatal = () => {}, onJobStart = () => {}, now = Date.now }) {
+  metadataTimeoutMs = 3000, modelAvailable = () => true, fallbackLexical, onFatal = () => {}, onJobStart = () => {}, now = Date.now }) {
   const started = now(), waiting = [];
   let active = false, poisoned = false, closed = false, expired = 0, rejected = 0;
   let metadataRefresh = null, activeJob = null;
@@ -450,7 +467,10 @@ export function createRecallService({ store, llm, lexical, manifest = {}, queueL
     refresh(deadline = now() + 300) {
       if (active || closed || poisoned) return Promise.resolve(capabilities());
       const requested = Number.isFinite(deadline) ? deadline : now();
-      const operation = metadataRefresh || beginMetadataRefresh(Math.min(requested, now() + 3000));
+      if (requested <= now()) return Promise.resolve(capabilities());
+      // Health callers have short response budgets, but do not own the shared
+      // SQLite borrow. Let one bounded refresh finish across later polls.
+      const operation = metadataRefresh || beginMetadataRefresh(now() + boundedInt(metadataTimeoutMs, 3000, 3000));
       return waitForMetadata(operation, requested);
     },
     request(route, body, cancelled = () => false) {

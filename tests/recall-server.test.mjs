@@ -12,7 +12,7 @@ import http from 'node:http';
 import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRecallService, createRuntimeProxy, ScopedLexicalWorker, passage, literalFTS, modelFileIdentity } from '../src/claude_note/recall_server.mjs';
+import { createRecallService, createRuntimeProxy, ScopedLexicalWorker, createIndexSnapshotReader, scopedLexical, passage, literalFTS, modelFileIdentity } from '../src/claude_note/recall_server.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const metadata = { corpus_digest: 'corpus', generation: 'generation', vector_rows: 1, vector_models: ['embed-id'] };
@@ -147,6 +147,123 @@ test('QMD2.8.3 scoped worker retrieves past more than ten times global distracto
     assert.equal(cjk.rows[0].filepath, 'qmd://public/cjk.md');
     await assert.rejects(worker.request({ kind: 'search', query: 'retry', collections: [], limit: 3 }, Date.now() - 1), e => e.code === 'deadline');
   } finally { worker.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('metadata cache: real SQLite snapshots reuse scans and invalidate external document/vector commits', { skip: !process.env.CLAUDE_NOTE_TEST_SQLITE }, () => {
+  const Database = createRequire(import.meta.url)(process.env.CLAUDE_NOTE_TEST_SQLITE);
+  const dir = mkdtempSync(join(tmpdir(), 'claude-note-metadata-cache-')), dbPath = join(dir, 'fixture.sqlite');
+  const writer = new Database(dbPath);
+  writer.pragma('journal_mode=WAL');
+  writer.exec(`CREATE TABLE documents(id INTEGER PRIMARY KEY,collection TEXT,path TEXT,title TEXT,hash TEXT,active INTEGER);
+    CREATE TABLE content(hash TEXT PRIMARY KEY,doc TEXT);
+    CREATE VIRTUAL TABLE documents_fts USING fts5(filepath,title,body);
+    CREATE TABLE content_vectors(hash TEXT,seq INTEGER,model TEXT);`);
+  const insert = id => {
+    writer.prepare('INSERT INTO documents VALUES(?,?,?,?,?,1)').run(id, 'public', `${id}.md`, 'Public fixture', `${id}`);
+    writer.prepare('INSERT INTO content VALUES(?,?)').run(`${id}`, `retry public fixture ${id}`);
+    writer.prepare('INSERT INTO documents_fts(rowid,filepath,title,body) VALUES(?,?,?,?)').run(id, `public/${id}.md`, 'Public fixture', `retry public fixture ${id}`);
+  };
+  insert(1);
+  const db = new Database(dbPath, { readonly: true });
+  db.pragma('query_only=ON');
+  let scans = 0, afterVersion;
+  const traced = {
+    exec: sql => db.exec(sql),
+    pragma(sql, options) {
+      const result = db.pragma(sql, options);
+      if (sql === 'data_version' && afterVersion) { const effect = afterVersion; afterVersion = null; effect(); }
+      return result;
+    },
+    prepare(sql) { if (sql.startsWith('SELECT collection,path,hash')) scans++; return db.prepare(sql); },
+  };
+  const read = createIndexSnapshotReader(traced);
+  const search = () => read(() => scopedLexical(db, 'retry', ['public'], 10));
+  try {
+    const first = search(), cached = search();
+    assert.equal(scans, 1); assert.strictEqual(cached.metadata, first.metadata);
+    assert.equal(first.rows.length, 1); assert.equal(first.metadata.vector_rows, 0);
+    writer.exec("INSERT INTO content_vectors VALUES('1',0,'embed-a')");
+    const vectorOnly = search();
+    assert.equal(scans, 2); assert.equal(vectorOnly.metadata.corpus_digest, first.metadata.corpus_digest);
+    assert.equal(vectorOnly.metadata.vector_rows, 1); assert.deepEqual(vectorOnly.metadata.vector_models, ['embed-a']);
+    writer.exec("UPDATE content_vectors SET model='embed-b'");
+    assert.deepEqual(search().metadata.vector_models, ['embed-b']); assert.equal(scans, 3);
+    writer.exec("BEGIN; INSERT INTO content_vectors VALUES('1',1,'rolled-back'); ROLLBACK;");
+    assert.deepEqual(search().metadata.vector_models, ['embed-b']); assert.equal(scans, 3);
+    // Commit after the cache-key read. Both rows and cached metadata must stay
+    // on its established snapshot; the next transaction sees the new revision.
+    afterVersion = () => writer.transaction(() => insert(2))();
+    const duringCommit = search();
+    assert.equal(duringCommit.rows.length, 1); assert.equal(duringCommit.metadata.collections[0].documents, 1);
+    assert.equal(scans, 3);
+    const changed = search();
+    assert.equal(changed.rows.length, 2); assert.equal(changed.metadata.collections[0].documents, 2);
+    assert.equal(scans, 4); assert.notEqual(changed.metadata.corpus_digest, first.metadata.corpus_digest);
+    assert.equal(db.inTransaction, false);
+  } finally { db.close(); writer.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('metadata cache: real SQLite rolls back failed scans/rows and publishes only committed metadata', { skip: !process.env.CLAUDE_NOTE_TEST_SQLITE }, () => {
+  const Database = createRequire(import.meta.url)(process.env.CLAUDE_NOTE_TEST_SQLITE);
+  const dir = mkdtempSync(join(tmpdir(), 'claude-note-metadata-failure-')), dbPath = join(dir, 'fixture.sqlite');
+  const writer = new Database(dbPath);
+  writer.pragma('journal_mode=WAL');
+  writer.exec(`CREATE TABLE documents(id INTEGER PRIMARY KEY,collection TEXT,path TEXT,title TEXT,hash TEXT,active INTEGER);
+    CREATE TABLE content_vectors(hash TEXT,seq INTEGER,model TEXT);
+    INSERT INTO documents VALUES(1,'public','a.md','Public','hash-a',1);`);
+  const db = new Database(dbPath, { readonly: true });
+  db.pragma('query_only=ON');
+  let scans = 0, failMetadata = false, failCommit = false;
+  const read = createIndexSnapshotReader({ exec(sql) {
+    if (sql === 'COMMIT' && failCommit) { failCommit = false; throw new Error('Synthetic commit failure'); }
+    return db.exec(sql);
+  }, pragma: (sql, options) => db.pragma(sql, options),
+    prepare(sql) {
+      if (sql.startsWith('SELECT collection,path,hash')) scans++;
+      if (failMetadata && sql.includes('GROUP BY model')) { failMetadata = false; throw new Error('Synthetic metadata read failure'); }
+      return db.prepare(sql);
+    } });
+  try {
+    assert.equal(read().metadata.vector_rows, 0); assert.equal(scans, 1);
+    writer.exec("INSERT INTO content_vectors VALUES('hash-a',0,'embed-a')");
+    failMetadata = true;
+    assert.throws(() => read(), /Synthetic metadata read failure/); assert.equal(db.inTransaction, false);
+    assert.equal(read().metadata.vector_rows, 1); assert.equal(scans, 3);
+    writer.exec("INSERT INTO content_vectors VALUES('hash-a',1,'embed-a')");
+    assert.throws(() => read(() => { throw new Error('Synthetic rows read failure'); }), /Synthetic rows read failure/);
+    assert.equal(db.inTransaction, false); assert.equal(scans, 4);
+    assert.equal(read().metadata.vector_rows, 2); assert.equal(scans, 5);
+    assert.equal(read().metadata.vector_rows, 2); assert.equal(scans, 5);
+    writer.exec("INSERT INTO content_vectors VALUES('hash-a',2,'embed-a')");
+    failCommit = true;
+    assert.throws(() => read(), /Synthetic commit failure/); assert.equal(db.inTransaction, false);
+    assert.equal(read().metadata.vector_rows, 3); assert.equal(scans, 7);
+  } finally { db.close(); writer.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('metadata cache: actual lexical worker refreshes after an external vector-only commit', { skip: !process.env.CLAUDE_NOTE_TEST_SQLITE }, async () => {
+  const Database = createRequire(import.meta.url)(process.env.CLAUDE_NOTE_TEST_SQLITE);
+  const dir = mkdtempSync(join(tmpdir(), 'claude-note-worker-cache-')), dbPath = join(dir, 'fixture.sqlite');
+  const writer = new Database(dbPath);
+  writer.pragma('journal_mode=WAL');
+  writer.exec(`CREATE TABLE documents(id INTEGER PRIMARY KEY,collection TEXT,path TEXT,title TEXT,hash TEXT,active INTEGER);
+    CREATE TABLE content(hash TEXT PRIMARY KEY,doc TEXT);
+    CREATE VIRTUAL TABLE documents_fts USING fts5(filepath,title,body);
+    CREATE TABLE content_vectors(hash TEXT,seq INTEGER,model TEXT);
+    INSERT INTO documents VALUES(1,'public','a.md','Public','hash-a',1);
+    INSERT INTO content VALUES('hash-a','retry public fixture');
+    INSERT INTO documents_fts(rowid,filepath,title,body) VALUES(1,'public/a.md','Public','retry public fixture');`);
+  const worker = new ScopedLexicalWorker({ dbPath, sqliteModule: process.env.CLAUDE_NOTE_TEST_SQLITE, version: '2.8.3' });
+  try {
+    const first = await worker.request({ kind: 'metadata' }, Date.now() + 3000);
+    assert.equal(first.metadata.vector_rows, 0);
+    writer.exec("INSERT INTO content_vectors VALUES('hash-a',0,'embed-a')");
+    const changed = await worker.request({ kind: 'search', query: 'retry', collections: ['public'], limit: 1 }, Date.now() + 3000);
+    assert.equal(changed.rows[0].filepath, 'qmd://public/a.md');
+    assert.equal(changed.metadata.vector_rows, 1); assert.deepEqual(changed.metadata.vector_models, ['embed-a']);
+    assert.equal(changed.metadata.collections[0].vector_rows, 1);
+    assert.notEqual(changed.metadata.generation, first.metadata.generation);
+  } finally { worker.close(); writer.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('model identity hashes actual cache bytes in a deadline-bounded worker', async () => {
@@ -646,7 +763,7 @@ test('metadata ownership: real lexical metadata timeout cannot interrupt a later
     },
     close() { scoped.close(); },
   };
-  const service = createRecallService({ lexical, store: {}, llm: {}, modelAvailable: () => false,
+  const service = createRecallService({ lexical, store: {}, llm: {}, modelAvailable: () => false, metadataTimeoutMs: 20,
     fallbackLexical: async () => { fallback++; return [row]; } });
   try {
     const refresh = service.refresh(Date.now() + 20);
@@ -682,13 +799,40 @@ test('metadata ownership: a shorter coalesced waiter cannot cancel the shared re
   } finally { held.resolve(); await Promise.allSettled([first, second]); service.close(); }
 });
 
+test('metadata ownership: the first short health waiter cannot set the shared borrow deadline', async () => {
+  const held = deferred(), started = deferred(); let calls = 0, closed = 0, borrowDeadline;
+  const began = Date.now();
+  const service = createRecallService({ store: {}, llm: {}, lexical: {
+    async request(message, deadline) {
+      calls++; borrowDeadline = deadline; started.resolve(); await held.promise; return { rows: [], metadata };
+    },
+    close() { closed++; },
+  } });
+  let short, longer;
+  try {
+    assert.equal((await service.refresh(Date.now() - 1)).lexical_ready, false);
+    assert.equal(calls, 0);
+    short = service.refresh(Date.now() + 15); await started.promise;
+    const pending = await Promise.race([short, sleep(150).then(() => { throw new Error('Short health waiter did not finish'); })]);
+    assert.equal(pending.lexical_ready, false); assert.equal(closed, 0);
+    assert.ok(borrowDeadline >= began + 2900 && borrowDeadline <= Date.now() + 3000);
+    assert.equal((await service.refresh(Date.now() + 15)).lexical_ready, false);
+    assert.equal(calls, 1); assert.equal(closed, 0);
+    longer = service.refresh(Date.now() + 1000);
+    held.resolve();
+    assert.equal((await longer).lexical_ready, true);
+    assert.equal(calls, 1); assert.equal(closed, 0);
+    assert.equal(service.capabilities().degradation.includes('deadline'), false);
+  } finally { held.resolve(); await Promise.allSettled([short, longer]); service.close(); }
+});
+
 test('metadata ownership: an unresolved adapter is bounded and late success is ignored', async () => {
   const held = deferred(); let closed = 0;
-  const service = createRecallService({ store: {}, llm: {}, lexical: {
+  const service = createRecallService({ store: {}, llm: {}, metadataTimeoutMs: 15, lexical: {
     request() { return held.promise; }, close() { closed++; },
   } });
   try {
-    const result = await Promise.race([service.refresh(Date.now() + 15), sleep(200).then(() => { throw new Error('Unbounded refresh'); })]);
+    const result = await Promise.race([service.refresh(Date.now() + 1000), sleep(200).then(() => { throw new Error('Unbounded refresh'); })]);
     assert.equal(result.lexical_ready, false); assert.equal(closed, 1);
     assert.ok(result.degradation.includes('deadline'));
     held.resolve({ rows: [], metadata }); await new Promise(setImmediate);
@@ -720,12 +864,12 @@ test('metadata ownership: synchronous and rejected adapters release the refresh 
 
 test('metadata ownership: malformed response and throwing cleanup cannot strand waiters', async () => {
   for (const malformed of [true, false]) {
-    const service = createRecallService({ store: {}, llm: {}, lexical: {
+    const service = createRecallService({ store: {}, llm: {}, metadataTimeoutMs: 15, lexical: {
       request() { return malformed ? Promise.resolve(undefined) : new Promise(() => {}); },
       close() { throw Object.assign(new Error('Synthetic close failure'), { code: 'fixture_close_failure' }); },
     } });
     try {
-      const health = await Promise.race([service.refresh(Date.now() + 15), sleep(100).then(() => { throw new Error('Stranded metadata waiter'); })]);
+      const health = await Promise.race([service.refresh(Date.now() + 1000), sleep(100).then(() => { throw new Error('Stranded metadata waiter'); })]);
       assert.equal(health.lexical_ready, false);
       assert.ok(health.degradation.includes(malformed ? 'index_metadata_unavailable' : 'deadline'));
       service.close();
