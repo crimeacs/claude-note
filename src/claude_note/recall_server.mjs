@@ -600,7 +600,7 @@ if (!isMainThread && workerData?.kind === 'claude-note-runtime') {
 
 // The parent event loop performs no QMD/SQLite/model calls. It can therefore
 // enforce a deadline even when a native SDK call blocks the runtime's loop.
-export function createRuntimeProxy(worker, { onFatal = () => {}, startupMs = 15000, queueLimit = 8 } = {}) {
+export function createRuntimeProxy(worker, { onFatal = () => {}, retireOwner = () => worker.terminate(), startupMs = 15000, queueLimit = 8 } = {}) {
   // This is the proxy lifetime, not a process-spawn or Worker-construction watchdog.
   const startupDeadline = performance.now() + startupMs;
   const pending = new Map(), expiredJobs = new Map();
@@ -614,13 +614,18 @@ export function createRuntimeProxy(worker, { onFatal = () => {}, startupMs = 150
     readySettled = true; clearTimeout(startupTimer);
     if (error) rejectReady(error); else acceptReady();
   }
+  function retire(reason) {
+    // Promise settlement and poisoned capabilities must not depend on cleanup
+    // succeeding, nor does this callback acknowledge native cancellation/reap.
+    try { void Promise.resolve(retireOwner(reason)).catch(() => {}); } catch { /* owner remains poisoned */ }
+  }
   function poison(reason = err('poisoned', 'Runtime requires restart')) {
     settleReady(reason);
     if (poisoned) return;
     poisoned = true;
-    void worker.terminate();
     for (const [id, job] of pending) { clearTimeout(job.timer); job.reject(err('poisoned', 'Runtime requires restart')); pending.delete(id); }
     expiredJobs.clear();
+    retire(reason);
     onFatal();
   }
   startupTimer = setTimeout(() => poison(err('deadline', 'Runtime startup deadline')),
@@ -701,10 +706,38 @@ export function createRuntimeProxy(worker, { onFatal = () => {}, startupMs = 150
     close() {
       settleReady(err('closed', 'Runtime closed'));
       if (poisoned) return;
-      poisoned = true; void worker.terminate();
+      poisoned = true;
       for (const job of pending.values()) { clearTimeout(job.timer); job.reject(err('closed', 'Runtime closed')); }
       pending.clear(); expiredJobs.clear();
+      retire(err('closed', 'Runtime closed'));
     },
+  };
+}
+
+export function createProcessRetirement({ pid = process.pid, kill = process.kill, schedule = setTimeout,
+  diagnostic = reason => console.error(`claude-note recall runtime retirement: ${reason}`) } = {}) {
+  let requested = false, signalled = false;
+  return reason => {
+    if (requested) return;
+    requested = true;
+    // A model-owning Worker must not undergo Node environment teardown while
+    // native async work can still complete. Retire its entire process instead;
+    // launchd owns replacement after exit. Signal dispatch is not reap proof.
+    const dispatch = () => {
+      if (signalled) return;
+      signalled = true;
+      try { kill(pid, 'SIGKILL'); }
+      catch { try { diagnostic('signal_failed'); } catch { /* stay poisoned */ } }
+    };
+    try { schedule(dispatch, 100); }
+    catch {
+      try { diagnostic('timer_failed'); } catch { /* dispatch still required */ }
+      // Grace is unavailable. A scheduler may have queued and then thrown;
+      // the shared dispatch guard also covers its later callback.
+      dispatch();
+    }
+    const code = ['deadline', 'closed', 'startup', 'poisoned'].includes(reason?.code) ? reason.code : 'error';
+    try { diagnostic(code); } catch { /* the retirement timer is already owned */ }
   };
 }
 
@@ -715,13 +748,13 @@ async function main() {
   const configPath = ymlArg || join(process.env.QMD_CONFIG_DIR || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'qmd'), 'index.yml');
   const worker = new Worker(new URL(import.meta.url), { workerData: { kind: 'claude-note-runtime', sdkPath, dbPath,
     configPath, indexId: process.env.CLAUDE_NOTE_INDEX_ID || 'default' } });
-  let fatalTimer;
-  const service = createRuntimeProxy(worker, { onFatal: () => { fatalTimer ||= setTimeout(() => process.exit(75), 100); } });
+  const service = createRuntimeProxy(worker, { retireOwner: createProcessRetirement() });
+  let server;
+  process.once('SIGTERM', () => { service.close(); server?.close(); });
   await service.ready;
-  const server = createHttpServer(service);
+  server = createHttpServer(service);
   server.requestTimeout = 10000; server.headersTimeout = 10000;
   server.listen(Number(portArg || 8182), '127.0.0.1', () => console.error(`claude-note recall server on 127.0.0.1:${server.address().port} (QMD ${PIN}; models load from existing cache on demand)`));
-  process.once('SIGTERM', () => { service.close(); server.close(); process.exit(0); });
 }
 
 if (isMainThread && process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

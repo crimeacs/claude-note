@@ -102,6 +102,17 @@ this excludes earlier process startup and Worker construction. Readiness
 rejection and a worker termination request do not prove native cancellation or
 child reaping, and do not authorize a replacement native owner.
 
+Production retires the whole recall-server process after poisoning or closing
+its model owner. It first invalidates readiness and settles pending callers,
+then schedules one self-directed SIGKILL after a 100-millisecond response grace.
+If that timer cannot be scheduled, it requests the same signal immediately.
+It does not request teardown of a worker environment that may still own native
+model work. Only the external supervisor starts a replacement after process
+exit; dispatching a signal is not proof of exit. The grace may still truncate
+the final response or diagnostic. Disposable non-native tests can use a separate
+worker-termination policy. This boundary contains native cleanup failures and
+does not prove that cold model operations meet the request deadline.
+
 The rerank operation also owns its observation: only a complete, finite scoring
 response naming the configured model may establish current readiness. SDK
 fallback, unknown model, partial scores and malformed results cannot borrow a

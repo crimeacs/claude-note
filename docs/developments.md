@@ -1,5 +1,20 @@
 # Developments
 
+## 2.1.13 — contain native runtime teardown failures (19 October 2026)
+
+A follow-up public canary after 2.1.12 returned its exact public source but
+exhausted the recall budget. The poisoned runtime then aborted during native
+worker cleanup. Both the failed canary and the separate process-lifecycle
+evidence are retained; the earlier successful warm canary and nightly run do
+not establish cold reliability.
+
+Production retirement now belongs to the whole recall-server process rather
+than terminating a worker that may still own native model work. Poisoning
+invalidates readiness and settles callers before one bounded retirement is
+requested. The external supervisor owns replacement after process exit. Query
+and startup deadlines are unchanged. This contains the unsafe cleanup path;
+it does not make cold model initialization or inference fit those deadlines.
+
 ## 2.1.12 — recover nightly evaluation and bound metadata work (19 October 2026)
 
 Nightly evaluation runs once when its launchd job loads as well as at 04:30,
