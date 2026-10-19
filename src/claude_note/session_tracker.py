@@ -335,6 +335,9 @@ def schedule_synthesis(state: models.SessionState) -> None:
 
 
 def synthesis_retry_due(state: models.SessionState) -> bool:
+    from .synthesis_schedule import paused
+    if paused(config.SYNTH_RESUME_AFTER):
+        return False
     if not state.synthesis_pending or state.synthesis_parked:
         return False
     if not state.last_synthesis_attempt_ts:
@@ -350,6 +353,9 @@ def synthesis_retry_due(state: models.SessionState) -> bool:
 def run_pending_synthesis(state: models.SessionState, synthesize: Callable,
                           force: bool = False) -> Optional[bool]:
     """Retry synthesis separately from note writing, persisting crash recovery."""
+    from .synthesis_schedule import paused
+    if paused(config.SYNTH_RESUME_AFTER):
+        return None  # A provider cooldown never consumes the session retry budget.
     if not state.synthesis_pending or (not force and not synthesis_retry_due(state)):
         return None
     if config.SYNTH_MODE == "log":

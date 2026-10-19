@@ -432,6 +432,9 @@ def synthesize_session(
     Returns:
         KnowledgePack or None on failure
     """
+    from .synthesis_schedule import remaining
+    if remaining(config.SYNTH_RESUME_AFTER):
+        raise RuntimeError(f"Synthesis deferred until {config.SYNTH_RESUME_AFTER}")
     if model is None:
         model = config.SYNTH_MODEL
     if timeout is None:

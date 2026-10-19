@@ -7,14 +7,18 @@ Parses Claude Code transcript JSONL and extracts content for synthesis.
 import json
 import hashlib
 import io
+import os
 import re
 import stat
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional, Union
 
 MAX_TRANSCRIPT_BYTES = 256 * 1024 * 1024
 MAX_METADATA_BYTES = 1024 * 1024
+MAX_NATIVE_RECORD_BYTES = 64 * 1024 * 1024
+MAX_NATIVE_SOURCE_BYTES = 8 * 1024 * 1024 * 1024
 TRANSCRIPT_LIMIT_ERROR = "Transcript exceeds 256 MB; preserve the original for explicit lossless recovery"
 METADATA_LIMIT_ERROR = "Transcript metadata exceeds 1 MB"
 
@@ -26,6 +30,121 @@ def check_transcript_size(path):
         raise ValueError("Transcript source must be a regular file")
     if info.st_size > MAX_TRANSCRIPT_BYTES:
         raise ValueError(TRANSCRIPT_LIMIT_ERROR)
+
+
+_NATIVE_IDENTITY_FIELDS = {
+    "type", "uuid", "timestamp", "parentUuid", "sessionId", "cwd", "entrypoint",
+    "source", "source_id", "source_revision", "ingested_at", "derivation_sources",
+}
+_CLAUDE_CONTENT_FIELDS = {"message", "result", "content", "tool_use_id", "is_error", "exit_code"}
+
+
+def _native_record(pairs):
+    record = {}
+    for key, value in pairs:
+        if key in record:
+            raise ValueError("Transcript contains malformed or incomplete JSONL records")
+        record[key] = value
+    return record
+
+
+def _project_native_media(value):
+    """Replace recognized binary media only; ordinary authored text stays exact."""
+    if isinstance(value, list):
+        return [_project_native_media(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    projected = {}
+    for key, item in value.items():
+        binary = (isinstance(item, str) and (
+            (key == "data" and value.get("type") == "base64"
+                and isinstance(value.get("media_type"), str)
+                and value["media_type"].startswith(("image/", "audio/", "video/", "application/pdf")))
+            or (key == "image_url" and item.startswith("data:image/"))
+            or (key == "url" and value.get("type") in {"image", "input_image", "output_image"}
+                and item.startswith("data:image/"))))
+        if binary:
+            digest = hashlib.sha256(item.encode("utf-8")).hexdigest()
+            projected[key] = f"[binary media preserved in original record; sha256:{digest}; characters:{len(item)}]"
+        else:
+            projected[key] = _project_native_media(item)
+    return projected
+
+
+def capture_native_transcript(path):
+    """Return a bounded text projection for an oversized native JSONL source.
+
+    Small sources retain their byte-for-byte capture path (return None). Large
+    sources keep all fields used by the reader, but binary media and duplicate
+    host bookkeeping remain in the unmodified original. Each projected record
+    is bound to its original line and digest; the manifest binds the full source.
+    No malformed, incomplete, changing, or still-oversized projection is accepted.
+    """
+    path = Path(path)
+    before = path.stat()
+    if not stat.S_ISREG(before.st_mode):
+        raise ValueError("Transcript source must be a regular file")
+    if before.st_size <= MAX_TRANSCRIPT_BYTES:
+        return None
+    if before.st_size > MAX_NATIVE_SOURCE_BYTES:
+        raise ValueError(TRANSCRIPT_LIMIT_ERROR)
+    source_hash, source_bytes, records, projected_bytes = hashlib.sha256(), 0, 0, 0
+    codex = None
+    with path.open("rb") as source, tempfile.TemporaryFile() as projected:
+        opened = source.fileno()
+        opened_info = os.fstat(opened)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                opened_info.st_dev, opened_info.st_ino, opened_info.st_size, opened_info.st_mtime_ns, opened_info.st_ctime_ns):
+            raise ValueError("Native source changed during capture")
+        while True:
+            line = source.readline(MAX_NATIVE_RECORD_BYTES + 1)
+            if not line:
+                break
+            source_bytes += len(line)
+            if len(line) > MAX_NATIVE_RECORD_BYTES or source_bytes > MAX_NATIVE_SOURCE_BYTES:
+                raise ValueError(TRANSCRIPT_LIMIT_ERROR)
+            if not line.endswith(b"\n"):
+                raise ValueError("Transcript contains malformed or incomplete JSONL records")
+            source_hash.update(line)
+            records += 1
+            try:
+                row = json.loads(line.decode("utf-8", errors="strict"), object_pairs_hook=_native_record)
+            except (ValueError, UnicodeError, RecursionError) as error:
+                raise ValueError("Transcript contains malformed or incomplete JSONL records") from error
+            if not isinstance(row, dict):
+                raise ValueError("Transcript contains malformed or incomplete JSONL records")
+            if codex is None:
+                codex = isinstance(row.get("payload"), dict)
+            kept = {key: item for key, item in row.items() if key in _NATIVE_IDENTITY_FIELDS}
+            if codex:
+                payload = row.get("payload")
+                if row.get("type") in {"session_meta", "response_item"}:
+                    kept["payload"] = payload
+                elif isinstance(payload, dict):
+                    kept["payload"] = {"type": payload.get("type", "")}
+            elif row.get("type") in {"user", "assistant", "progress", "tool_result"}:
+                kept.update({key: item for key, item in row.items() if key in _CLAUDE_CONTENT_FIELDS})
+            kept = _project_native_media(kept)
+            kept["_native_origin"] = {"line": records, "payload_digest": hashlib.sha256(line.rstrip(b"\r\n")).hexdigest()}
+            encoded = json.dumps(kept, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+            projected_bytes += len(encoded)
+            if projected_bytes > MAX_TRANSCRIPT_BYTES:
+                raise ValueError(TRANSCRIPT_LIMIT_ERROR)
+            projected.write(encoded)
+        after = os.fstat(opened)
+        current = path.stat()
+        identity = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        if identity(before) != identity(after) or identity(before) != identity(current) or source_bytes != before.st_size:
+            raise ValueError("Native source changed during capture")
+        manifest = {"version": 1, "source": str(path.absolute()), "revision": source_hash.hexdigest(),
+                    "bytes": source_bytes, "records": records, "representation": "native-text-projection"}
+        projected.seek(0)
+        first = json.loads(projected.readline())
+        first["_native_projection"] = manifest
+        raw = json.dumps(first, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n" + projected.read()
+        if len(raw) > MAX_TRANSCRIPT_BYTES:
+            raise ValueError(TRANSCRIPT_LIMIT_ERROR)
+        return raw
 
 
 def metadata_lines(path, *, max_lines=1, raw=None):
@@ -73,6 +192,7 @@ class SourceEvent:
     origin_revision: str = ""
     ingested_at: str = ""
     origin_line: int = 0
+    origin_payload_digest: str = ""
 
     @property
     def anchor(self) -> str:
@@ -503,6 +623,7 @@ def _attach_sources(content: TranscriptContent, path: Path, raw=None, trailing_b
     content.source_revision = hashlib.sha256(raw).hexdigest()
     content.source_path = str(path.absolute())
     malformed = 0
+    projection = {}
     calls = {tool.call_id: tool for tool in content.tool_uses if tool.call_id}
     for number, line in enumerate(raw.splitlines(), 1):
         try:
@@ -513,6 +634,13 @@ def _attach_sources(content: TranscriptContent, path: Path, raw=None, trailing_b
         if not isinstance(record, dict):
             malformed += 1
             continue
+        if number == 1 and isinstance(record.get("_native_projection"), dict):
+            candidate = record["_native_projection"]
+            if (candidate.get("version") == 1 and candidate.get("source") == content.source_path
+                    and isinstance(candidate.get("revision"), str)
+                    and re.fullmatch(r"[0-9a-f]{64}", candidate["revision"])
+                    and candidate.get("representation") == "native-text-projection"):
+                projection = candidate
         origins = record.get('derivation_sources')
         if isinstance(origins, list) and all(isinstance(item, str) for item in origins):
             content.context_sources.extend(item for item in origins if item not in content.context_sources)
@@ -531,6 +659,12 @@ def _attach_sources(content: TranscriptContent, path: Path, raw=None, trailing_b
                             hashlib.sha256(line).hexdigest(),
                             str(record.get("source", "")) + (":" + str(record["source_id"]) if record.get("source_id") else ""),
                             str(record.get("source_revision", "")), str(record.get("ingested_at", "")))
+        origin = record.get("_native_origin")
+        if (projection and isinstance(origin, dict) and type(origin.get("line")) is int and origin["line"] > 0
+                and isinstance(origin.get("payload_digest"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", origin["payload_digest"])):
+            event.origin_source, event.origin_revision = projection["source"], projection["revision"]
+            event.origin_line, event.origin_payload_digest = origin["line"], origin["payload_digest"]
         content.source_events.append(event)
         call_id = payload.get("call_id") or payload.get("tool_use_id")
         if call_id in calls:
@@ -544,6 +678,9 @@ def _attach_sources(content: TranscriptContent, path: Path, raw=None, trailing_b
                         "payloads": "original-jsonl", "outcomes_unknown": sum(t.success is None for t in content.tool_uses),
                         "snapshot_bytes": len(raw), "snapshot_lines": len(raw.splitlines()), "snapshot_revision": content.source_revision}
     content.coverage["incomplete_trailing_bytes"] = trailing_bytes
+    if projection:
+        content.coverage["native_projection"] = projection
+        content.coverage["payloads"] = "native-text-projection; binary and host bookkeeping in original source"
     return content
 
 
@@ -634,7 +771,7 @@ def _snapshot(content, raw, start=0):
     for event in content.source_events:
         event.origin_source = event.origin_source or content.source_path
         event.origin_revision = event.origin_revision or content.source_revision
-        event.origin_line = event.line
+        event.origin_line = event.origin_line or event.line
         event.source, event.revision, event.line = content.snapshot_path, digest, event.line - start
     for tool in content.tool_uses:
         if tool.source_span:
