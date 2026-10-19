@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { Worker } from 'node:worker_threads';
@@ -12,7 +12,7 @@ import http from 'node:http';
 import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRecallService, createRuntimeProxy, ScopedLexicalWorker, createIndexSnapshotReader, scopedLexical, passage, literalFTS, modelFileIdentity } from '../src/claude_note/recall_server.mjs';
+import { createRecallService, createRuntimeProxy, createProcessRetirement, ScopedLexicalWorker, createIndexSnapshotReader, scopedLexical, passage, literalFTS, modelFileIdentity } from '../src/claude_note/recall_server.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const metadata = { corpus_digest: 'corpus', generation: 'generation', vector_rows: 1, vector_models: ['embed-id'] };
@@ -290,6 +290,172 @@ test('production proxy deadline stays responsive when native runtime blocks its 
   assert.equal(proxy.capabilities().ok, false);
   await assert.rejects(proxy.request('/search', {}), e => e.code === 'poisoned');
   proxy.close();
+});
+
+test('production retirement owns one delayed SIGKILL and emits only bounded reason codes', () => {
+  const timers = [], signals = [], diagnostics = [];
+  const retire = createProcessRetirement({ pid: 424242,
+    schedule: (fn, delay) => { timers.push({ fn, delay }); },
+    kill: (pid, signal) => { signals.push({ pid, signal }); return true; },
+    diagnostic: reason => { diagnostics.push(reason); throw new Error('Synthetic stderr failure'); },
+  });
+  assert.doesNotThrow(() => retire({ code: 'deadline', message: 'PRIVATE synthetic error payload' }));
+  retire({ code: 'closed' });
+  assert.deepEqual(diagnostics, ['deadline']); assert.equal(timers.length, 1);
+  assert.equal(timers[0].delay, 100); assert.deepEqual(signals, []);
+  assert.equal(timers[0].fn(), undefined);
+  assert.deepEqual(signals, [{ pid: 424242, signal: 'SIGKILL' }]);
+  retire({ code: 'startup' }); assert.equal(timers.length, 1);
+  const failedSignals = [], failedDiagnostics = [];
+  const fail = createProcessRetirement({ pid: 424243, schedule: fn => failedSignals.push(fn),
+    kill: () => { throw new Error('Synthetic signal failure'); }, diagnostic: reason => failedDiagnostics.push(reason) });
+  fail({ code: 'PRIVATE reason', message: 'PRIVATE message' });
+  assert.doesNotThrow(failedSignals[0]);
+  assert.deepEqual(failedDiagnostics, ['error', 'signal_failed']);
+  fail({ code: 'closed' }); assert.equal(failedSignals.length, 1);
+  for (const queued of [false, true]) {
+    const callbacks = [], attempts = [], failureReasons = [];
+    const noTimer = createProcessRetirement({ pid: 424244,
+      schedule(fn) { if (queued) callbacks.push(fn); throw new Error('Synthetic timer failure'); },
+      kill(pid, signal) { attempts.push({ pid, signal }); throw new Error('Synthetic signal failure'); },
+      diagnostic(reason) { failureReasons.push(reason); throw new Error('Synthetic diagnostic failure'); },
+    });
+    assert.doesNotThrow(() => noTimer({ code: 'closed', message: 'PRIVATE synthetic failure' }));
+    assert.deepEqual(attempts, [{ pid: 424244, signal: 'SIGKILL' }]);
+    assert.deepEqual(failureReasons, ['timer_failed', 'signal_failed', 'closed']);
+    for (const callback of callbacks) assert.doesNotThrow(callback);
+    noTimer({ code: 'startup' });
+    assert.equal(attempts.length, 1); assert.equal(callbacks.length, Number(queued));
+    assert.equal(failureReasons.length, 3);
+  }
+});
+
+test('production retirement settles and poisons before a throwing owner callback on every exit path', async t => {
+  for (const action of ['startup_error', 'startup_deadline', 'worker_error', 'worker_exit', 'fatal', 'fatal_async_retirement', 'close_startup', 'close_ready', 'request_deadline']) {
+    await t.test(action, async () => {
+      class FixtureWorker extends EventEmitter {
+        sent = [];
+        postMessage(message) { this.sent.push(message); }
+        terminate() { assert.fail('Production owner must not terminate the native model Worker'); }
+      }
+      const worker = new FixtureWorker(), retirements = [];
+      let proxy;
+      proxy = createRuntimeProxy(worker, { startupMs: action === 'startup_deadline' ? 15 : 1000,
+        retireOwner(reason) {
+          retirements.push({ reason: reason.code, state: structuredClone(proxy.capabilities()) });
+          if (action === 'fatal_async_retirement') return Promise.reject(new Error('Synthetic async retirement failure'));
+          throw new Error('Synthetic owner-retirement failure');
+        } });
+      const ready = proxy.ready.then(() => 'ready', error => error.code);
+      let query, health;
+      try {
+        if (['fatal', 'fatal_async_retirement', 'close_ready', 'request_deadline'].includes(action)) {
+          worker.emit('message', { ready: true, manifest: { ok: true, lexical_ready: true, vector_ready: true, rerank_ready: true,
+            models: { embed: { ready: true }, rerank: { ready: true } }, index: { generation: 'public-fixture' } } });
+          assert.equal(await ready, 'ready');
+          query = proxy.request('/search', { deadline_at_ms: Date.now() + (action === 'request_deadline' ? 20 : 1000) })
+            .then(() => 'unexpected success', error => error.code);
+          health = proxy.refresh(Date.now() + 1000);
+          worker.emit('message', { started: String(worker.sent[0].id) });
+        }
+        if (action === 'startup_error') worker.emit('message', { startup_error: 'PRIVATE synthetic startup payload' });
+        if (action === 'worker_error') worker.emit('error', new Error('PRIVATE synthetic worker error'));
+        if (action === 'worker_exit') worker.emit('exit', 1);
+        if (action.startsWith('fatal')) worker.emit('message', { fatal: true });
+        if (action.startsWith('close_')) proxy.close();
+        if (action === 'startup_deadline') assert.equal(await ready, 'deadline');
+        else if (action === 'request_deadline') assert.equal(await query, 'deadline');
+        else if (query) assert.equal(await query, action === 'close_ready' ? 'closed' : 'poisoned');
+        else assert.notEqual(await ready, 'ready');
+        if (health) assert.equal((await health).ok, false);
+        assert.equal(retirements.length, 1);
+        const state = retirements[0].state;
+        assert.equal(state.ok, false); assert.equal(state.lexical_ready, false);
+        assert.equal(state.vector_ready, false); assert.equal(state.rerank_ready, false);
+        assert.equal(state.models.embed.ready, false); assert.equal(state.models.rerank.ready, false);
+        assert.equal(state.queue.active, false); assert.equal(state.queue.pending, 0);
+        const generation = proxy.capabilities().index?.generation;
+        proxy.close(); worker.emit('message', { fatal: true }); worker.emit('exit', 1);
+        worker.emit('message', { ready: true, manifest: { ok: true, index: { generation: 'late' } } });
+        worker.emit('message', { id: 1, result: {}, manifest: { ok: true, index: { generation: 'late' } } });
+        assert.equal(retirements.length, 1); assert.equal(proxy.capabilities().ok, false);
+        assert.equal(proxy.capabilities().index?.generation, generation);
+        await assert.rejects(proxy.request('/search', {}), error => error.code === 'poisoned');
+      } finally { proxy.close(); await Promise.allSettled([ready, query, health]); }
+    });
+  }
+});
+
+test('production retirement kills a disposable blocked-Worker process without running exit cleanup', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'claude-note-process-retirement-'));
+  const moduleURL = new URL('../src/claude_note/recall_server.mjs', import.meta.url).href;
+  try {
+    for (const mode of ['request_deadline', 'startup_failure', 'sigterm_startup', 'sigterm_active']) {
+      await t.test(mode, async () => {
+        const marker = join(dir, `${mode}.cleanup`);
+        const source = `
+          import {Worker} from 'node:worker_threads';
+          import {writeFileSync} from 'node:fs';
+          import {createRuntimeProxy,createProcessRetirement,createHttpServer} from ${JSON.stringify(moduleURL)};
+          const mode=${JSON.stringify(mode)}, marker=${JSON.stringify(marker)};
+          process.on('exit',()=>writeFileSync(marker,'exit cleanup ran'));
+          const worker=new Worker(\`const {parentPort}=require('node:worker_threads');
+            parentPort.on('message',msg=>{parentPort.postMessage({started:msg.body.request_id}); while(true){};});
+            if (\${JSON.stringify(mode)}==='startup_failure') parentPort.postMessage({startup_error:'PRIVATE synthetic startup payload'});
+            else if (\${JSON.stringify(mode)}!=='sigterm_startup') parentPort.postMessage({ready:true,manifest:{ok:true,lexical_ready:true}});
+          \`,{eval:true,execArgv:[]});
+          worker.terminate=()=>{writeFileSync(marker,'Worker termination ran');throw new Error('Unsafe cleanup');};
+          worker.on('message',message=>{if(message.started) console.log(JSON.stringify({started:true}));});
+          const service=createRuntimeProxy(worker,{retireOwner:createProcessRetirement()});
+          let server;
+          process.once('SIGTERM',()=>{service.close();server?.close();});
+          console.log(JSON.stringify({armed:true}));
+          try {
+            await service.ready;
+            server=createHttpServer(service);
+            server.listen(0,'127.0.0.1',()=>console.log(JSON.stringify({port:server.address().port})));
+          } catch {}
+        `;
+        const child = spawn(process.execPath, ['--input-type=module', '-e', source], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, OPENSSL_CONF: '/dev/null' } });
+        const exited = once(child, 'exit'), closed = once(child, 'close');
+        let output = '', errors = '';
+        child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { errors += chunk; });
+        const until = async predicate => {
+          const deadline = Date.now() + 2000;
+          while (!predicate()) { if (Date.now() >= deadline) throw new Error(`Disposable ${mode} did not become ready: ${errors}`); await sleep(5); }
+        };
+        try {
+          await until(() => output.includes('"armed":true'));
+          if (mode === 'sigterm_startup') child.kill('SIGTERM');
+          if (['request_deadline', 'sigterm_active'].includes(mode)) {
+            await until(() => output.includes('"port":'));
+            const port = JSON.parse(output.trim().split('\n').find(line => line.includes('"port":'))).port;
+            const began = Date.now();
+            const response = fetch(`http://127.0.0.1:${port}/search`, { method: 'POST', headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ question: 'public blocked-worker fixture', deadline_at_ms: Date.now() + (mode === 'sigterm_active' ? 5000 : 150) }), signal: AbortSignal.timeout(2500) });
+            if (mode === 'sigterm_active') { await until(() => output.includes('"started":true')); child.kill('SIGTERM'); }
+            const reply = await response, body = await reply.json();
+            assert.equal(reply.status, mode === 'sigterm_active' ? 400 : 504);
+            assert.equal(body.error, mode === 'sigterm_active' ? 'closed' : 'deadline');
+            assert.equal(body.manifest.ok, false); assert.equal(body.manifest.lexical_ready, false);
+            assert.ok(Date.now() - began < 700, 'HTTP absolute deadline remains responsive');
+          }
+          let timer, result;
+          try { result = await Promise.race([exited, new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`Disposable ${mode} did not exit`)), 2000);
+          })]); } finally { clearTimeout(timer); }
+          assert.deepEqual(result, [null, 'SIGKILL']);
+          await closed;
+          assert.equal(existsSync(marker), false, 'Neither process exit hooks nor Worker teardown may run');
+          assert.match(errors, /claude-note recall runtime retirement: (deadline|poisoned|startup|closed)/);
+          assert.equal(errors.includes('PRIVATE'), false);
+        } finally {
+          if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await exited; }
+          await closed;
+        }
+      });
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('late start after queued expiry poisons runtime; acknowledged never-started cancellation does not', async () => {

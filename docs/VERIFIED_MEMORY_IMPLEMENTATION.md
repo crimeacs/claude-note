@@ -81,6 +81,15 @@ and readiness-transition regressions verify that degraded paths retain fusion
 order and visible history. These contracts do not independently trace native
 inference, SDK-internal token truncation or measured task benefit.
 
+The 2.1.12 metadata repair passed its installed public canary and a real nightly
+catch-up, but a subsequent fresh-runtime public canary exhausted the budget and
+was followed by a native abort during worker cleanup. The exact public source
+was returned; current vector/rerank readiness was not established. Both attempts
+are retained. The 2.1.13 containment retires the whole production process instead
+of tearing down the model worker environment. It preserves the existing query
+and startup budgets. The slow native stage remains unattributed, and cold
+reliability remains an open rollout gate.
+
 The original 15-workstream research and A–F deliverables remain broader than
 these implementation contracts. Full task outcomes, each baseline's own learned
 memory across phases, dense-only comparison, evidence × extraction and
