@@ -488,6 +488,7 @@ def install_eval_agent(exe: str, dry_run: bool = False, hour: int = 4, minute: i
   <key>Label</key><string>{EVAL_LABEL}</string>
   <key>ProgramArguments</key><array>{args}</array>
   <key>StartCalendarInterval</key><dict><key>Hour</key><integer>{hour}</integer><key>Minute</key><integer>{minute}</integer></dict>
+  <key>RunAtLoad</key><true/>
   <key>LowPriorityIO</key><true/>
   <key>Nice</key><integer>10</integer>
   <key>WorkingDirectory</key><string>{SHARE}</string>

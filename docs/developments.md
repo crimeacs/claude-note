@@ -1,5 +1,28 @@
 # Developments
 
+## 2.1.12 — recover nightly evaluation and bound metadata work (19 October 2026)
+
+Nightly evaluation runs once when its launchd job loads as well as at 04:30,
+so a login after the scheduled time catches up. Its existing one-hour command
+bound is retained. A fresh heartbeat remains distinct from passing policy and
+public-canary checks.
+
+Short health waiters no longer set the lifetime of shared index metadata work.
+The metadata operation has its own three-second ceiling. Each read-only SQLite
+worker reuses metadata only for the same connection's data_version, checked in
+the same transaction as query rows. External document or vector commits
+invalidate it; failed reads and commits publish no new cache entry. Search
+request deadlines, collection restrictions and exact passage revisions remain
+unchanged. This reduces repeated index scans without asserting native task
+benefit or exactly-once external effects.
+
+Large-session capture retains its original evidence and a bounded text
+projection with revision and line digests. Project-scoped source policies,
+protected unknown lineage, explicit synthesis cooldowns and push completion
+versus attempt diagnostics are included. Binary media remains in the original
+source; the projection is not a complete byte-for-byte transcript.
+
+
 ## 2.1.11 — install first, preserve evaluation lifetimes (14 October 2026)
 
 Quick install now follows the README introduction, with the existing install
