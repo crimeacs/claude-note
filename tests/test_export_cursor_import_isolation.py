@@ -240,6 +240,20 @@ class ExportCursorImportIsolationTests(unittest.TestCase):
         self.assertEqual(checkpoint.read_bytes(), b'{"transcript_checkpoint":{"bytes":17}}')
         self.assertIn('required bubble is missing or malformed', problems[0])
 
+    def test_cursor_deleted_composer_tombstones_are_counted_without_false_size_failure(self):
+        path = self.database([('composerData:deleted', None), ('composerData:healthy', self.composer('healthy'))])
+        # The helper serializes fixtures; set a genuine SQL NULL as Cursor does.
+        with sqlite3.connect(path) as db:
+            db.execute('UPDATE cursorDiskKV SET value=NULL WHERE key=?', ('composerData:deleted',))
+        original = path.read_bytes()
+        seen, problems, report = {}, [], {}
+        self.assertEqual(importers.sweep_cursor(seen, 0, problems=problems, report=report), 1)
+        self.assertEqual(problems, [])
+        self.assertEqual(report['skipped_deleted_composers'], 1)
+        self.assertEqual(report['failed_items'], 0)
+        self.assertNotIn(self.seen_key('cursor', 'deleted'), seen)
+        self.assertEqual(path.read_bytes(), original)
+
     def test_cursor_malformed_bubbles_and_composers_continue_then_repair_retries(self):
         self.database([('composerData:invalid-json', '{SECRET_PAYLOAD'),
             ('composerData:bad-bubble', self.composer('bad-bubble', bubbles=[{'type': 1, 'text': 'q'}, {'type': 9, 'text': 'unsupported'}])),

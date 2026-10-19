@@ -1,7 +1,11 @@
+import argparse
+import contextlib
 import hashlib
+import io
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -235,6 +239,176 @@ class PushTests(unittest.TestCase):
         finally:
             push.redact = original
         self.assertEqual((counts["skipped"], len(client.calls)), (2, 0))
+        self.assertFalse(counts["clean"])
+        self.assertEqual(counts["skipped_reasons"], {"inspection: RuntimeError": 2})
+        self.assertFalse(push.HEARTBEAT.exists())
+
+    def test_revoked_root_scope_records_attempt_without_refreshing_clean_heartbeat(self):
+        push.run(vault=self.vault, client=FakeClient())
+        clean_before = push.HEARTBEAT.read_text()
+        with mock.patch.object(push.egress, "policy", return_value={}):
+            counts = push.run(vault=self.vault, client=FakeClient())
+        self.assertEqual((counts["errors"], counts["pushed"], counts["policy_denied"], counts["local_only"]), (0, 0, 0, 2))
+        self.assertEqual(counts["policy_denied_reasons"], {})
+        self.assertEqual(counts["revocation_reasons"], {"audience-revoked": 2})
+        self.assertFalse(counts["clean"])
+        self.assertEqual(push.HEARTBEAT.read_text(), clean_before)
+        attempt = json.loads(push.HEARTBEAT.with_suffix(".json").read_text())
+        self.assertEqual(attempt["status"], "blocked")
+        self.assertEqual(attempt["counts"], counts)
+        self.assertTrue(attempt["started_at"])
+
+    def test_generated_note_missing_sources_stays_local_and_reports_cause(self):
+        generated = note("gotcha", extra="assistant: codex\n")
+        (self.vault / "generated.md").write_text(generated)
+        client = FakeClient()
+        counts = push.run(vault=self.vault, client=client)
+        self.assertEqual(counts["policy_denied_reasons"], {"Generated note has no bound derivation sources": 1})
+        self.assertFalse(push.HEARTBEAT.exists())
+        self.assertNotIn("generated.md", [metadata["source_path"] for _, _, metadata in client.calls])
+        self.assertEqual((self.vault / "generated.md").read_text(), generated)
+
+    def test_unchanged_reauthorized_source_clears_only_its_exact_revocations(self):
+        client = FakeClient()
+        push.run(vault=self.vault, client=client)
+        with mock.patch.object(push.egress, "policy", return_value={}):
+            self.assertEqual(push.run(vault=self.vault, client=client)["revocations_pending"], 2)
+        state = json.loads(push.STATE_FILE.read_text())
+        destination = next(iter(state["destinations"].values()))["identity"]
+        retained = [
+            {"source": "pattern-a.md", "destination": dict(destination, organizationId="other"), "reason": "audience-revoked"},
+            {"source": "pattern-a.md", "destination": dict(destination, vault="/other/vault"), "reason": "audience-revoked"},
+            {"source": "pattern-a.md", "destination": destination, "reason": "unknown"},
+            {"source": "missing.md", "destination": destination, "reason": "eligibility-revoked"},
+        ]
+        state["revocations"].extend(retained)
+        push.STATE_FILE.write_text(json.dumps(state))
+        again = FakeClient()
+        restored = push.run(vault=self.vault, client=again)
+        self.assertEqual((restored["unchanged"], restored["revocations_cleared"], restored["revocations_pending"]), (2, 2, 4))
+        self.assertEqual(again.calls, [])
+        self.assertEqual(json.loads(push.STATE_FILE.read_text())["revocations"], retained)
+        self.assertEqual(restored["revocation_reasons"], {"audience-revoked": 2, "unknown": 1, "eligibility-revoked": 1})
+
+    def test_clean_heartbeat_recovers_after_exact_policy_reauthorization(self):
+        push.run(vault=self.vault, client=FakeClient())
+        with mock.patch.object(push.egress, "policy", return_value={}):
+            push.run(vault=self.vault, client=FakeClient())
+        push.HEARTBEAT.unlink()
+        again = FakeClient()
+        restored = push.run(vault=self.vault, client=again)
+        self.assertEqual((restored["revocations_cleared"], restored["revocations_pending"]), (2, 0))
+        self.assertEqual(again.calls, [])
+        self.assertTrue(restored["clean"])
+        self.assertTrue(push.HEARTBEAT.exists())
+
+    def test_changed_bytes_do_not_cancel_revocation_of_the_prior_remote_bytes(self):
+        push.run(vault=self.vault, client=FakeClient())
+        with mock.patch.object(push.egress, "policy", return_value={}):
+            push.run(vault=self.vault, client=FakeClient())
+        path = self.vault / "pattern-a.md"
+        path.write_text(path.read_text() + "\nA newly authorized revision.\n")
+        restored = push.run(vault=self.vault, client=FakeClient())
+        self.assertEqual((restored["pushed"], restored["revocations_cleared"], restored["revocations_pending"]), (1, 1, 1))
+        self.assertEqual(json.loads(push.STATE_FILE.read_text())["revocations"][0]["source"], "pattern-a.md")
+        # The new receipt must not erase the withdrawal of older remote bytes on
+        # tomorrow's otherwise unchanged run.
+        again = push.run(vault=self.vault, client=FakeClient())
+        self.assertEqual((again["revocations_cleared"], again["revocations_pending"]), (0, 1))
+
+    def test_restored_source_still_needs_transitive_authored_permission(self):
+        origin = self.vault / "origin.txt"
+        origin.write_text("Original synthetic source evidence.")
+        generated = note("pattern", extra="assistant: codex\nderivation_sources: " + json.dumps([str(origin)]) + "\n")
+        (self.vault / "generated.md").write_text(generated)
+        self.assertEqual(push.run(vault=self.vault, client=FakeClient())["pushed"], 3)
+        with mock.patch.object(push.egress, "policy", return_value={}):
+            push.run(vault=self.vault, client=FakeClient())
+        origin.write_text("---\nprivate: true\n---\nOriginal synthetic source evidence.")
+        restored = push.run(vault=self.vault, client=FakeClient())
+        self.assertEqual((restored["revocations_cleared"], restored["revocations_pending"], restored["policy_denied"]), (2, 1, 1))
+        self.assertEqual(restored["policy_denied_reasons"], {"Artifact audience does not permit this destination": 1})
+        self.assertEqual(json.loads(push.STATE_FILE.read_text())["revocations"][0]["source"], "generated.md")
+
+    def test_unknown_recorded_lineage_remains_blocked_after_policy_restore(self):
+        origin = self.vault / "origin.txt"
+        origin.write_text("Synthetic origin evidence.")
+        path = self.vault / "generated.md"
+        path.write_text(note("pattern", extra="assistant: codex\nderivation_sources: " + json.dumps([str(origin)]) + "\n"))
+        push.run(vault=self.vault, client=FakeClient())
+        with mock.patch.object(push.egress, "policy", return_value={}):
+            push.run(vault=self.vault, client=FakeClient())
+        from claude_note.state_io import atomic_json
+        ledger = push.egress._lineage_path(path, self.vault)
+        atomic_json(ledger, {"version": 1, "origins": [str(origin)], "unknown": True})
+        restored = push.run(vault=self.vault, client=FakeClient())
+        self.assertEqual((restored["revocations_cleared"], restored["revocations_pending"]), (2, 1))
+        self.assertEqual(restored["policy_denied_reasons"], {"Source lineage needs owner reconciliation": 1})
+        self.assertTrue(json.loads(ledger.read_text())["unknown"])
+
+    def test_restored_exact_eligibility_clears_queue_without_reupload(self):
+        path = self.vault / "pattern-a.md"
+        original = path.read_text()
+        push.run(vault=self.vault, client=FakeClient())
+        path.write_text(original.replace("type: pattern", "type: pattern\nshare: false"))
+        self.assertEqual(push.run(vault=self.vault, client=FakeClient())["revocation_reasons"], {"eligibility-revoked": 1})
+        path.write_text(original)
+        client = FakeClient()
+        restored = push.run(vault=self.vault, client=client)
+        self.assertEqual((restored["revocations_cleared"], restored["revocations_pending"]), (1, 0))
+        self.assertEqual(client.calls, [])
+
+    def test_dry_run_never_clears_queued_revocations_or_writes_attempt_receipt(self):
+        push.run(vault=self.vault, client=FakeClient())
+        with mock.patch.object(push.egress, "policy", return_value={}):
+            push.run(vault=self.vault, client=FakeClient())
+        before_state = push.STATE_FILE.read_text()
+        before_attempt = push.HEARTBEAT.with_suffix(".json").read_text()
+        counts = push.run(vault=self.vault, client=FakeClient(), dry_run=True)
+        self.assertEqual((counts["revocations_cleared"], counts["revocations_pending"]), (0, 2))
+        self.assertEqual(push.STATE_FILE.read_text(), before_state)
+        self.assertEqual(push.HEARTBEAT.with_suffix(".json").read_text(), before_attempt)
+
+    def test_ungranted_roots_are_local_without_failed_sync_or_source_invention(self):
+        generated = note("pattern", extra="assistant: codex\n")
+        path = self.vault / "generated.md"
+        path.write_text(generated)
+        with mock.patch.object(push.egress, "policy", return_value={}):
+            client = FakeClient()
+            counts = push.run(vault=self.vault, client=client)
+        self.assertEqual((counts["local_only"], counts["policy_denied"], counts["pushed"]), (3, 0, 0))
+        self.assertTrue(counts["clean"])
+        self.assertEqual(counts["problems"], [])
+        self.assertTrue(push.HEARTBEAT.exists())
+        self.assertEqual(client.calls, [])
+        self.assertEqual(path.read_text(), generated)
+
+    def test_explicit_root_grant_with_ungranted_origin_is_blocked(self):
+        origin = self.vault / "origin.txt"
+        origin.write_text("Synthetic source evidence stays local.")
+        path = self.vault / "generated.md"
+        path.write_text(note("pattern", extra="assistant: codex\nderivation_sources: " + json.dumps([str(origin)]) + "\n"))
+        policy = {"rules": [{"source": str(path), "audiences": ["host", "local", "staging"]}]}
+        with mock.patch.object(push.egress, "policy", return_value=policy):
+            client = FakeClient()
+            counts = push.run(vault=self.vault, client=client)
+        self.assertEqual((counts["local_only"], counts["policy_denied"], counts["pushed"]), (2, 1, 0))
+        self.assertEqual(counts["policy_denied_reasons"], {"Source policy does not allow staging egress": 1})
+        self.assertFalse(counts["clean"])
+        self.assertEqual(client.calls, [])
+        self.assertFalse(push.HEARTBEAT.exists())
+
+    def test_cli_exits_nonzero_and_names_a_bound_source_policy_blockage(self):
+        from claude_note import cli
+        (self.vault / "generated.md").write_text(note("pattern", extra="assistant: codex\n"))
+        counts = push.run(vault=self.vault, client=FakeClient())
+        output = io.StringIO()
+        args = argparse.Namespace(install_agent=False, dry_run=False, limit=0, resend_legacy=False)
+        with mock.patch.object(push, "run", return_value=counts), contextlib.redirect_stdout(output):
+            self.assertEqual(cli.cmd_push(args), 1)
+        self.assertIn("policy denied: 1", output.getvalue())
+        self.assertIn("revocations pending: 0", output.getvalue())
+        self.assertIn("Generated note has no bound derivation sources", output.getvalue())
 
     def test_auth_failure_stops_the_run(self):
         class Denied(FakeClient):
@@ -383,3 +557,62 @@ class NoteCountTests(unittest.TestCase):
         got = health._synthesis(vault)
         self.assertEqual(got["failed"], 1)
         self.assertIn("Claude CLI not found", got["last_error"])
+
+
+class PushHealthTests(unittest.TestCase):
+    def test_latest_blocked_attempt_is_distinct_from_last_clean_completion(self):
+        from claude_note import health
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "push.ok").write_text(json.dumps({"counts": {"pushed": 5}}))
+            old = time.time() - 4 * 86400
+            os.utime(root / "push.ok", (old, old))
+            latest = {"pushed": 0, "errors": 0, "policy_denied": 2,
+                      "policy_denied_reasons": {"Source lineage needs owner reconciliation": 2},
+                      "revocations_pending": 1, "problems": ["2 note(s) denied by staging policy",
+                      "staging policy: Source lineage needs owner reconciliation (2)"]}
+            (root / "push.json").write_text(json.dumps({"status": "blocked", "counts": latest}))
+            with mock.patch.object(health, "LOGS", root), \
+                    mock.patch.object(health, "LAUNCH_AGENTS", root / "agents"), \
+                    mock.patch.object(health, "_launchd_loaded", return_value=False):
+                got = health._push_health()
+            self.assertTrue(got["stale"])
+            self.assertNotEqual(got["last_ok"], got["last_attempt"])
+            self.assertEqual(got["attempt_status"], "blocked")
+            self.assertEqual(got["counts"], latest)
+            self.assertEqual(got["clean_counts"], {"pushed": 5})
+            self.assertEqual(got["problems"], latest["problems"])
+
+    def test_incomplete_attempt_is_reported_after_run_deadline(self):
+        from claude_note import health
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            attempt = root / "push.json"
+            attempt.write_text(json.dumps({"status": "running", "counts": {}}))
+            old = time.time() - 46 * 60
+            os.utime(attempt, (old, old))
+            with mock.patch.object(health, "LOGS", root), \
+                    mock.patch.object(health, "LAUNCH_AGENTS", root / "agents"), \
+                    mock.patch.object(health, "_launchd_loaded", return_value=False):
+                got = health._push_health()
+            self.assertIn("latest push attempt did not complete", got["problems"][0])
+
+    def test_report_includes_current_push_blockage_without_waiting_for_stale_success(self):
+        from claude_note import health
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "push.ok").write_text(json.dumps({"counts": {"pushed": 1}}))
+            (root / "push.json").write_text(json.dumps({"status": "blocked", "counts": {
+                "problems": ["63 queued revocation(s) need review"]}}))
+            with mock.patch.object(health, "LOGS", root), \
+                    mock.patch.object(health, "LAUNCH_AGENTS", root / "agents"), \
+                    mock.patch.object(health, "_config", return_value=(root / "config.toml", {})), \
+                    mock.patch.object(health, "_launchd_loaded", return_value=False), \
+                    mock.patch.object(health, "_notes", return_value={}), \
+                    mock.patch.object(health, "_synthesis", return_value={}), \
+                    mock.patch.object(health, "_which", return_value="/tool"), \
+                    mock.patch.object(health, "freshness_summary", return_value={}):
+                got = health.report()
+            self.assertFalse(got["push"]["stale"])
+            self.assertIn("push: 63 queued revocation(s) need review", got["problems"])
+            self.assertFalse(got["ok"])

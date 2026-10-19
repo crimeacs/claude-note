@@ -289,10 +289,13 @@ def cmd_push(args) -> int:
     label = "would push" if args.dry_run else "pushed"
     print(f"{label}: {counts['pushed']}  unchanged: {counts['unchanged']}  redacted: {counts['redacted']}  "
           f"skipped: {counts['skipped']}  skipped:stub: {counts['skipped_stub']}  errors: {counts['errors']}  "
-          f"legacy deferred: {counts['legacy_deferred']}  (not eligible: {counts['not_eligible']})")
-    if counts.get("stopped"):
-        print(f"stopped early: {counts['stopped']}")
-    return 1 if counts["errors"] else 0
+          f"local only: {counts['local_only']}  policy denied: {counts['policy_denied']}  "
+          f"legacy deferred: {counts['legacy_deferred']}  "
+          f"unknown outcomes: {counts['unknown_outcomes']}  revocations pending: {counts['revocations_pending']}  "
+          f"revocations cleared: {counts['revocations_cleared']}  (not eligible: {counts['not_eligible']})")
+    for problem in counts.get("problems", []):
+        print(f"blocked: {problem}")
+    return 1 if counts.get("problems") or counts["errors"] else 0
 
 
 PUSH_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
