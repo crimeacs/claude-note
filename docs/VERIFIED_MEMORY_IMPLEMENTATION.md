@@ -90,6 +90,21 @@ of tearing down the model worker environment. It preserves the existing query
 and startup budgets. The slow native stage remains unattributed, and cold
 reliability remains an open rollout gate.
 
+An October 20 instrumented two-document public fixture reached
+`loadLlamaRuntime` through the embedding path, then exhausted its six-second
+search budget without a terminal loader event. Reranking was skipped. The
+trace did not hit its event cap; whole-process retirement was followed by
+reap, both output-pipe EOFs and an empty owned process group. Runtime loading
+includes module import, backend discovery and initialization, so this evidence
+does not identify which inner operation was slow. Instrumentation, fixture and
+absolute model-file identifiers are part of its separate fingerprint; it does
+not establish production cold readiness or a memory benefit.
+
+Version 2.1.14 makes read-only freshness proof failures distinguishable with
+fixed safe reasons. Retained revisions absent, inactive or changed in the index
+remain unacknowledged. The patch neither prunes history nor reconciles external
+human edits, and retains the existing proof bounds and acknowledgement policy.
+
 The original 15-workstream research and A–F deliverables remain broader than
 these implementation contracts. Full task outcomes, each baseline's own learned
 memory across phases, dense-only comparison, evidence × extraction and

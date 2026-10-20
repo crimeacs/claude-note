@@ -1,6 +1,7 @@
 """Read-only indexed revision proof on disposable SQLite databases only."""
 
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -51,14 +52,15 @@ class IndexProofTests(unittest.TestCase):
         self.assertFalse(Path(str(self.database) + '-wal').exists())
 
     def test_active_document_hash_path_and_collection_are_exact(self):
-        operations = [('UPDATE documents SET active=0', ()),
-                      ('UPDATE documents SET hash=?', ('a' * 64,)),
-                      ('UPDATE documents SET path=?', ('different.md',)),
-                      ('UPDATE documents SET collection=?', ('other',))]
-        for sql, args in operations:
+        operations = [('UPDATE documents SET active=0', (), 'proof_revision_inactive'),
+                      ('UPDATE documents SET hash=?', ('a' * 64,), 'proof_revision_mismatch'),
+                      ('UPDATE documents SET path=?', ('different.md',), 'proof_revision_absent'),
+                      ('UPDATE documents SET collection=?', ('other',), 'proof_revision_absent')]
+        for sql, args, reason in operations:
             with self.subTest(sql=sql):
                 self.mutate(sql, args)
-                self.assertFalse(self.verify()['lexical'])
+                with mock.patch.object(setup_recall, 'qmd_sdk', return_value=None):
+                    self.assertEqual(self.verify(), {'lexical': False, 'vector': False, 'reason': reason})
                 self.mutate('UPDATE documents SET active=1,hash=?,path=?,collection=?',
                             (self.revision, 'first.md', 'synthetic'))
 
@@ -111,10 +113,48 @@ class IndexProofTests(unittest.TestCase):
             database = mock.Mock()
             database.execute.return_value.fetchone.return_value = value
             with self.subTest(value=value), mock.patch.object(index_proof.sqlite3, 'connect', return_value=database):
-                with self.assertRaisesRegex(ValueError, 'allocator cap'):
+                with self.assertRaisesRegex(ValueError, 'proof_sqlite_bound_unavailable'):
                     index_proof._lexical(self.database, self.references, time.monotonic() + 2)
                 self.assertEqual(database.execute.call_count, 1)
                 self.assertTrue(database.execute.call_args.args[0].startswith('PRAGMA hard_heap_limit='))
+
+    def test_arbitrary_dependency_exception_cannot_supply_a_reason_code_or_private_text(self):
+        secret = 'synthetic-private-dependency-sentinel'
+        error = ValueError(secret)
+        error.code = 'proof_revision_inactive'
+        with mock.patch.object(index_proof, '_run', side_effect=error):
+            answer = self.verify()
+        self.assertEqual(answer, {'lexical': False, 'vector': False, 'reason': 'proof_internal_failure'})
+        self.assertNotIn(secret, json.dumps(answer))
+
+    def test_lexical_child_sanitizes_dependency_exception_fields_and_text(self):
+        payload = {'database': str(self.database), 'references': self.references, 'remaining': 1}
+        error = sqlite3.OperationalError('synthetic-private-sqlite-sentinel')
+        error.code = 'proof_revision_inactive'
+        source = mock.Mock(buffer=io.BytesIO(json.dumps(payload).encode()))
+        output = io.StringIO()
+        with mock.patch.object(index_proof.sys, 'stdin', source), \
+                mock.patch.object(index_proof.sys, 'stdout', output), \
+                mock.patch.object(index_proof, '_lexical', side_effect=error):
+            index_proof._lexical_main()
+        self.assertEqual(json.loads(output.getvalue()),
+                         {'lexical': False, 'vector': False, 'reason': 'proof_internal_failure'})
+
+    def test_observer_protocol_rejects_unregistered_reason_text(self):
+        script = 'print(' + repr(json.dumps({'lexical': False, 'vector': False,
+            'reason': 'synthetic-private-observer-sentinel'})) + ')'
+        with self.assertRaisesRegex(ValueError, '^proof_output_invalid$'):
+            index_proof._run({}, [sys_executable(), '-I', '-c', script], time.monotonic() + 2)
+
+    def test_native_free_observer_reason_contracts(self):
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('Node is optional for observer reason contracts')
+        environment = {key: value for key, value in os.environ.items()
+                       if key not in {'NODE_OPTIONS', 'NODE_PATH', 'BUN_OPTIONS', 'CLAUDE_NOTE_TEST_QMD_SDK'}}
+        child = subprocess.run([node, '--test', str(Path(__file__).with_name('index-proof.test.mjs'))],
+                               capture_output=True, text=True, env=environment, timeout=5)
+        self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
 
     def test_large_text_rows_fail_closed_with_bounded_python_and_native_rss(self):
         self.mutate('UPDATE content SET doc=CAST(zeroblob(?) AS TEXT)', (64 * 1024 * 1024,))

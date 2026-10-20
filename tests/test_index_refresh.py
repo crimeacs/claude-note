@@ -2,9 +2,11 @@
 
 import contextlib
 import fcntl
+import hashlib
 import io
 import json
 import os
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -17,6 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 from claude_note import entry, freshness, index_refresh, mutation, setup_recall
+from claude_note.index_proof import verify as verify_index
 
 
 class IndexRefreshTests(unittest.TestCase):
@@ -110,6 +113,59 @@ class IndexRefreshTests(unittest.TestCase):
         self.assertEqual(result['acknowledged'], {'lexical': 1, 'vector': 0})
         self.assertEqual(self.generations(), (1, 1, 0))
         self.assertIn('first.md', freshness.snapshot(self.vault)['dirty'])
+
+    def test_inactive_or_changed_retained_revision_never_acknowledges_newer_notes(self):
+        for scenario, reason in [('inactive', 'proof_revision_inactive'),
+                                 ('changed', 'proof_revision_mismatch')]:
+            with self.subTest(scenario=scenario):
+                vault = self.root / scenario
+                vault.mkdir()
+                self.configure(vault=vault)
+                self.add_note('retained', vault=vault)
+                index_refresh.finish(self.begin(), lexical_ok=True, vector_ok=True)
+                self.assertFalse(freshness.snapshot(vault)['dirty'])
+                retained_revision = freshness.snapshot(vault)['retained_revisions']['retained.md']['revision']
+                self.add_note('newer', vault=vault)
+                database, _ = index_refresh._paths('')
+                database.parent.mkdir(parents=True, exist_ok=True)
+                with sqlite3.connect(database) as db:
+                    db.executescript('DROP TABLE IF EXISTS documents; DROP TABLE IF EXISTS content; '
+                        'DROP TABLE IF EXISTS documents_fts; '
+                        'CREATE TABLE documents(id INTEGER PRIMARY KEY,collection TEXT,path TEXT,title TEXT,hash TEXT,active INTEGER); '
+                        'CREATE TABLE content(hash TEXT PRIMARY KEY,doc TEXT); '
+                        'CREATE VIRTUAL TABLE documents_fts USING fts5(filepath,title,body);')
+                    for number, (path, entry) in enumerate(freshness.snapshot(vault)['retained_revisions'].items(), 1):
+                        body = (vault / path).read_text()
+                        db.execute('INSERT INTO documents VALUES(?,?,?,?,?,1)',
+                                   (number, 'notes', path, 'Synthetic', entry['revision']))
+                        db.execute('INSERT INTO content VALUES(?,?)', (entry['revision'], body))
+                        db.execute('INSERT INTO documents_fts(rowid,filepath,title,body) VALUES(?,?,?,?)',
+                                   (number, 'notes/' + path, 'Synthetic', body))
+                    if scenario == 'inactive':
+                        (vault / 'retained.md').unlink()
+                        db.execute("UPDATE documents SET active=0 WHERE path='retained.md'")
+                    else:
+                        changed = 'Synthetic edit outside the mutation journal'
+                        changed_revision = hashlib.sha256(changed.encode()).hexdigest()
+                        (vault / 'retained.md').write_text(changed)
+                        db.execute('INSERT INTO content VALUES(?,?)', (changed_revision, changed))
+                        db.execute("UPDATE documents SET hash=? WHERE path='retained.md'", (changed_revision,))
+                        db.execute("UPDATE documents_fts SET body=? WHERE filepath='notes/retained.md'", (changed,))
+                token = self.begin()
+                with mock.patch('claude_note.index_proof.verify', wraps=verify_index) as proof, \
+                        mock.patch.object(setup_recall, 'qmd_sdk', return_value=None):
+                    result = index_refresh.finish(token, lexical_ok=True, vector_ok=True)
+                    replay = index_refresh.finish(token, lexical_ok=True, vector_ok=True)
+                self.assertEqual(proof.call_count, 1)
+                self.assertEqual(len(proof.call_args.kwargs['references']), 2)
+                self.assertEqual(result['acknowledged'], {'lexical': 0, 'vector': 0})
+                self.assertEqual(result['warning'], reason)
+                self.assertTrue(replay['replayed'])
+                self.assertEqual(replay['acknowledged'], result['acknowledged'])
+                self.assertEqual(self.generations(vault), (2, 1, 1))
+                current = freshness.snapshot(vault)
+                self.assertEqual(set(current['dirty']), {'newer.md'})
+                self.assertEqual(current['retained_revisions']['retained.md']['revision'], retained_revision)
 
     def test_expiry_during_proof_has_no_acknowledgement_effect(self):
         token = self.begin()

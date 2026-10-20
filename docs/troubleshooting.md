@@ -10,6 +10,7 @@ Start with `claude-note status --json`, then inspect the failing stage rather th
 | Session notes but no durable knowledge | Synthesis mode, Claude authentication, worker error logs, timeout and model identifier. Capture success is not synthesis success. |
 | QMD results missing | Explicit collection path, `qmd collection list`, `qmd status`, and a shorter keyword query. Rebuild local index with `claude-note index`. |
 | Vector search misses current text | `qmd update` refreshes text; run `qmd embed` for changed/missing vectors. |
+| Refresh succeeds but tracked freshness stays stale | Inspect the saved `index-refresh` lease's fixed proof reason. Captured revisions absent, inactive or changed in the index cannot acknowledge freshness. Preserve the journal and human edits; index completion alone does not reconcile that history. |
 | Repeated synthesis timeout | Inspect context and model latency; `[synthesis].timeout` is honored. Do not hide repeated errors by only increasing it. |
 | Note operation rejected | Markdown extension, vault containment, unsafe symlink/traversal, and operation schema. Inspect returned routing errors. |
 | Similar-topic correction disappeared | Current exact extraction dedup preserves different content; update an older install and inspect historical inbox entries. |
