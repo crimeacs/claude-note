@@ -8,7 +8,7 @@ import {join, dirname} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {createRequire} from 'node:module';
 import {createHash} from 'node:crypto';
-import {prove, capSqliteAllocator} from '../src/claude_note/index_proof.mjs';
+import {prove, capSqliteAllocator, failureReason} from '../src/claude_note/index_proof.mjs';
 
 const sdk = process.env.CLAUDE_NOTE_TEST_QMD_SDK;
 const requireSDK = sdk && createRequire(pathToFileURL(sdk));
@@ -49,9 +49,34 @@ const native = (name, fn) => test(name, {skip: !sdk}, fn);
 
 test('unsupported or invalid SQLite allocator caps fail closed', () => {
   for (const value of [undefined, null, 0, -1, true, '16777216', 16777217, NaN, Infinity]) {
-    assert.throws(() => capSqliteAllocator({pragma: () => value}), /allocator cap/);
+    assert.throws(() => capSqliteAllocator({pragma: () => value}),
+      error => failureReason(error) === 'proof_sqlite_bound_unavailable');
   }
   assert.doesNotThrow(() => capSqliteAllocator({pragma: () => 16777216}));
+});
+
+test('only internally registered proof failures can supply a reason code', () => {
+  let trusted;
+  try { capSqliteAllocator({pragma: () => 0}); } catch (error) { trusted = error; }
+  assert.equal(failureReason(trusted), 'proof_sqlite_bound_unavailable');
+  const secret = 'synthetic-private-exception-sentinel';
+  const forged = Object.create(Object.getPrototypeOf(trusted));
+  forged.code = 'proof_revision_inactive';
+  forged.message = secret;
+  for (const error of [new Error(secret), new Error('proof_revision_inactive'),
+    Object.assign(new Error(secret), {code: 'proof_revision_inactive', name: 'ProofFailure'}),
+    forged, {code: 'proof_revision_inactive', message: secret}, secret, null, undefined]) {
+    assert.equal(failureReason(error), 'proof_internal_failure');
+  }
+});
+
+test('dependency exceptions and invalid input expose only fixed three-field results', async () => {
+  const secret = 'synthetic-private-dependency-sentinel';
+  const dependencyError = Object.assign(new Error(secret), {code: 'proof_revision_inactive'});
+  const answer = await prove({get database() { throw dependencyError; }});
+  assert.deepEqual(answer, {lexical: false, vector: false, reason: 'proof_internal_failure'});
+  assert.equal(JSON.stringify(answer).includes(secret), false);
+  assert.deepEqual(await prove(null), {lexical: false, vector: false, reason: 'proof_request_invalid'});
 });
 
 native('complete vectors prove only captured revisions and leave DB/config bytes unchanged', async t => {
@@ -110,13 +135,19 @@ native('zero and nonfinite actual stored vectors cannot prove completion', async
 });
 
 native('missing FTS, inactive documents, and wrong content hashes deny both stages', async t => {
-  for (const sql of ['DELETE FROM documents_fts', 'UPDATE documents SET active=0',
-                     "UPDATE content SET doc='Different synthetic text'"]) {
+  for (const [sql, reason] of [
+    ['DELETE FROM documents_fts', 'proof_fts_bound'],
+    ['DELETE FROM documents', 'proof_revision_absent'],
+    ['UPDATE documents SET active=0', 'proof_revision_inactive'],
+    ["UPDATE documents SET hash='different'", 'proof_revision_mismatch'],
+    ["UPDATE content SET doc='Different synthetic text'", 'proof_content_hash_mismatch'],
+  ]) {
     const {db, input} = fixture(t);
     db.exec(sql);
     const answer = await prove(input);
     assert.equal(answer.lexical, false);
     assert.equal(answer.vector, false);
+    assert.equal(answer.reason, reason);
   }
 });
 

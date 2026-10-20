@@ -1,5 +1,25 @@
 # Developments
 
+## 2.1.14 — explain rejected index freshness proofs (20 October 2026)
+
+Read-only index proofs now report fixed failure categories instead of one
+generic warning. A captured revision absent, inactive or changed in the index stays
+unacknowledged; successful `qmd update` and `qmd embed` exits do not establish
+that the captured revision remains the active indexed version. Diagnostics contain no source
+paths, note bodies or dependency exception messages. Proof bounds, revision
+checks and the all-or-nothing acknowledgement policy remain unchanged.
+
+This improves diagnosis, not reconciliation. Preserve retained revisions and
+human changes when investigating an external deletion or edit; do not clear
+the journal or prune references to make a freshness check pass.
+
+A separate instrumented public-fixture query reached native runtime loading
+and exhausted its search deadline without observing that operation complete.
+The owned process was reaped with empty process group and closed output pipes.
+The observation narrows the unresolved cold-start boundary to runtime loading,
+which includes module import, backend discovery and initialization. It does
+not identify a native kernel fault or establish production retrieval readiness.
+
 ## 2.1.13 — contain native runtime teardown failures (19 October 2026)
 
 A follow-up public canary after 2.1.12 returned its exact public source but
