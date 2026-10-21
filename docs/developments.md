@@ -1,5 +1,35 @@
 # Developments
 
+## 2.1.15 — share captured transcript prefixes (21 October 2026)
+
+Recovery imports previously persisted a complete immutable transcript for every
+changed revision. Extraction's later append-only checkpoint did not prevent
+those earlier copies, especially while synthesis was unavailable. Large captures
+now use source-scoped, newline-aligned immutable chunks and a versioned manifest.
+Appended revisions reuse unchanged chunks; each revision still reconstructs to
+its exact captured SHA-256. Queue verification streams chunk and full-revision
+hashes rather than assembling every historical transcript in memory.
+
+Extraction citations point to real chunk files and local line numbers, with the
+original source, full revision and original line retained separately. Full-source
+privacy restrictions reach every chunk before queue visibility. Source policies
+are not widened: a native-only grant requiring session metadata can still reject
+a tail chunk, and missing or unresolved origins cannot authorize model delivery.
+
+The new store bounds its aggregate chunks, manifests, source-lineage and import
+publication/queue metadata to 4 GiB. New evidence and metadata writes check for
+512 MiB of remaining filesystem headroom plus their projected allocation. These are cooperative admission checks, not a filesystem reservation.
+Storage failures retain unacknowledged work and immutable partial evidence.
+Existing version-1 snapshots, receipts and historical citations remain readable
+and are not migrated or deleted automatically; installing this repair does not
+reclaim their existing disk usage.
+
+`claude-note worker --capture-only` resumes local capture and session notes
+without synthesis, changing the owner's configuration, or spending pending
+synthesis retries. A slow importer remains owned until it exits; the worker
+does not start another sweep while that thread is alive. Native recall readiness
+and measured learned-memory benefit remain separate open gates.
+
 ## 2.1.14 — explain rejected index freshness proofs (20 October 2026)
 
 Read-only index proofs now report fixed failure categories instead of one

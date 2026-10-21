@@ -29,6 +29,7 @@ from . import version_checker
 
 # Global flag for graceful shutdown
 _shutdown = False
+_capture_only = False
 
 
 def setup_logging(verbose: bool = False) -> logging.Logger:
@@ -105,8 +106,9 @@ def run_synthesis(state: models.SessionState, logger: logging.Logger) -> bool:
 
     Returns True if synthesis succeeded.
     """
-    # Skip if mode is just logging
-    if config.SYNTH_MODE == "log":
+    # Defense in depth: capture-only never reaches indexing or a model even
+    # when this entry point is called independently of the retry dispatcher.
+    if _capture_only or config.SYNTH_MODE == "log":
         return False
 
     # Skip if no transcript
@@ -155,6 +157,22 @@ def run_synthesis(state: models.SessionState, logger: logging.Logger) -> bool:
         return False
 
 
+def _schedule_synthesis(state):
+    if _capture_only:
+        # A completed turn remains durable work; deferral does not consume,
+        # reset or unpark any earlier request's retry state.
+        if config.SYNTH_MODE != "log" and state.transcript_path:
+            state.synthesis_pending = True
+        return
+    session_tracker.schedule_synthesis(state)
+
+
+def _run_pending_synthesis(state, logger):
+    if _capture_only:
+        return None
+    return session_tracker.run_pending_synthesis(state, lambda s: run_synthesis(s, logger))
+
+
 def process_session(session_id: str, events: list, logger: logging.Logger) -> bool:
     """
     Process a single session.
@@ -168,10 +186,19 @@ def process_session(session_id: str, events: list, logger: logging.Logger) -> bo
 
         try:
             previous = session_tracker.load_session_state(session_id)
+            held_retry = ({key: getattr(previous, key) for key in
+                           ("synthesis_attempts", "last_synthesis_attempt_ts", "synthesis_parked", "synthesis_park_reason")}
+                          if _capture_only and previous else None)
             processed = set(previous.processed_event_ids) if previous else set()
             new_events = [event for event in events if event.event_id not in processed]
             # Update session state from events
             state = session_tracker.update_session_from_events(session_id, events)
+            if held_retry is not None:
+                # Capture itself schedules completed turns. Hold the previous
+                # retry history across that update without dropping new work.
+                for key, value in held_retry.items():
+                    setattr(state, key, value)
+                state.synthesis_pending = state.synthesis_pending or previous.synthesis_pending
             # Capture acknowledgement is independent of note/model completion.
             session_tracker.save_session_state(state)
             new_events = [event for event in new_events if event.event_id not in state.filtered_event_ids]
@@ -197,9 +224,9 @@ def process_session(session_id: str, events: list, logger: logging.Logger) -> bo
                     # Queue delivery limits may separate Prompt and Stop. A
                     # note written between them does not consume Stop's request
                     # for synthesis; replayed/filtered Stops are excluded above.
-                    session_tracker.schedule_synthesis(state)
+                    _schedule_synthesis(state)
                     session_tracker.save_session_state(state)
-                session_tracker.run_pending_synthesis(state, lambda s: run_synthesis(s, logger))
+                _run_pending_synthesis(state, logger)
                 logger.debug(f"Session {session_id[:8]}: already written, skipping")
                 return False
 
@@ -213,7 +240,7 @@ def process_session(session_id: str, events: list, logger: logging.Logger) -> bo
             # note write. New events may supersede it; idle polls do not recreate
             # it or resynthesize a pack that already completed into proposals.
             if state.note_pending_path and not new_events:
-                session_tracker.run_pending_synthesis(state, lambda s: run_synthesis(s, logger))
+                _run_pending_synthesis(state, logger)
                 return False
 
             # Write the note
@@ -223,10 +250,10 @@ def process_session(session_id: str, events: list, logger: logging.Logger) -> bo
                 state.note_pending_path = str(conflict.result.staged_path)
                 state.note_pending_revision = conflict.result.revision or ""
                 if immediate:
-                    session_tracker.schedule_synthesis(state)
+                    _schedule_synthesis(state)
                 session_tracker.save_session_state(state)
                 logger.warning("Session note staged for review: %s", conflict.result.staged_path)
-                session_tracker.run_pending_synthesis(state, lambda s: run_synthesis(s, logger))
+                _run_pending_synthesis(state, logger)
                 return False
             state.note_pending_path = ""
             state.note_pending_revision = ""
@@ -234,16 +261,18 @@ def process_session(session_id: str, events: list, logger: logging.Logger) -> bo
 
             # Promote questions on Stop/SessionEnd
             if immediate:
-                count = open_questions.promote_session_questions(state)
+                # Promotion includes a model quality filter; the original
+                # question evidence is already retained in the local note.
+                count = 0 if _capture_only else open_questions.promote_session_questions(state)
                 if count > 0:
                     logger.info(f"Promoted {count} questions to open-questions.md")
 
-                session_tracker.schedule_synthesis(state)
+                _schedule_synthesis(state)
 
             # Mark as written (update state object directly, then save once)
             state.last_write_ts = datetime.utcnow().isoformat() + "Z"
             session_tracker.save_session_state(state)
-            session_tracker.run_pending_synthesis(state, lambda s: run_synthesis(s, logger))
+            _run_pending_synthesis(state, logger)
 
             return True
 
@@ -264,7 +293,10 @@ def poll_once(logger: logging.Logger) -> int:
         if event.session_id not in sessions:
             sessions[event.session_id] = []
         sessions[event.session_id].append(event)
-    for session_id in set(session_tracker.get_pending_synthesis_sessions() + session_tracker.get_sessions_ready_for_write()):
+    ready = set(session_tracker.get_sessions_ready_for_write())
+    if not _capture_only:
+        ready.update(session_tracker.get_pending_synthesis_sessions())
+    for session_id in ready:
         sessions.setdefault(session_id, [])
 
     notes_written = 0
@@ -296,7 +328,18 @@ def use_private_cwd(logger=None):
     return work
 
 
-def run_worker(foreground: bool = False, verbose: bool = False) -> int:
+def run_worker(foreground: bool = False, verbose: bool = False, capture_only: bool = False) -> int:
+    """Run with a process-only synthesis hold; authored settings are unchanged."""
+    global _capture_only
+    previous = _capture_only
+    _capture_only = bool(capture_only)
+    try:
+        return _run_worker(foreground=foreground, verbose=verbose)
+    finally:
+        _capture_only = previous
+
+
+def _run_worker(foreground: bool = False, verbose: bool = False) -> int:
     """
     Run the worker daemon.
 
@@ -306,13 +349,16 @@ def run_worker(foreground: bool = False, verbose: bool = False) -> int:
     """
     logger = setup_logging(verbose=verbose or foreground)
     logger.info("Worker starting")
+    if _capture_only:
+        logger.info("Capture-only: local capture and notes enabled; model work deferred")
     use_private_cwd(logger)
 
     # Check for updates (non-blocking)
-    try:
-        version_checker.check_for_update(logger)
-    except Exception:
-        pass  # Never let version check break worker
+    if not _capture_only:
+        try:
+            version_checker.check_for_update(logger)
+        except Exception:
+            pass  # Never let version check break worker
 
     # Set up signal handlers
     signal.signal(signal.SIGTERM, handle_signal)
@@ -322,14 +368,15 @@ def run_worker(foreground: bool = False, verbose: bool = False) -> int:
     # swept on a background thread so a slow disk never stalls the queue.
     sweeper = None
     sweep_started = 0.0
+    sweep_warned = False
 
     # Main poll loop
     while not _shutdown:
         now = time.time()
         if sweeper is not None and sweeper.is_alive():
-            if now - sweep_started > 600:
-                logger.warning("Import sweep running for >10 min; abandoning it")
-                sweeper = None
+            if now - sweep_started > 600 and not sweep_warned:
+                logger.warning("Import sweep running for >10 min; retaining ownership until it finishes")
+                sweep_warned = True
         elif now - sweep_started >= importers.SWEEP_INTERVAL:
             def _sweep():
                 try:
@@ -340,6 +387,7 @@ def run_worker(foreground: bool = False, verbose: bool = False) -> int:
             sweeper = threading.Thread(target=_sweep, name="import-sweep", daemon=True)
             sweeper.start()
             sweep_started = now
+            sweep_warned = False
 
         try:
             notes_written = poll_once(logger)
@@ -368,9 +416,11 @@ def main() -> int:
     parser.add_argument(
         "--verbose", "-v", action="store_true", help="Enable verbose logging"
     )
+    parser.add_argument("--capture-only", action="store_true",
+                        help="Capture local notes while preserving pending model work")
     args = parser.parse_args()
 
-    return run_worker(foreground=args.foreground, verbose=args.verbose)
+    return run_worker(foreground=args.foreground, verbose=args.verbose, capture_only=args.capture_only)
 
 
 if __name__ == "__main__":

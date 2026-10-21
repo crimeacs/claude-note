@@ -41,6 +41,15 @@ Global application state under `~/.local/share/claude-note/` includes normalized
 
 The session identifier is not interchangeable with a conversation title. Imported IDs include source identity so assistants and punctuation variants cannot collide. Content hashes suppress unchanged imports. Author provenance is separate from assistant provenance and neither constitutes approval.
 
+Large captured revisions use versioned manifests under
+`state/sources/objects/<source-scope>/` and immutable newline-aligned JSONL
+chunks. Each manifest binds the complete reconstructed SHA-256, byte count,
+line count and ordered chunk identities. Revision verification streams all
+bytes; extraction cites real chunk paths and preserves original revision/line
+identity separately. Version-1 complete snapshots remain valid historical
+evidence. No automatic migration or garbage collection removes them. Capture
+and its storage admission do not depend on successful model extraction.
+
 ## Trust and failure boundaries
 
 Model note paths must remain inside the resolved vault, including through symlinks. Only supported Markdown operations are applied. Managed blocks preserve surrounding text. Raw session records, source documents, and curated durable lessons have different roles and sharing rules.

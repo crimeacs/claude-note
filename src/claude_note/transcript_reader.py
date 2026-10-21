@@ -11,6 +11,7 @@ import os
 import re
 import stat
 import tempfile
+from bisect import bisect_right
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional, Union
@@ -714,6 +715,8 @@ def read_transcript_from_state(state, *, full=False) -> TranscriptContent:
         from . import import_publication
         publication, raw = import_publication.read_binding(state)
         content = read_transcript(state.transcript_path, captured_bytes=raw)
+        content._captured_source = publication["snapshot_path"]
+        content._captured_revision = publication["captured_revision"]
         content.context_sources.append(publication["snapshot_path"])
         content.coverage["import_publication"] = publication["publication_id"]
         content.coverage["import_logical_revision"] = publication["logical_revision"]
@@ -762,21 +765,71 @@ def read_transcript_from_state(state, *, full=False) -> TranscriptContent:
 
 def _snapshot(content, raw, start=0):
     """Keep immutable appended evidence without copying every earlier turn."""
-    from . import config
-    from .state_io import create_bytes
+    from . import config, import_publication
     digest = hashlib.sha256(raw).hexdigest()
-    snapshot = config.STATE_DIR / "sources" / (digest + ".jsonl")
-    create_bytes(snapshot, raw)
+    segments = None
+    captured = getattr(content, "_captured_source", "")
+    if (captured and Path(captured).suffix == ".jsonl"
+            and digest == getattr(content, "_captured_revision", "")):
+        # Historical v1 evidence already has real full-file anchors. Reading
+        # it is not permission to allocate or migrate another representation.
+        snapshot = Path(captured)
+    elif content.coverage.get("snapshot_bytes", len(raw)) >= import_publication.CHUNKED_SNAPSHOT_BYTES:
+        from . import egress, source_store
+        scope = import_publication.source_scope(content.source_path)
+        snapshot = source_store.publish(raw, scope=scope)
+        segments = source_store.segments(snapshot, digest, scope=scope)
+        parent = captured
+        if parent:
+            # Reuse the import's frozen controls without reopening its mutable
+            # original. Local evidence remains readable if that original is
+            # later deleted; external delivery still checks its live lineage.
+            protected_source = Path(parent)
+            protected_revision = content._captured_revision
+            if snapshot != protected_source:
+                egress.record_derivation(snapshot, "---\nderivation_sources: " +
+                    json.dumps([parent]) + "\n---\n", vault_root=config.STATE_DIR, budgeted=True)
+        else:
+            protected_source, protected_revision = snapshot, digest
+            egress.capture_restrictions(snapshot,
+                origins=list(dict.fromkeys([content.source_path, *content.context_sources])),
+                captured_text=raw.decode("utf-8"), vault_root=config.STATE_DIR, budgeted=True)
+        if not parent or snapshot != protected_source:
+            try:
+                egress.inherit_capture_restrictions(protected_source,
+                    source_revision=protected_revision,
+                    targets=list(dict.fromkeys((Path(part["path"]), part["revision"]) for part in segments)),
+                    vault_root=config.STATE_DIR)
+            except egress.UnresolvedSourceControls:
+                pass  # Frozen unknown controls deny delivery, not local capture.
+        if str(snapshot) not in content.context_sources:
+            content.context_sources.append(str(snapshot))
+        starts = [part["start_line"] for part in segments]
+    else:
+        snapshot = config.STATE_DIR / "sources" / (digest + ".jsonl")
+        import_publication.store_small_snapshot(snapshot, raw)
     content.snapshot_path = str(snapshot.resolve())
+
+    def locate(line):
+        relative = line - start
+        if segments is None:
+            return content.snapshot_path, digest, relative
+        index = bisect_right(starts, relative) - 1
+        if index < 0 or relative >= starts[index] + segments[index]["lines"]:
+            raise ValueError("Evidence line is outside its captured chunks")
+        part = segments[index]
+        return str(part["path"]), part["revision"], relative - part["start_line"] + 1
+
     for event in content.source_events:
         event.origin_source = event.origin_source or content.source_path
         event.origin_revision = event.origin_revision or content.source_revision
         event.origin_line = event.origin_line or event.line
-        event.source, event.revision, event.line = content.snapshot_path, digest, event.line - start
+        event.source, event.revision, event.line = locate(event.line)
     for tool in content.tool_uses:
         if tool.source_span:
-            line = int(tool.source_span.rsplit("#L", 1)[1].split("@", 1)[0]) - start
-            tool.source_span = f"{content.snapshot_path}#L{line}@{digest}"
+            line = int(tool.source_span.rsplit("#L", 1)[1].split("@", 1)[0])
+            path, revision, local_line = locate(line)
+            tool.source_span = f"{path}#L{local_line}@{revision}"
     content.coverage["evidence_snapshot_revision"] = digest
     content.coverage["evidence_snapshot_bytes"] = len(raw)
     return content

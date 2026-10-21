@@ -105,6 +105,18 @@ fixed safe reasons. Retained revisions absent, inactive or changed in the index
 remain unacknowledged. The patch neither prunes history nor reconciles external
 human edits, and retains the existing proof bounds and acknowledgement policy.
 
+Version 2.1.15 addresses a separate capture-storage defect: recovery importers
+persisted each complete growing transcript before extraction's delta checkpoint.
+Large source revisions now share immutable, source-scoped JSONL chunks. Versioned
+manifests reconstruct exact original bytes, queue preflight streams hashes, and
+citations retain real chunk lines plus the original full-revision identity.
+Every chunk inherits the full captured source's restrictive lineage before
+delivery; this never expands configured source audiences. New-store metadata,
+storage and disk-headroom admission are bounded. Existing evidence and receipts
+remain readable and are not pruned. A capture-only worker mode leaves synthesis
+requests pending without provider calls or retry consumption. These storage
+contracts do not establish cold native readiness or learned-memory benefit.
+
 The original 15-workstream research and A–F deliverables remain broader than
 these implementation contracts. Full task outcomes, each baseline's own learned
 memory across phases, dense-only comparison, evidence × extraction and
