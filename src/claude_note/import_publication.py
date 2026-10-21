@@ -25,6 +25,7 @@ REVISION_KEY = "_import_revision"
 MAX_RAW = 256 * 1024 * 1024
 MAX_RECORD = 1024 * 1024
 MAX_BATCH = 2 * MAX_RECORD
+CHUNKED_SNAPSHOT_BYTES = 256 * 1024
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -52,6 +53,79 @@ def _hash(value):
 
 def _json(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+
+
+def source_scope(transcript_path):
+    """Sharing is confined to one stable original source, never other sessions."""
+    return _hash(str(Path(transcript_path).absolute()).encode())
+
+
+def store_small_snapshot(path, raw):
+    """Retain legacy raw format for small evidence, with new-write headroom."""
+    try:
+        existing = _read(path, MAX_RAW)
+    except FileNotFoundError:
+        from . import source_store
+        with source_store.auxiliary_admission([len(raw)]):
+            state_io.create_bytes(path, raw)
+        return
+    if existing != raw:
+        raise PublicationError("Immutable evidence identity collision or corruption")
+
+
+def _create_metadata(path, body):
+    """Exact replay allocates nothing; new durable delivery metadata is admitted."""
+    try:
+        existing = _read(path, MAX_BATCH)
+    except FileNotFoundError:
+        from . import source_store
+        with source_store.auxiliary_admission([len(body)]):
+            state_io.create_bytes(path, body)
+        return
+    if existing != body:
+        raise PublicationError("Immutable publication metadata differs")
+
+
+def _read_source(record):
+    if record["version"] == 2:
+        from . import source_store
+        try:
+            return source_store.read(Path(record["snapshot_path"]), record["captured_revision"],
+                                     scope=source_scope(record["transcript_path"]))
+        except (OSError, ValueError) as exc:
+            raise PublicationError("Imported evidence missing or changed", record["session_id"]) from exc
+    raw = _read(Path(record["snapshot_path"]), MAX_RAW)
+    if _hash(raw) != record["captured_revision"]:
+        raise PublicationError("Imported evidence missing or changed", record["session_id"])
+    return raw
+
+
+def _verify_source(record):
+    if record["version"] == 2:
+        from . import source_store
+        source_store.verify(Path(record["snapshot_path"]), record["captured_revision"],
+                            scope=source_scope(record["transcript_path"]))
+    else:
+        _read_source(record)
+
+
+def _protect_source(record, *, origins, captured_text):
+    from . import egress
+    path = Path(record["snapshot_path"])
+    egress.capture_restrictions(path, origins=origins, captured_text=captured_text,
+                                vault_root=config.STATE_DIR, budgeted=True)
+    if record["version"] == 2:
+        from . import source_store
+        segments = source_store.segments(path, record["captured_revision"],
+                                         scope=source_scope(record["transcript_path"]))
+        try:
+            egress.inherit_capture_restrictions(path, source_revision=record["captured_revision"],
+                targets=list(dict.fromkeys((Path(part["path"]), part["revision"]) for part in segments)),
+                vault_root=config.STATE_DIR)
+        except egress.UnresolvedSourceControls:
+            # Local capture remains available, but every chunk carries the
+            # unresolved restriction and is denied external delivery.
+            pass
 
 
 def _unique(pairs):
@@ -159,7 +233,7 @@ def _validate(record, publication_id):
     if not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", session):
         session = ""
     expected = {"version", "publication_id", "source", "session_id", "logical_id", "logical_revision", "captured_revision", "normalized", "transcript_path", "snapshot_path", "stream", "ordinal", "events"}
-    if set(record) != expected or type(record.get("version")) is not int or record["version"] != 1:
+    if set(record) != expected or type(record.get("version")) is not int or record["version"] not in (1, 2):
         raise PublicationError("Unsupported publication receipt", session)
     try:
         if record["publication_id"] != publication_id or not isinstance(record["normalized"], bool):
@@ -177,7 +251,11 @@ def _validate(record, publication_id):
             raise ValueError()
         if type(record["ordinal"]) is not int or not 1 <= record["ordinal"] <= 2**53:
             raise ValueError()
-        snapshot = config.STATE_DIR / "sources" / (record["captured_revision"] + ".jsonl")
+        if record["version"] == 2:
+            from . import source_store
+            snapshot = source_store.manifest_path(record["captured_revision"], source_scope(record["transcript_path"]))
+        else:
+            snapshot = config.STATE_DIR / "sources" / (record["captured_revision"] + ".jsonl")
         if record["snapshot_path"] != str(snapshot.absolute()) or not Path(record["transcript_path"]).is_absolute():
             raise ValueError()
         if not isinstance(record["events"], list) or len(record["events"]) != 2:
@@ -206,9 +284,7 @@ def load(publication_id, *, verify_source=True):
     record = _validate(_record(_receipt(publication_id)), publication_id)
     if verify_source:
         try:
-            raw = _read(Path(record["snapshot_path"]), MAX_RAW)
-            if _hash(raw) != record["captured_revision"]:
-                raise ValueError()
+            _verify_source(record)
         except (OSError, ValueError) as exc:
             raise PublicationError("Imported evidence missing or changed", record["session_id"]) from exc
     return record
@@ -284,9 +360,7 @@ def read_binding(state):
     if (declared != binding(record) or record["session_id"] != state.session_id
             or record["transcript_path"] != state.transcript_path):
         raise PublicationError("Session import binding differs from canonical receipt", state.session_id)
-    raw = _read(Path(record["snapshot_path"]), MAX_RAW)
-    if _hash(raw) != record["captured_revision"]:
-        raise PublicationError("Imported evidence missing or changed", state.session_id)
+    raw = _read_source(record)
     return record, raw
 
 
@@ -306,16 +380,14 @@ def protect_existing(source, session_id, logical_id, raw, origin_sources=(), *, 
             record = load(publication_id)
         except FileNotFoundError:
             return False
-        canonical = _read(Path(record["snapshot_path"]), MAX_RAW)
+        canonical = _read_source(record)
         if (not isinstance(raw, bytes) or len(raw) > MAX_RAW or not raw.endswith(b"\n")
                 or not record["normalized"] or (raw != canonical and not _equivalent(canonical, raw))):
             raise PublicationError("Rediscovered import identity/content conflict", session_id)
         origins = sorted({record["transcript_path"], *(str(Path(p).absolute()) for p in origin_sources)})
         if len(origins) > 256 or any(len(p) > 8192 for p in origins):
             raise PublicationError("Import origin closure exceeds bounds")
-        from . import egress
-        egress.capture_restrictions(Path(record["snapshot_path"]), origins=origins,
-                                    captured_text=canonical.decode("utf-8"), vault_root=config.STATE_DIR)
+        _protect_source(record, origins=origins, captured_text=canonical.decode("utf-8"))
         return True
 
 
@@ -345,7 +417,7 @@ def publish(source, session_id, logical_id, transcript_path, raw, cwd, prompt,
             except FileNotFoundError:
                 record = _validate(_record(_intent(publication_id)), publication_id)
             try:
-                existing = _read(Path(record["snapshot_path"]), MAX_RAW)
+                existing = _read_source(record)
             except FileNotFoundError as exc:
                 raise PublicationError("Existing import intent has missing evidence; preserve for recovery", session_id) from exc
             if _hash(existing) != record["captured_revision"]:
@@ -365,10 +437,18 @@ def publish(source, session_id, logical_id, transcript_path, raw, cwd, prompt,
                 ordinal = counter["ordinal"] + 1
             except FileNotFoundError:
                 ordinal = 1
-            state_io.atomic_json(stream_path, {"version": 1, "ordinal": ordinal})
+            from . import source_store
+            with source_store.auxiliary_admission([128]):
+                state_io.atomic_json(stream_path, {"version": 1, "ordinal": ordinal})
             captured = _hash(raw)
-            snapshot = config.STATE_DIR / "sources" / (captured + ".jsonl")
-            state_io.create_bytes(snapshot, raw)
+            if len(raw) >= CHUNKED_SNAPSHOT_BYTES:
+                from . import source_store
+                snapshot = source_store.publish(raw, scope=source_scope(path))
+                version = 2
+            else:
+                snapshot = config.STATE_DIR / "sources" / (captured + ".jsonl")
+                store_small_snapshot(snapshot, raw)
+                version = 1
             now = datetime.utcnow()
             events = []
             for i, kind in enumerate(("UserPromptSubmit", "Stop")):
@@ -379,27 +459,25 @@ def publish(source, session_id, logical_id, transcript_path, raw, cwd, prompt,
                                           (now + timedelta(microseconds=i)).isoformat(timespec="microseconds") + "Z",
                                           kind, session_id, cwd, path, data).validate()
                 events.append(json.loads(event.to_json()))
-            record = {"version": 1, "publication_id": publication_id, "source": source, "session_id": session_id,
+            record = {"version": version, "publication_id": publication_id, "source": source, "session_id": session_id,
                       "logical_id": logical_id, "logical_revision": revision, "captured_revision": captured,
                       "normalized": normalized, "transcript_path": path, "snapshot_path": str(snapshot.absolute()),
                       "stream": stream, "ordinal": ordinal, "events": events}
             _validate(record, publication_id)
         # This immutable intent preserves the first durable timestamps/pair even
         # if protection inspection or queue publication subsequently fails.
-        state_io.create_bytes(_intent(publication_id), _json(record))
-        from . import egress
+        _create_metadata(_intent(publication_id), _json(record))
         # Authored controls + protected lineage become durable before visibility.
         # Current configurable path policy remains live and is never granted here.
-        egress.capture_restrictions(Path(record["snapshot_path"]), origins=origins,
-                                    captured_text=text, vault_root=config.STATE_DIR)
-        state_io.create_bytes(receipt_path, _json(record))
+        _protect_source(record, origins=origins, captured_text=text)
+        _create_metadata(receipt_path, _json(record))
         from .session_tracker import load_session_state
         state = load_session_state(session_id)
         ids = tuple(event["event_id"] for event in record["events"])
         captured = bool(state and all(event_id in state.processed_event_ids for event_id in ids))
         visible = queue_path.exists()
         if not captured or visible:
-            state_io.create_bytes(queue_path, _batch_bytes(record))
+            _create_metadata(queue_path, _batch_bytes(record))
         return PublicationResult(publication_id, "captured" if captured else "replayed" if visible else "published",
                                  Path(record["snapshot_path"]), record["captured_revision"], revision,
                                  queue_path, ids, record["ordinal"])

@@ -7,6 +7,7 @@ Start with `claude-note status --json`, then inspect the failing stage rather th
 | Configuration missing | Set `vault_root` in the XDG config or `CLAUDE_NOTE_VAULT`. JSON health still works before setup. |
 | No queued hook events | Installed executable path, host hook support and trust, hook JSON, and a controlled event. Recovery imports are separate. |
 | Import sweep stale or failed | Worker service, `import-sweep.ok`, and last sweep errors. Run `claude-note import` to inspect supported sources. |
+| Growing sessions fill the disk with captured sources | Include `{vault}/.claude-note/state/sources` in the size inventory. Upgrade to 2.1.15 for shared transcript chunks and storage admission bounds. Extraction deltas alone do not fix publication copies. Preserve old evidence; logical size is not allocated APFS usage. |
 | Session notes but no durable knowledge | Synthesis mode, Claude authentication, worker error logs, timeout and model identifier. Capture success is not synthesis success. |
 | QMD results missing | Explicit collection path, `qmd collection list`, `qmd status`, and a shorter keyword query. Rebuild local index with `claude-note index`. |
 | Vector search misses current text | `qmd update` refreshes text; run `qmd embed` for changed/missing vectors. |
@@ -30,5 +31,21 @@ claude-note clean --all           # preview, no mutation
 ```
 
 `drain` writes pending work and has no dry-run flag. `clean` previews unless `--execute` is passed. Before a destructive manual reset, preserve queues, notes, receipts, and source evidence. Deleting state can create replay and duplicate-sharing work.
+
+When the capture worker was deliberately stopped after disk exhaustion, upgrade
+the existing checkout with `scripts/install-from-checkout.sh` without
+`--non-interactive`; the latter also sets up and starts a missing worker. Verify
+the installed storage path with public fixtures before resuming capture. Use
+`claude-note worker --capture-only` when synthesis must remain disabled; queued
+synthesis requests remain pending without consuming retries. This flag is local
+to the worker process and does not rewrite the synthesis configuration.
+
+New large-source manifests and chunks live under
+`{vault}/.claude-note/state/sources/objects/`. The bounded new store excludes
+legacy raw snapshots from its budget; it preserves them rather than making a
+retention decision. Exact replay remains readable under low disk space. A
+budget/headroom error does not prove capture, extraction or indexing succeeded.
+Choose any historical archival or retention action explicitly after checking
+its references and recoverability; there is no automatic source garbage collection.
 
 Secret-pattern redaction does not classify confidential prose. Hook configuration does not prove exercised capture. Local push success does not prove external shared merge. These distinctions are operational checks, not interchangeable success indicators.

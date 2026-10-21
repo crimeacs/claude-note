@@ -38,7 +38,8 @@ def cmd_enqueue(args) -> int:
 
 def cmd_worker(args) -> int:
     """Handle worker command."""
-    return worker_module.run_worker(foreground=args.foreground, verbose=args.verbose)
+    return worker_module.run_worker(foreground=args.foreground, verbose=args.verbose,
+                                    capture_only=getattr(args, "capture_only", False))
 
 
 def cmd_drain(args) -> int:
@@ -551,6 +552,8 @@ def main() -> int:
     worker_parser.add_argument(
         "--verbose", "-v", action="store_true", help="Verbose logging"
     )
+    worker_parser.add_argument("--capture-only", action="store_true",
+                               help="Capture local notes while preserving pending model work")
     worker_parser.set_defaults(func=cmd_worker)
 
     # drain command
