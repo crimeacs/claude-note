@@ -115,6 +115,43 @@ class RecallTests(unittest.TestCase):
                 self.assertEqual(result.status, "miss")
                 runner.assert_called()
 
+    def test_subject_free_acknowledgements_skip_both_engines_and_context_injection(self):
+        for prompt in ("yes", "NO.", "okay", "Thanks!", "thank you", "yes please", "no, thanks",
+                       "Okay, thank you.", "sure", "yep!", "nope"):
+            with self.subTest(prompt=prompt), mock.patch.object(recall, "server_post") as post:
+                runner = mock.Mock(return_value=[item("qmd://notes/yes.md", "Unrelated yes note")])
+                result = recall.recall(prompt, settings(engine="auto"), runner)
+                self.assertEqual(result.status, "skipped")
+                self.assertIn("no retrieval subject", result.reason)
+                self.assertEqual(recall.format_context(result), "")
+                runner.assert_not_called()
+                post.assert_not_called()
+
+    def test_acknowledgement_words_do_not_hide_a_short_subject_or_explicit_query(self):
+        for prompt in ("yes hooks", "no authentication", "okay OAuth", "THANKYOU_ERROR", "codex hooks"):
+            with self.subTest(prompt=prompt):
+                runner = mock.Mock(return_value=[])
+                result = recall.recall(prompt, settings(), runner)
+                self.assertEqual(result.status, "miss")
+                runner.assert_called()
+        runner = mock.Mock(return_value=[])
+        result = recall.recall("yes", settings(), runner, extra_rungs=[["codex", "hooks"]])
+        self.assertEqual(result.status, "miss")
+        runner.assert_called()
+
+    def test_actual_hook_entrypoint_stays_quiet_for_acknowledgements(self):
+        for prompt in ("yes", "no", "okay", "thanks"):
+            output = io.StringIO()
+            payload = {"hook_event_name": "UserPromptSubmit", "prompt": prompt}
+            with self.subTest(prompt=prompt), \
+                    mock.patch.object(recall.Settings, "load", return_value=settings(engine="auto")), \
+                    mock.patch.object(recall, "server_post") as post, \
+                    mock.patch.object(recall, "memory_md_warning", return_value=""), \
+                    mock.patch("sys.stdout", output):
+                self.assertEqual(recall.hook_main(io.StringIO(json.dumps(payload))), 0)
+            self.assertEqual(output.getvalue(), "")
+            post.assert_not_called()
+
     def test_cli_search_preserves_time_for_actual_source_verification(self):
         # Every rung is slow, but returns a real source. Searching until the
         # whole deadline would erase every result during source preparation.

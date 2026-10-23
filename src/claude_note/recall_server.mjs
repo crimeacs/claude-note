@@ -108,20 +108,24 @@ function openReadOnly({ dbPath, sqliteModule, version }) {
 export function scopedLexical(db, query, collections, limit) {
   const match = literalFTS(query);
   if (!match) return [];
-  const filter = collections.length ? `AND collection IN (${collections.map(() => '?').join(',')})` : '';
-  // Materialize allowed IDs before rank/limit. This deliberately avoids QMD
-  // 2.8.3's global limit*10 CTE, which can starve a small requested collection.
-  const sql = `WITH allowed AS MATERIALIZED (
-      SELECT id FROM documents WHERE active=1 ${filter}
-    ), matches AS MATERIALIZED (
+  const filter = collections.length ? `AND d.collection IN (${collections.map(() => '?').join(',')})` : '';
+  // FTS must find matching rowids before scope filtering. Combining MATCH with
+  // rowid IN(all allowed documents) makes FTS5 repeat a rowid-constrained MATCH
+  // for every allowed document, even when rare terms should miss immediately.
+  // Scope still precedes LIMIT, so small collections cannot be starved by a
+  // global candidate cap. Fetch bodies only after the final scoped rank limit.
+  const sql = `WITH fts_matches AS MATERIALIZED (
       SELECT rowid, bm25(documents_fts,1.5,4.0,1.0) AS rank FROM documents_fts
-      WHERE documents_fts MATCH ? AND rowid IN (SELECT id FROM allowed)
-      ORDER BY rank ASC, rowid ASC LIMIT ?
+      WHERE documents_fts MATCH ?
+    ), matches AS MATERIALIZED (
+      SELECT fm.rowid, fm.rank FROM fts_matches fm JOIN documents d ON d.id=fm.rowid
+      WHERE d.active=1 ${filter}
+      ORDER BY fm.rank ASC, fm.rowid ASC LIMIT ?
     ) SELECT 'qmd://' || d.collection || '/' || d.path AS filepath, d.title, d.hash,
       content.doc AS body, matches.rank FROM matches
       JOIN documents d ON d.id=matches.rowid JOIN content ON content.hash=d.hash
       ORDER BY matches.rank ASC, d.collection ASC, d.path ASC`;
-  return db.prepare(sql).all(...collections, match, limit).map(row => ({ ...row,
+  return db.prepare(sql).all(match, ...collections, limit).map(row => ({ ...row,
     score: Math.abs(row.rank) / (1 + Math.abs(row.rank)) }));
 }
 

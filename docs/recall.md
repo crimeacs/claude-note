@@ -64,9 +64,10 @@ a measured miss on a 15,000-note index.
    note beat a wide one with the right note. Notes that several rungs agree on rank first.
 5. **Noise is skipped.** Session transcripts and the inbox dominate the index by count and their
    snippets are frontmatter. When a match landed in frontmatter, the note's first prose is shown.
-6. **The newest update wins the snippet.** Notes that grow by appended managed blocks keep their
-   current truth at the bottom, while BM25 serves the snippet from wherever it matched (usually the
-   oldest text). Recall shows the newest dated block and says how much history is behind it.
+6. **Deliver the matching source passage.** Recall selects evidence from the source revision and
+   keeps its line coordinates. A later appended block about another subject cannot replace the
+   passage that matched; equal matches favor the later passage. Open the full note and check
+   whether newer evidence changes its applicability before relying on it.
 7. **Agent memories get reserved slots.** Short, hand-written memories (Claude Code's
    `~/.claude/projects/*/memory/*.md`) rank low in BM25 against long notes, yet are the
    highest-signal entries. `memory_collections` are searched separately and placed first.
@@ -74,7 +75,7 @@ a measured miss on a 15,000-note index.
    never ran; agents read the silence as "nothing is known" and stop looking.
 9. **It fails open, on a deadline.** Each search has a wall-clock `timeout`, the whole recall a
    `budget`, and every failure path returns normally. Harness events (task notifications), slash
-   commands and subject-free follow-ups such as "fix it" are not searched. Specific short
+   commands, acknowledgements and subject-free follow-ups such as "fix it" are not searched. Specific short
    subjects remain searchable. Search leaves time for source verification, and automatic mode
    reserves a CLI fallback slice before calling the server. Incomplete coverage is reported as
    partial or unavailable instead of an ordinary no-match result.

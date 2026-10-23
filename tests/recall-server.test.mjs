@@ -240,6 +240,29 @@ test('QMD2.8.3 scoped worker retrieves past more than ten times global distracto
   } finally { worker.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('scoped lexical misses use one FTS MATCH scan instead of probing every active rowid', { skip: !process.env.CLAUDE_NOTE_TEST_SQLITE }, () => {
+  const Database = createRequire(import.meta.url)(process.env.CLAUDE_NOTE_TEST_SQLITE), db = new Database(':memory:');
+  try {
+    db.exec(`CREATE TABLE documents(id INTEGER PRIMARY KEY,collection TEXT,path TEXT,title TEXT,hash TEXT,active INTEGER);
+      CREATE TABLE content(hash TEXT PRIMARY KEY,doc TEXT);
+      CREATE VIRTUAL TABLE documents_fts USING fts5(filepath,title,body);`);
+    for (const [id, collection, active] of [[1, 'private', 1], [2, 'public', 0], [3, 'public', 1]]) {
+      db.prepare('INSERT INTO documents VALUES(?,?,?,?,?,?)').run(id, collection, `${id}.md`, 'Fixture', `${id}`, active);
+      db.prepare('INSERT INTO content VALUES(?,?)').run(`${id}`, 'saved knowledge hooks');
+      db.prepare('INSERT INTO documents_fts(rowid,filepath,title,body) VALUES(?,?,?,?)').run(id, `${collection}/${id}.md`, 'Fixture', 'saved knowledge hooks');
+    }
+    let sql;
+    const adapter = { prepare(statement) { sql = statement; return db.prepare(statement); } };
+    assert.deepEqual(scopedLexical(adapter, 'absentrareword', ['public'], 1), []);
+    const plan = db.prepare('EXPLAIN QUERY PLAN ' + sql).all('"absentrareword"*', 'public', 1);
+    const fts = plan.filter(row => /documents_fts VIRTUAL TABLE/.test(row.detail));
+    assert.equal(fts.length, 1); assert.match(fts[0].detail, /INDEX \d+:M\d+/);
+    assert.doesNotMatch(fts[0].detail, /INDEX \d+:.*=/); // '=' encodes a rowid-constrained FTS probe.
+    assert.deepEqual(scopedLexical(db, 'hooks', ['public'], 1).map(row => row.filepath), ['qmd://public/3.md']);
+    assert.deepEqual(scopedLexical(db, 'hooks', ['public', 'private'], 3).map(row => row.filepath).sort(), ['qmd://private/1.md', 'qmd://public/3.md']);
+  } finally { db.close(); }
+});
+
 test('metadata cache: real SQLite snapshots reuse scans and invalidate external document/vector commits', { skip: !process.env.CLAUDE_NOTE_TEST_SQLITE }, () => {
   const Database = createRequire(import.meta.url)(process.env.CLAUDE_NOTE_TEST_SQLITE);
   const dir = mkdtempSync(join(tmpdir(), 'claude-note-metadata-cache-')), dbPath = join(dir, 'fixture.sqlite');

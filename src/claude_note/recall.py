@@ -209,6 +209,9 @@ WRAPPER_TAG = re.compile(r"</?[A-Za-z_][\w-]*(?:\s[^<>]*)?>")
 UNRESOLVED_FOLLOWUP = re.compile(
     r"^(?:please\s+)?(?:fix|repair|check|handle|do)\s+(?:it|this|that)"
     r"(?:\s+please)?[.!?]*$", re.IGNORECASE)
+SUBJECT_FREE_ACKNOWLEDGEMENT = re.compile(
+    r"^(?:(?:yes|no|yep|nope|ok|okay|sure)(?:[\s,]+(?:please|thanks|thank\s+you))?"
+    r"|thanks|thank\s+you)[.!?]*$", re.IGNORECASE)
 
 
 def content_terms(text: str, max_terms: int = 10) -> list[str]:
@@ -1173,7 +1176,8 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
     if not prompt or re.match(r"^/[A-Za-z][\w-]*(?:\s|$)", prompt):
         result.reason = "prompt too short or a slash command"
         return
-    if not extra_rungs and UNRESOLVED_FOLLOWUP.fullmatch(prompt):
+    if not extra_rungs and (UNRESOLVED_FOLLOWUP.fullmatch(prompt) or
+                            SUBJECT_FREE_ACKNOWLEDGEMENT.fullmatch(prompt)):
         result.reason = "follow-up has no retrieval subject; use the preceding conversation"
         return
     # Bound lexical CPU as well as semantic input. Huge wrappers cannot consume
