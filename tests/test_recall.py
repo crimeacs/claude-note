@@ -502,7 +502,7 @@ class ServerEngineTests(unittest.TestCase):
                 result = recall.recall(prompt, settings(engine="auto"), runner)
         self.assertEqual(result.status, "hit")
         self.assertEqual(result.attempted_engines, ["server", "cli"])
-        self.assertEqual(queries[0], "design everyday")
+        self.assertEqual(queries[:2], ["knowdge everyday", "design everyday"])
         self.assertEqual(result.hits[0].revision_kind, "source_file_sha256")
         self.assertEqual(result.reason, "")
         self.assertEqual(result.coverage["search"], "transport_error")
@@ -512,7 +512,7 @@ class ServerEngineTests(unittest.TestCase):
 
     def test_timed_out_server_leaves_two_normal_cli_attempts_and_source_time(self):
         release = threading.Event()
-        prompt = "test design everyday knowdge things"
+        prompt = "test knowdge design everyday things"
         body = "The Design of Everyday Things explains how visible affordances and feedback make actions understandable."
         queries, completed = [], []
         document_terms = {word.casefold() for word in recall.content_terms(body)}
@@ -533,7 +533,7 @@ class ServerEngineTests(unittest.TestCase):
                     result = recall.recall(prompt, settings(engine="auto", timeout=6, budget=.8), runner)
                 self.assertLess(time.monotonic() - started, .95)
             self.assertEqual(result.status, "hit")
-            self.assertEqual(queries[:2], ["design knowdge", "design everyday"])
+            self.assertEqual(queries[:2], ["knowdge everyday", "design everyday"])
             self.assertIn("design everyday", completed)
             self.assertEqual(result.hits[0].revision_kind, "source_file_sha256")
             self.assertTrue(result.coverage["partial"])
@@ -541,6 +541,35 @@ class ServerEngineTests(unittest.TestCase):
         finally:
             release.set()
             time.sleep(.1)  # release the final deliberately late CLI fixture
+
+    def test_fallback_protects_original_narrow_query_when_complementary_pairs_miss(self):
+        release = threading.Event()
+        body = "Knowledge of everyday interactions makes familiar controls and feedback easier to understand."
+        document_terms = {word.casefold() for word in recall.content_terms(body)}
+        queries = []
+        def runner(cmd, timeout):
+            query = cmd[cmd.index("search") + 1]
+            queries.append(query)
+            time.sleep(.09)
+            return [item("qmd://notes/knowledge.md", "Everyday knowledge", body)] \
+                if set(query.casefold().split()) <= document_terms else []
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "knowledge.md"
+                path.write_text(body)
+                with mock.patch.object(recall, "server_post", side_effect=lambda *_: release.wait(2)), \
+                        mock.patch.object(recall, "local_path", return_value=path):
+                    started = time.monotonic()
+                    result = recall.recall("knowledge desgn everyday", settings(
+                        engine="auto", timeout=6, budget=.8), runner)
+                self.assertLess(time.monotonic() - started, .95)
+            self.assertEqual(queries[:3], ["knowledge everyday", "desgn everyday", "knowledge desgn"])
+            self.assertEqual(result.status, "hit")
+            self.assertEqual(result.hits[0].revision_kind, "source_file_sha256")
+            self.assertTrue(result.coverage["partial"])
+        finally:
+            release.set()
+            time.sleep(.1)
 
     def test_fallback_scheduling_preserves_original_rung_ranking(self):
         calls = []

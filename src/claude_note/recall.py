@@ -1273,10 +1273,10 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
         result.reason = ""
         scheduled_rungs = list(enumerate(cli_rungs))
         if result.attempted_engines == ["server"] and len(ladder) > 1:
-            # Try complementary narrow queries before repeating rungs that may
-            # all contain one typo. Keep original indices for stable ranking.
+            # Protect the original narrow query, then try complementary pairs
+            # before broader rungs. Keep original indices for stable ranking.
             narrow = len(ladder) - 1
-            preferred = [*range(len(ladder), len(ladder) + len(pairs)), narrow]
+            preferred = [narrow, *range(len(ladder), len(ladder) + len(pairs))]
             scheduled_rungs = [*(scheduled_rungs[i] for i in preferred),
                                *(entry for entry in scheduled_rungs if entry[0] not in preferred)]
         calls = [(scope, is_memory, rung_i, rung) for scope, is_memory in scopes
