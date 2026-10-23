@@ -41,6 +41,8 @@ synthesis requests remain pending without consuming retries. This flag is local
 to the worker process and does not rewrite the synthesis configuration.
 
 Capture-only polls at least 15 seconds apart and retains delivery journals.
+It prefers recent dated journals so recovery history cannot fill the delivery
+budget before today's prompts are considered.
 Recovery imports run in a separate supervised process: 30-second deadline,
 256 MiB RSS stop threshold, and a 6 GiB disk reserve. These are periodic checks,
 not an operating-system memory cap or disk reservation. The small automatic

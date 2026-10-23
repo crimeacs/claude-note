@@ -137,7 +137,8 @@ def read_all_events() -> Iterator[models.QueuedEvent]:
         yield from read_events(queue_file)
 
 
-def read_pending_events(limit: int = 10000, *, max_bytes: int = MAX_PENDING_BYTES) -> Iterator[models.QueuedEvent]:
+def read_pending_events(limit: int = 10000, *, max_bytes: int = MAX_PENDING_BYTES,
+                        recent_first: bool = False) -> Iterator[models.QueuedEvent]:
     """Advance append-journal offsets only past durably captured session events.
 
     Delivery itself does not acknowledge a record. Prefix digests detect edits
@@ -153,11 +154,17 @@ def read_pending_events(limit: int = 10000, *, max_bytes: int = MAX_PENDING_BYTE
     record so a valid event can always make progress in an empty delivery.
     This bounds the returned payload, not Python object overhead or the memory
     needed to verify retained import metadata and source evidence.
+
+    Capture-only callers may prioritize newest daily journals before historical
+    journals/import deliveries. This changes delivery order only: every visible
+    import still participates in the same metadata and per-session source checks.
     """
     if type(limit) is not int or limit < 0:
         raise ValueError("Pending event count limit must be a nonnegative integer")
     if type(max_bytes) is not int or max_bytes < MAX_EVENT_BYTES:
         raise ValueError("Pending byte budget must fit one maximum-size event")
+    if type(recent_first) is not bool:
+        raise ValueError("Pending delivery priority must be a boolean")
     if not limit:
         return
     from .session_tracker import load_session_state
@@ -217,7 +224,12 @@ def read_pending_events(limit: int = 10000, *, max_bytes: int = MAX_PENDING_BYTE
         verified_sessions.add(session_id)
         return True
 
-    for path in paths:
+    delivery_paths = paths
+    if recent_first:
+        delivery_paths = sorted((path for path in paths if not import_publication.is_batch(path)), reverse=True)
+        delivery_paths.extend(path for path in paths if import_publication.is_batch(path))
+
+    for path in delivery_paths:
         if import_publication.is_batch(path):
             record = batches.get(path)
             if not record or record["session_id"] in blocked_sessions:

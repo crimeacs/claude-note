@@ -1,5 +1,13 @@
 # Developments
 
+## 2.1.23 — capture recent prompts ahead of recovery history (23 October 2026)
+
+The bounded delivery budget could fill with old recovery events before today's
+hook journal was opened. Capture-only polls now prefer recent dated journals;
+normal/manual delivery retains chronological order. All visible import metadata
+and each affected session's historical source evidence still pass the same
+checks. Older records remain queued and unacknowledged until captured.
+
 ## 2.1.22 — keep capture within its working resources (23 October 2026)
 
 Retention previously loaded and split an entire old journal every poll. A

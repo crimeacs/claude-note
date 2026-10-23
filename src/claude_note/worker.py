@@ -291,7 +291,9 @@ def poll_once(logger: logging.Logger) -> int:
     """
     # Group events by session
     sessions: dict[str, list] = {}
-    for event in queue_manager.read_pending_events():
+    pending = (queue_manager.read_pending_events(recent_first=True) if _capture_only
+               else queue_manager.read_pending_events())
+    for event in pending:
         if event.session_id not in sessions:
             sessions[event.session_id] = []
         sessions[event.session_id].append(event)
