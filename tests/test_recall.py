@@ -857,3 +857,49 @@ class ServerIndexTests(unittest.TestCase):
 
     def test_explicit_server_engine_is_honoured(self):
         self.assertTrue(self._run("cn-demo2", "server"))
+
+
+class SqliteFallbackTests(unittest.TestCase):
+    def test_default_auto_fallback_verifies_source_without_starting_a_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "book.md"
+            path.write_text("Design of everyday things: visible actions, feedback and recoverable errors.\n")
+            batch = {"complete": True, "reason": "", "calls": [
+                (None, False, 2, [item("qmd://notes/book.md", "Design of everyday things", "")])]}
+            with mock.patch.object(recall, "server_post", return_value={"error": "transport_error"}), \
+                    mock.patch("claude_note.recall_lexical.search_batch", return_value=batch) as search, \
+                    mock.patch.object(recall, "local_path", return_value=path), \
+                    mock.patch.object(recall, "_process") as run:
+                result = recall.recall("knowledge design everyday", settings(engine="auto"))
+            self.assertEqual(result.status, "hit")
+            self.assertEqual(result.engine, "sqlite")
+            self.assertEqual(result.attempted_engines, ["server", "sqlite"])
+            self.assertEqual(result.hits[0].revision_kind, "source_file_sha256")
+            self.assertEqual(result.coverage["lexical"], "complete_sqlite_scoped_before_limit")
+            self.assertTrue(result.coverage["partial"])
+            self.assertEqual(search.call_count, 1)
+            self.assertLessEqual(search.call_args.args[4] - time.monotonic(), 2.0)
+            run.assert_not_called()
+
+    def test_missing_sqlite_adapter_keeps_real_cli_compatibility_fallback(self):
+        with mock.patch.object(recall, "server_post", return_value={"error": "transport_error"}), \
+                mock.patch("claude_note.recall_lexical.search_batch", return_value=None), \
+                mock.patch.object(recall, "_process", return_value=(0, '[]')) as run:
+            result = recall.recall("design everyday things", settings(engine="auto"))
+        self.assertEqual(result.engine, "cli")
+        self.assertEqual(result.attempted_engines, ["server", "sqlite", "cli"])
+        self.assertEqual(result.status, "unavailable")
+        self.assertIn("semantic search unavailable", result.reason)
+        self.assertTrue(run.called)
+
+    def test_partial_sqlite_miss_is_unavailable_within_original_budget(self):
+        batch = {"complete": False, "reason": "deadline", "calls": []}
+        with mock.patch.object(recall, "server_post", return_value={"error": "transport_error"}), \
+                mock.patch("claude_note.recall_lexical.search_batch", return_value=batch), \
+                mock.patch.object(recall, "_process") as run:
+            result = recall.recall("design everyday things", settings(engine="auto"))
+        self.assertEqual(result.status, "unavailable")
+        self.assertEqual(result.engine, "sqlite")
+        self.assertIn("SQLite keyword", result.reason)
+        self.assertTrue(result.coverage["partial"])
+        run.assert_not_called()

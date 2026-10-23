@@ -79,7 +79,7 @@ a measured miss on a 15,000-note index.
    `budget`, and every failure path returns normally. Harness events (task notifications), slash
    commands, acknowledgements and subject-free follow-ups such as "fix it" are not searched. Specific short
    subjects remain searchable. Search leaves time for source verification, and automatic mode
-   reserves a CLI fallback slice before calling the server. Incomplete coverage is reported as
+   reserves a keyword fallback slice before calling the server. Incomplete coverage is reported as
    partial or unavailable instead of an ordinary no-match result.
 
 Optional: `rerank_command` receives `{"request": …, "candidates": [{"id", "title", "excerpt", "uri"}]}`
@@ -97,12 +97,22 @@ Transport diagnostics contain no prompt, URL, response body or exception message
 The existing local log still contains query terms and note URIs.
 
 After a search attempt, `engine` identifies its last attempted route: a strict server failure is
-labelled `server`; automatic fallback records both attempts and switches to
-`cli` when a CLI search is scheduled. An empty `attempted_engines` means no
+labelled `server`; automatic fallback records each attempted adapter and switches to
+`sqlite` for the read-only keyword adapter, or `cli` for the compatibility adapter.
+An empty `attempted_engines` means no
 search was attempted; `engine` then retains its legacy `cli` default.
 Successful keyword fallback clears the earlier server error from its result reason,
 while retaining the transport receipt and partial semantic coverage. A keyword miss
 while semantic search is unavailable reports `unavailable`, rather than a complete miss.
+
+Automatic fallback batches the literal query rungs and collection scopes in one
+read-only connection to the existing QMD keyword index. It validates the pinned schema,
+honors named indices and `INDEX_PATH`, bounds SQLite work to the remaining search
+slice, and returns metadata only. The normal source-reading path still verifies the
+actual file and selects its evidence passage. Unsupported or unavailable databases
+retain the QMD CLI compatibility path. Explicit `cli` mode and supplied custom runners
+keep their existing routing. This fallback loads no models, changes no index, and
+avoids paying CLI startup time for every query while the semantic service restarts.
 
 The parent runtime proxy correlates its internal job ID with a valid random client ID.
 It records bounded phase events before potentially blocking work: lexical SQL, passage
@@ -112,7 +122,7 @@ phase durations and numeric row/character counters before retirement. These diag
 contain no prompt, source paths, SQL or vector contents. A last phase narrows the location
 of a stall; it does not establish its cause or prove native cancellation.
 A search's adapter subdeadline can expire before the whole eight-second
-recall budget. Automatic mode shortens the server slice to leave time for a CLI search and
+recall budget. Automatic mode shortens the server slice to leave time for keyword search and
 source verification; `timeout` remains an upper bound. Read-capacity exhaustion is distinguished in the call outcome;
 the legacy overall `deadline_exhausted` flag also covers that bounded-read failure.
 

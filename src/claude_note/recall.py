@@ -1175,6 +1175,19 @@ def _server_attempt(result: Result, route: str, deadline: float, call):
         entry["elapsed_ms"] = int((time.monotonic() - started) * 1000)
 
 
+def _pool_keyword_rows(pool, rows, rung_i, is_memory, limit):
+    for pos, item in enumerate(rows[:max(1, limit)]):
+        if not isinstance(item, dict):
+            continue
+        uri = item.get("file") or item.get("path")
+        if not isinstance(uri, str) or not uri:
+            continue
+        candidate = pool.setdefault(uri, {"item": item, "votes": 0, "best": 1e9, "memory": False})
+        candidate["votes"] += 1
+        candidate["best"] = min(candidate["best"], pos + 3 * rung_i)
+        candidate["memory"] |= is_memory
+
+
 def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs):
     deadline = started + max(0, settings.budget)
     if not settings.enabled:
@@ -1253,6 +1266,45 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
             return
         else:
             server_failed = True
+    pairs = complementary_pairs(ladder)
+    cli_rungs = [*ladder, *pairs]
+    if settings.single_term_fallback and ladder:
+        cli_rungs += [[word] for word in ladder[-1][:2] if [word] not in cli_rungs]
+    scheduled_rungs = list(enumerate(cli_rungs))
+    if "server" in result.attempted_engines and len(ladder) > 1:
+        narrow = len(ladder) - 1
+        preferred = [narrow, *range(len(ladder), len(ladder) + len(pairs))]
+        scheduled_rungs = [*(scheduled_rungs[i] for i in preferred),
+                           *(entry for entry in scheduled_rungs if entry[0] not in preferred)]
+    if not ran and ladder and settings.engine == "auto" and runner is _run_qmd:
+        # A cold vector scan can spend the server slice and restart its owner.
+        # Read the same keyword index in one bounded, read-only connection;
+        # spawning a QMD CLI for every rung can exhaust the remaining slice.
+        from .recall_lexical import search_batch
+        result.engine = "sqlite"
+        result.attempted_engines.append("sqlite")
+        sqlite_deadline = min(search_deadline - .03, time.monotonic() + 2.0)
+        try:
+            batch = _bounded(lambda: search_batch(
+                [(i, " ".join(rung)) for i, rung in scheduled_rungs], settings.collections,
+                settings.memory_collections, settings.index, sqlite_deadline,
+                settings.search_n), min(search_deadline, sqlite_deadline + .02))
+        except Exception:
+            batch = None
+        if batch is not None:
+            ran = True
+            cli_partial = not batch["complete"]
+            result.reason = ""
+            if not cli_partial:
+                lexical_coverage = "complete_sqlite_scoped_before_limit"
+            elif batch.get("reason") == "deadline":
+                lexical_coverage = "partial_sqlite_deadline"
+            else:
+                lexical_coverage = "partial_sqlite_failure"
+            result.coverage.update(lexical=lexical_coverage,
+                                   semantic="unavailable_sqlite", partial=server_failed or cli_partial)
+            for _scope, is_memory, rung_i, rows in batch["calls"]:
+                _pool_keyword_rows(pool, rows, rung_i, is_memory, settings.search_n)
     if not ran:
         exe = _bounded(lambda: qmd_executable(settings), deadline)
         if not exe:
@@ -1260,10 +1312,6 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
             return
         base = [exe] + (["--index", settings.index] if settings.index else [])
         scopes = [(c, c in settings.memory_collections) for c in dict.fromkeys(settings.collections + settings.memory_collections)] if settings.collections else [(None, False)] + [(c, True) for c in settings.memory_collections]
-        pairs = complementary_pairs(ladder)
-        cli_rungs = [*ladder, *pairs]
-        if settings.single_term_fallback and ladder:
-            cli_rungs += [[word] for word in ladder[-1][:2] if [word] not in cli_rungs]
         result.coverage.update(lexical="partial_scoped_cli_sdk_overfetch" if settings.collections or settings.memory_collections
                                else "cli_topk", semantic="unavailable_cli")
         if server_failed:
@@ -1271,14 +1319,6 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
         # A transport failure is the reason for fallback, not the outcome of a
         # completed keyword search. Preserve its receipt/coverage separately.
         result.reason = ""
-        scheduled_rungs = list(enumerate(cli_rungs))
-        if result.attempted_engines == ["server"] and len(ladder) > 1:
-            # Protect the original narrow query, then try complementary pairs
-            # before broader rungs. Keep original indices for stable ranking.
-            narrow = len(ladder) - 1
-            preferred = [narrow, *range(len(ladder), len(ladder) + len(pairs))]
-            scheduled_rungs = [*(scheduled_rungs[i] for i in preferred),
-                               *(entry for entry in scheduled_rungs if entry[0] not in preferred)]
         calls = [(scope, is_memory, rung_i, rung) for scope, is_memory in scopes
                  for rung_i, rung in scheduled_rungs]
         attempt_cap = max(0, search_deadline - time.monotonic()) / min(2, max(1, len(calls)))
@@ -1310,23 +1350,14 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
                 result.coverage.update(partial=True, lexical="partial_cli_failure")
                 continue
             ran = True
-            for pos, item in enumerate(got[:max(1, settings.search_n)]):
-                if not isinstance(item, dict):
-                    continue
-                uri = item.get("file") or item.get("path")
-                if not isinstance(uri, str) or not uri:
-                    continue
-                c = pool.setdefault(uri, {"item": item, "votes": 0, "best": 1e9, "memory": False})
-                c["votes"] += 1
-                c["best"] = min(c["best"], pos + 3 * rung_i)
-                c["memory"] |= is_memory
+            _pool_keyword_rows(pool, got, rung_i, is_memory, settings.search_n)
     if not ran:
         result.status, result.reason = "unavailable", "qmd failed, hung, or its index was locked"
         return
     result.pool = len(pool)
     if not pool:
         if cli_partial:
-            result.status, result.reason = "unavailable", "CLI search coverage incomplete; no verified match returned"
+            result.status, result.reason = "unavailable", ("SQLite keyword" if result.engine == "sqlite" else "CLI") + " search coverage incomplete; no verified match returned"
         elif server_failed:
             result.status, result.reason = "unavailable", "no keyword match; semantic search unavailable"
         else:
