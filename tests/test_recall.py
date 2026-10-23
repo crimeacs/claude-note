@@ -109,7 +109,8 @@ class RecallTests(unittest.TestCase):
             self.assertEqual(recall.recall(prompt, settings(), lambda c, t: []).status, "skipped")
 
     def test_subject_free_followup_never_searches_generic_action_notes(self):
-        for prompt in ("fix it", "Please repair this!", "check that please"):
+        for prompt in ("fix it", "Please repair this!", "check that please", "get it to work! fix it",
+                       "get this to work", "please fix it and check that"):
             with self.subTest(prompt=prompt), mock.patch.object(recall, "server_post") as post:
                 runner = mock.Mock(return_value=[item("qmd://notes/random-fix.md", "Old incident fix")])
                 result = recall.recall(prompt, settings(engine="auto"), runner)
@@ -117,7 +118,8 @@ class RecallTests(unittest.TestCase):
                 self.assertIn("no retrieval subject", result.reason)
                 runner.assert_not_called()
                 post.assert_not_called()
-        for prompt in ("codex hooks", "INSUFFICIENTPERMISSIONS", "fix OAuth retry"):
+        for prompt in ("codex hooks", "INSUFFICIENTPERMISSIONS", "fix OAuth retry", "get OAuth to work",
+                       "fix it! Citizens bank"):
             with self.subTest(prompt=prompt):
                 runner = mock.Mock(return_value=[])
                 result = recall.recall(prompt, settings(), runner)

@@ -50,11 +50,17 @@ class ImportPreflightTests(unittest.TestCase):
     def count_sources(self):
         calls = []
         read = publication._read
+        verify = publication._verify_source
         def inspect(path, limit):
             if Path(path).parent == config.STATE_DIR/'sources':
                 calls.append(str(path))
             return read(path, limit)
-        with mock.patch.object(publication, '_read', side_effect=inspect):
+        def inspect_verification(record):
+            if record['version'] == 1:
+                calls.append(record['snapshot_path'])
+            return verify(record)
+        with mock.patch.object(publication, '_read', side_effect=inspect), \
+                mock.patch.object(publication, '_verify_source', side_effect=inspect_verification):
             yield calls
 
     def corrupt(self, result):

@@ -5,6 +5,8 @@ import os
 import hashlib
 import json
 import logging
+import stat
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Optional
@@ -16,6 +18,68 @@ from .state_io import append_line, atomic_json, read_json
 
 MAX_EVENT_BYTES = 4 * 1024 * 1024
 MAX_PENDING_BYTES = 16 * 1024 * 1024
+IMPORT_RETRY_SECONDS = 30
+MAX_IMPORT_FAILURES = 256
+# Negative results only: a cache hit can deny work, never authorize delivery or
+# acknowledgement. Successful verifications are deliberately never retained.
+_import_failures = {}
+
+
+def _import_dependency_state(session_batches):
+    """Cheap deny-only source preflight and a bounded retry fingerprint.
+
+    Inspect every dependency before hashing any transcript, so one missing old
+    revision cannot force repeated reads of all earlier surviving revisions.
+    Stats merely invalidate a failed retry delay; they never attest integrity.
+    """
+    from . import import_publication, source_store, state_io
+    fingerprint, available = hashlib.sha256(), True
+
+    def inspect(path, maximum, links=(1,), required=True):
+        nonlocal available
+        try:
+            with state_io._parent(path) as (parent, name):
+                info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            token = (str(path), info.st_dev, info.st_ino, info.st_size,
+                     info.st_mtime_ns, info.st_ctime_ns, info.st_mode, info.st_nlink)
+            ready = stat.S_ISREG(info.st_mode) and info.st_nlink in links and info.st_size <= maximum
+        except (OSError, ValueError) as exc:
+            token, ready = (str(path), type(exc).__name__, getattr(exc, "errno", None)), False
+        fingerprint.update(import_publication._json(token))
+        if required:
+            available &= ready
+        return ready
+
+    for path, record in session_batches:
+        fingerprint.update(import_publication._json(record))
+        inspect(path, import_publication.MAX_BATCH, (1, 2))
+        inspect(import_publication._receipt(record["publication_id"]), import_publication.MAX_BATCH, (1, 2))
+        snapshot = Path(record["snapshot_path"])
+        if record["version"] == 1:
+            inspect(snapshot, import_publication.MAX_RAW, (1, 2))
+            # Interrupted two-link publications also depend on this intent.
+            # Ordinary legacy snapshots need not have one, but editing or
+            # restoring it must invalidate a previously failed retry delay.
+            inspect(snapshot.with_name(snapshot.name + ".intent.json"), import_publication.MAX_BATCH,
+                    (1, 2), required=False)
+        elif inspect(snapshot, source_store.MAX_MANIFEST):
+            scope = import_publication.source_scope(record["transcript_path"])
+            try:
+                manifest = source_store._manifest(snapshot, record["captured_revision"], scope)
+            except (OSError, ValueError):
+                available = False
+                fingerprint.update(b"invalid-source-manifest")
+                continue
+            for chunk in manifest["chunks"]:
+                inspect(source_store._chunk_path(chunk["revision"], scope), source_store.MAX_RAW)
+    return fingerprint.hexdigest(), available
+
+
+def _defer_import_session(key, fingerprint):
+    _import_failures.pop(key, None)
+    _import_failures[key] = (fingerprint, time.monotonic() + IMPORT_RETRY_SECONDS)
+    while len(_import_failures) > MAX_IMPORT_FAILURES:
+        _import_failures.pop(next(iter(_import_failures)))
 
 
 def get_queue_file(date: Optional[datetime] = None) -> Path:
@@ -124,18 +188,32 @@ def read_pending_events(limit: int = 10000, *, max_bytes: int = MAX_PENDING_BYTE
             return False
         if session_id in verified_sessions:
             return True
+        dependencies = session_batches.get(session_id, ())
+        retry_key = (str(config.STATE_DIR), str(config.QUEUE_DIR), session_id)
+        fingerprint, available = _import_dependency_state(dependencies)
+        previous = _import_failures.get(retry_key)
+        if previous and previous[0] == fingerprint and time.monotonic() < previous[1]:
+            blocked_sessions.add(session_id)
+            return False
+        if not available:
+            _defer_import_session(retry_key, fingerprint)
+            blocked_sessions.add(session_id)
+            logging.getLogger(__name__).warning("Import source dependency unavailable (%s); session deferred without acknowledgement", session_id[:80])
+            return False
         # Include captured historical revisions: a corrupt older visible source
         # must still block newer events, ordinary hooks and journal cursor ACKs.
-        # Verification is scoped to this invocation, never cached by file stat.
-        for path, expected in session_batches.get(session_id, ()):
+        # Successful verification is scoped to this invocation, never cached.
+        for path, expected in dependencies:
             try:
                 current = import_publication.validate_batch(path)
                 if import_publication._json(current) != import_publication._json(expected):
                     raise import_publication.PublicationError("Import metadata changed during preflight", session_id)
             except (OSError, ValueError):
+                _defer_import_session(retry_key, fingerprint)
                 blocked_sessions.add(session_id)
                 logging.getLogger(__name__).warning("Import session verification failed (%s); evidence retained", path.name[:80])
                 return False
+        _import_failures.pop(retry_key, None)
         verified_sessions.add(session_id)
         return True
 
@@ -289,9 +367,13 @@ def get_unprocessed_sessions(processed_sessions: set) -> dict[str, list]:
 
 
 def cleanup_old_queue_files(keep_days: int = 7) -> None:
-    """Remove queue files older than keep_days."""
+    """Retire captured delivery copies, inspecting journals one bounded record at a time."""
     if not config.QUEUE_DIR.exists():
         return
+
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+                info.st_ctime_ns, info.st_nlink)
 
     cutoff = datetime.utcnow().date()
     for queue_file in config.QUEUE_DIR.glob("*.jsonl"):
@@ -324,23 +406,37 @@ def cleanup_old_queue_files(keep_days: int = 7) -> None:
             file_date = datetime.strptime(queue_file.stem, "%Y-%m-%d").date()
             age_days = (cutoff - file_date).days
             if age_days > keep_days:
+                import stat
                 from .session_tracker import load_session_state
-                captured = True
-                try:
-                    raw = queue_file.read_bytes()
-                    for line in raw.splitlines(keepends=True):
-                        if not line.endswith(b"\n"):
-                            raise ValueError("Partial queue record")
-                        models.QueuedEvent.from_json(line)
-                except (OSError, ValueError, TypeError):
-                    continue
-                for event in read_events(queue_file):
-                    state = load_session_state(event.session_id)
-                    if not state or event.event_id not in state.processed_event_ids:
-                        captured = False
-                        break
-                if captured:
+                descriptor = os.open(queue_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(descriptor, "rb") as handle:
+                    # append_line uses the same lock: an active writer makes
+                    # this attempt incomplete, never grounds for retirement.
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    before = os.fstat(handle.fileno())
+                    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                        continue
+                    captured = True
+                    while True:
+                        line = handle.readline(MAX_EVENT_BYTES + 1)
+                        if not line:
+                            break
+                        if len(line) > MAX_EVENT_BYTES or not line.endswith(b"\n"):
+                            raise ValueError("Partial or oversized queue record")
+                        event = models.QueuedEvent.from_json(line)
+                        state = load_session_state(event.session_id)
+                        if not state or event.event_id not in state.processed_event_ids:
+                            captured = False
+                            break
+                    if not captured:
+                        continue
+                    # Prove that the complete inspected descriptor still owns
+                    # this path before removing its acknowledged delivery copy.
+                    if (identity(before) != identity(os.fstat(handle.fileno()))
+                            or identity(before) != identity(queue_file.lstat())):
+                        continue
                     queue_file.unlink()
-        except ValueError:
-            # Skip files that don't match the date pattern
+        except (OSError, ValueError, TypeError, RecursionError):
+            # Unrecognized names, unreadable state and incomplete inspections
+            # always retain the original journal for a later attempt.
             continue

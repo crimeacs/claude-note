@@ -207,8 +207,9 @@ WRAPPER_TAG = re.compile(r"</?[A-Za-z_][\w-]*(?:\s[^<>]*)?>")
 # Keep this narrow: short subjects such as "codex hooks" and single identifiers
 # are still useful queries, and non-English intent still reaches semantic search.
 UNRESOLVED_FOLLOWUP = re.compile(
-    r"^(?:please\s+)?(?:fix|repair|check|handle|do)\s+(?:it|this|that)"
-    r"(?:\s+please)?[.!?]*$", re.IGNORECASE)
+    r"^(?:(?:please\s+)?(?:(?:fix|repair|check|handle|do)\s+(?:it|this|that)"
+    r"|get\s+(?:it|this|that)\s+to\s+work)(?:\s+please)?"
+    r"(?:[.!?]+\s*|\s+and\s+|\s*;\s*|$))+$", re.IGNORECASE)
 SUBJECT_FREE_ACKNOWLEDGEMENT = re.compile(
     r"^(?:(?:yes|no|yep|nope|ok|okay|sure)(?:[\s,]+(?:please|thanks|thank\s+you))?"
     r"|thanks|thank\s+you)[.!?]*$", re.IGNORECASE)

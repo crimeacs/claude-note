@@ -140,14 +140,40 @@ class CaptureOnlyTests(unittest.TestCase):
              mock.patch.object(worker,"use_private_cwd"),mock.patch.object(worker.version_checker,"check_for_update") as version, \
              mock.patch.object(worker.signal,"signal"),mock.patch.object(worker.threading,"Thread",FakeThread), \
              mock.patch.object(worker.time,"time",side_effect=[1000,1701,1802,1903]),mock.patch.object(worker.time,"sleep"), \
+             mock.patch.object(config,"POLL_INTERVAL",0), \
              mock.patch.object(worker.importers,"SWEEP_INTERVAL",100),mock.patch.object(worker.importers,"sweep") as importer, \
              mock.patch.object(worker,"poll_once",side_effect=poll),mock.patch.object(worker.queue_manager,"cleanup_old_queue_files"):
-            self.assertEqual(worker.run_worker(capture_only=True),0)
+            self.assertEqual(worker.run_worker(),0)
         self.assertEqual(len(threads),1);self.assertEqual(threads[0].started,1)
-        self.assertEqual(polls,[True]*4);self.assertEqual(logger.warning.call_count,1)
+        self.assertEqual(polls,[False]*4);self.assertEqual(logger.warning.call_count,1)
         self.assertIn("retaining ownership",logger.warning.call_args[0][0])
-        importer.assert_not_called();version.assert_not_called()
+        importer.assert_not_called();version.assert_called_once()
         self.assertFalse(worker._capture_only)
+
+    def test_capture_supervises_separate_sweep_preserves_journals_and_reaps_on_exit(self):
+        from claude_note import capture_sweep
+        def poll(_):
+            worker.handle_signal(None,None)
+            return 0
+        with mock.patch.object(worker,"_shutdown",False),mock.patch.object(worker,"setup_logging",return_value=self.logger), \
+             mock.patch.object(worker,"use_private_cwd"),mock.patch.object(worker.signal,"signal"), \
+             mock.patch.object(worker,"poll_once",side_effect=poll),mock.patch.object(capture_sweep,"Sweep") as bounded, \
+             mock.patch.object(worker.queue_manager,"cleanup_old_queue_files") as cleanup, \
+             mock.patch.object(worker.importers,"sweep") as importer:
+            self.assertEqual(worker.run_worker(capture_only=True),0)
+        bounded.return_value.start.assert_called_once()
+        bounded.return_value.shutdown.assert_called_once()
+        cleanup.assert_not_called();importer.assert_not_called()
+        self.assertTrue(worker._wake.is_set())
+
+    def test_capture_reaps_sweep_when_poll_loop_setup_fails(self):
+        from claude_note import capture_sweep
+        with mock.patch.object(worker,"_shutdown",False),mock.patch.object(worker,"setup_logging",return_value=self.logger), \
+             mock.patch.object(worker,"use_private_cwd"),mock.patch.object(worker.signal,"signal"), \
+             mock.patch.object(worker.time,"time",side_effect=RuntimeError("public clock failure")), \
+             mock.patch.object(capture_sweep,"Sweep") as bounded,self.assertRaises(RuntimeError):
+            worker.run_worker(capture_only=True)
+        bounded.return_value.shutdown.assert_called_once()
 
 
 if __name__ == "__main__":

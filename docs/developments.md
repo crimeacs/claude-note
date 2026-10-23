@@ -1,5 +1,23 @@
 # Developments
 
+## 2.1.22 — keep capture within its working resources (23 October 2026)
+
+Retention previously loaded and split an entire old journal every poll. A
+retained 980 MB journal bypassed the 16 MiB delivery limit and could explain a
+large worker heap. Retention now streams capped records; capture-only workers
+retain journals and poll at least 15 seconds apart. Legacy source verification
+also streams. Missing dependencies fail before earlier snapshots are hashed,
+with a bounded negative retry delay that never authorizes acknowledgement.
+
+Capture-only recovery imports use a separate supervised child with a small
+input profile, a 30-second deadline, a 256 MiB RSS stop threshold and a 6 GiB
+disk reserve. Interrupted publications remain replayable; the child is reaped
+before ownership is released. These periodic checks do not establish a hard
+memory cap. Installation preserves an existing stopped or idle worker.
+
+Subject-free compound follow-ups such as "get it to work! fix it" also stay
+quiet instead of injecting unrelated generic fix notes.
+
 ## 2.1.16 — bound pending event payloads (23 October 2026)
 
 Pending worker polls previously limited delivery to 10,000 events, while each

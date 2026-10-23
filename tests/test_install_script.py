@@ -6,6 +6,7 @@ No HOME environment override, real installation or loaded job is used.
 """
 
 import json
+import os
 import plistlib
 import shutil
 import subprocess
@@ -41,6 +42,12 @@ case "$1" in
     if test -f "$HOME/fail-launchctl-query"; then echo "Operation not permitted" >&2; exit 1; fi
     if ! test -f "$HOME/loaded-${2##*/}"; then
       echo "Could not find service \\\"${2##*/}\\\" in domain for user gui" >&2; exit 113
+    fi
+    if test "${2##*/}" = com.claude-note.worker; then
+      if test -f "$HOME/worker-status"; then cat "$HOME/worker-status"
+      elif test -f "$HOME/running-com.claude-note.worker"; then
+        printf 'state = running\\npid = 24680\\n'
+      else printf 'state = waiting\\n'; fi
     fi ;;
   bootstrap|load)
     target="${3:-$2}"
@@ -60,6 +67,14 @@ case "$1" in
     if test -f "$HOME/fail-worker-kickstart"; then echo "synthetic worker restart failure" >&2; exit 5; fi ;;
   *) exit 0 ;;
 esac
+"""
+
+FAKE_PS = """#!/bin/sh
+echo "$@" >> "$HOME/ps.log"
+test "$*" = '-p 24680 -o uid=' || exit 1
+test -f "$HOME/worker-process-gone" && exit 1
+if test -f "$HOME/worker-process-uid"; then cat "$HOME/worker-process-uid"
+else id -u; fi
 """
 
 PYTHON_LAUNCHER = """import os,sys,runpy
@@ -85,7 +100,8 @@ class BundledInstallTests(unittest.TestCase):
         self.home = self.tmp / "home"
         bin_dir = self.home / ".local/bin"
         bin_dir.mkdir(parents=True)
-        for name, body in (("uv", FAKE_UV.replace("{python}", sys.executable)), ("launchctl", FAKE_LAUNCHCTL)):
+        for name, body in (("uv", FAKE_UV.replace("{python}", sys.executable)),
+                           ("launchctl", FAKE_LAUNCHCTL), ("ps", FAKE_PS)):
             (bin_dir / name).write_text(body.replace('$HOME', '$CLAUDE_NOTE_TEST_HOME'))
             (bin_dir / name).chmod(0o755)
         (self.home / 'python-launcher.py').write_text(PYTHON_LAUNCHER)
@@ -185,6 +201,72 @@ class BundledInstallTests(unittest.TestCase):
         receipt.write_text('{"commit":"old-completed"}\n')
         return agent, receipt
 
+    def worker_runtime(self, *, loaded=True, running=False):
+        agent = self.home / 'Library/LaunchAgents/com.claude-note.worker.plist'
+        agent.parent.mkdir(parents=True, exist_ok=True)
+        agent.write_bytes(plistlib.dumps({'Label': 'com.claude-note.worker',
+            'ProgramArguments': ['/owner/claude-note', 'worker', '--capture-only'],
+            'RunAtLoad': True, 'KeepAlive': True, 'Nice': 10}))
+        if loaded:
+            (self.home / 'loaded-com.claude-note.worker').touch()
+        if running:
+            (self.home / 'running-com.claude-note.worker').touch()
+        return agent
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'launchd upgrade is macOS-only')
+    def test_existing_unloaded_and_loaded_idle_worker_stay_stopped(self):
+        agent = self.worker_runtime(loaded=False)
+        previous = agent.read_bytes()
+        for loaded in (False, True):
+            if loaded:
+                (self.home / 'loaded-com.claude-note.worker').touch()
+            for args in ((), ('--non-interactive', '--vault', str(self.home / 'notes'))):
+                with self.subTest(loaded=loaded, args=args):
+                    out = self.run_script(*args)
+                    self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+                    self.assertEqual(agent.read_bytes(), previous)
+                    calls = (self.home / 'launchctl.log').read_text()
+                    self.assertNotIn('kickstart', calls)
+                    self.assertNotIn('bootstrap', calls)
+                    self.assertFalse((self.home / 'ps.log').exists())
+                    self.assertIn('left unchanged' if loaded else 'left stopped', out.stdout)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'launchd upgrade is macOS-only')
+    def test_only_owned_running_worker_is_restarted(self):
+        agent = self.worker_runtime(running=True)
+        previous = agent.read_bytes()
+        out = self.run_script()
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(agent.read_bytes(), previous)
+        self.assertIn(f'kickstart -k gui/{os.getuid()}/com.claude-note.worker',
+                      (self.home / 'launchctl.log').read_text())
+        self.assertEqual((self.home / 'ps.log').read_text(), '-p 24680 -o uid=\n')
+        self.assertIn('Restarted the worker', out.stdout)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'launchd upgrade is macOS-only')
+    def test_gone_or_foreign_worker_pid_is_not_restarted(self):
+        self.worker_runtime(running=True)
+        for marker, content in (('worker-process-gone', ''), ('worker-process-uid', str(os.getuid() + 1))):
+            with self.subTest(marker=marker):
+                (self.home / marker).write_text(content)
+                out = self.run_script()
+                self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+                self.assertNotIn('kickstart', (self.home / 'launchctl.log').read_text())
+                self.assertIn('left unchanged', out.stdout)
+                (self.home / marker).unlink()
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'launchd upgrade is macOS-only')
+    def test_running_state_and_positive_pid_are_both_required(self):
+        self.worker_runtime()
+        for status in ('state = running\n', 'state = waiting\npid = 24680\n',
+                       'state = running\npid = 0\n', 'state = running\npid = -5\n'):
+            with self.subTest(status=status):
+                (self.home / 'worker-status').write_text(status)
+                out = self.run_script()
+                self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+                self.assertNotIn('kickstart', (self.home / 'launchctl.log').read_text())
+                self.assertFalse((self.home / 'ps.log').exists())
+
     @unittest.skipUnless(sys.platform == 'darwin', 'launchd upgrade is macOS-only')
     def test_existing_recall_runtime_uses_new_package_and_keeps_owner_data(self):
         renamed = self.tmp / 'bundle & recalled'
@@ -267,8 +349,11 @@ class BundledInstallTests(unittest.TestCase):
         for marker, args in (('fail-launchctl-query', ()), ('fail-worker-kickstart', ()),
                              ('fail-worker-bootstrap', ('--non-interactive', '--vault', str(self.home / 'notes')))):
             loaded_worker = self.home / 'loaded-com.claude-note.worker'
-            if marker == 'fail-worker-kickstart': loaded_worker.touch()
-            else: loaded_worker.unlink(missing_ok=True)
+            running_worker = self.home / 'running-com.claude-note.worker'
+            if marker == 'fail-worker-kickstart':
+                loaded_worker.touch(); running_worker.touch()
+            else:
+                loaded_worker.unlink(missing_ok=True); running_worker.unlink(missing_ok=True)
             (self.home / marker).touch()
             out = self.run_script(*args)
             with self.subTest(marker=marker):

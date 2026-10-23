@@ -175,6 +175,10 @@ All of it fails open under a wall-clock budget: recall can never block a prompt.
 The worker synthesizes each finished session with the Claude CLI into typed notes (`route` mode) or
 an inbox for review (`inbox` mode). See [synthesis modes](docs/synthesis-modes.md).
 
+`claude-note worker --capture-only` writes local session notes while holding
+model work and preserving its retry state. It retains journals and runs recovery
+imports in a separate resource-supervised process; see [troubleshooting](docs/troubleshooting.md).
+
 ## Configuration
 
 `~/.config/claude-note/config.toml`:
