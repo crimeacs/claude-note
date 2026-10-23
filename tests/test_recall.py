@@ -56,6 +56,15 @@ class QueryTests(unittest.TestCase):
         ladder = recall.query_ladder(["What", "retry", "idempotency"], first_word="What")
         self.assertNotIn("What", ladder[-1])
 
+    def test_complementary_pairs_drop_one_poisoned_term_without_guessing(self):
+        ladder = [["test", "knowdge", "design", "everyday"],
+                  ["knowdge", "design", "everyday"], ["knowdge", "everyday"]]
+        self.assertEqual(recall.complementary_pairs(ladder),
+                         [["design", "everyday"], ["knowdge", "design"]])
+        self.assertEqual(recall.complementary_pairs([["Google", "Drive", "access"], ["Google", "access"]]),
+                         [["Drive", "access"], ["Google", "Drive"]])
+        self.assertEqual(recall.complementary_pairs([["codex", "hooks"]]), [])
+
 
 class RecallTests(unittest.TestCase):
     def test_pools_every_rung_and_ranks_by_votes(self):
@@ -475,19 +484,79 @@ class ServerEngineTests(unittest.TestCase):
         self.assertTrue(calls)
         self.assertEqual(res.engine, "cli")
 
+    def test_server_down_typo_prompt_recovers_original_subject_via_cli(self):
+        prompt = "test it, what do we have in knowdge on design of everyday things"
+        body = "The Design of Everyday Things explains how visible affordances and feedback make actions understandable."
+        queries = []
+        document_terms = {word.casefold() for word in recall.content_terms(body)}
+        def runner(cmd, timeout):
+            query = cmd[cmd.index("search") + 1]
+            queries.append(query)
+            return [item("qmd://notes/book.md", "The Design of Everyday Things", body)] \
+                if set(query.casefold().split()) <= document_terms else []
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "book.md"
+            path.write_text(body)
+            with mock.patch.object(recall, "server_post", return_value={"error": "transport_error"}), \
+                    mock.patch.object(recall, "local_path", return_value=path):
+                result = recall.recall(prompt, settings(engine="auto"), runner)
+        self.assertEqual(result.status, "hit")
+        self.assertEqual(result.attempted_engines, ["server", "cli"])
+        self.assertEqual(queries[0], "design everyday")
+        self.assertEqual(result.hits[0].revision_kind, "source_file_sha256")
+        self.assertEqual(result.reason, "")
+        self.assertEqual(result.coverage["search"], "transport_error")
+        self.assertEqual(result.coverage["semantic"], "unavailable_cli")
+        self.assertTrue(result.coverage["partial"])
+        self.assertIn("Coverage is partial", recall.format_context(result))
+
+    def test_timed_out_server_leaves_two_normal_cli_attempts_and_source_time(self):
+        release = threading.Event()
+        prompt = "test design everyday knowdge things"
+        body = "The Design of Everyday Things explains how visible affordances and feedback make actions understandable."
+        queries, completed = [], []
+        document_terms = {word.casefold() for word in recall.content_terms(body)}
+        def runner(cmd, timeout):
+            query = cmd[cmd.index("search") + 1]
+            queries.append(query)
+            time.sleep(.09)
+            completed.append(query)
+            return [item("qmd://notes/book.md", "The Design of Everyday Things", body)] \
+                if set(query.casefold().split()) <= document_terms else []
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "book.md"
+                path.write_text(body)
+                with mock.patch.object(recall, "server_post", side_effect=lambda *_: release.wait(2)), \
+                        mock.patch.object(recall, "local_path", return_value=path):
+                    started = time.monotonic()
+                    result = recall.recall(prompt, settings(engine="auto", timeout=6, budget=.8), runner)
+                self.assertLess(time.monotonic() - started, .95)
+            self.assertEqual(result.status, "hit")
+            self.assertEqual(queries[:2], ["design knowdge", "design everyday"])
+            self.assertIn("design everyday", completed)
+            self.assertEqual(result.hits[0].revision_kind, "source_file_sha256")
+            self.assertTrue(result.coverage["partial"])
+            self.assertEqual(result.coverage["semantic"], "unavailable_cli")
+        finally:
+            release.set()
+            time.sleep(.1)  # release the final deliberately late CLI fixture
+
     def test_fallback_scheduling_preserves_original_rung_ranking(self):
         calls = []
+        prompt = "OAuth payment retry permission stale token"
+        narrow_query = " ".join(recall.query_ladder(recall.content_terms(prompt), "OAuth")[-1])
         def runner(cmd, timeout):
             query = cmd[cmd.index("search") + 1]
             calls.append(query)
-            if len(query.split()) == 2:
+            if query == narrow_query:
                 return [item("qmd://notes/narrow.md", "Narrow")]
             if len(query.split()) == 6:
                 return [item("qmd://notes/wide.md", "Wide")]
             return []
         with mock.patch.object(recall, "server_post", return_value=None), \
                 mock.patch.object(recall, "local_path", return_value=None):
-            result = recall.recall("OAuth payment retry permission stale token", settings(engine="auto"), runner)
+            result = recall.recall(prompt, settings(engine="auto"), runner)
         self.assertEqual(len(calls[0].split()), 2)
         self.assertEqual(result.hits[0].title, "Wide")
 
@@ -582,7 +651,10 @@ class ServerTransportTests(unittest.TestCase):
                 self.assertEqual(result.server_calls[0]["outcome"], "client_deadline")
                 self.assertFalse(result.deadline_exhausted)
                 self.assertEqual(bool(calls), engine == "auto")
-                self.assertEqual(result.status, "miss" if engine == "auto" else "unavailable")
+                self.assertEqual(result.status, "unavailable")
+                if engine == "auto":
+                    self.assertEqual(result.reason, "no keyword match; semantic search unavailable")
+                    self.assertTrue(result.coverage["partial"])
             finally:
                 release.set()
 

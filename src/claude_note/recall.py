@@ -269,6 +269,22 @@ def query_ladder(terms: list[str], first_word: str = "") -> list[list[str]]:
     return [r for i, r in enumerate(ladder) if i == 0 or r != ladder[i - 1]]
 
 
+def complementary_pairs(ladder: list[list[str]]) -> list[list[str]]:
+    """Bounded leave-one-out alternatives, without guessing a term's spelling.
+
+    Length ranking can keep the same typo in every narrower query. The other
+    pairs of the three-term rung let one poisoned term drop out while retaining
+    two original subject words. Normal ladders add at most two queries.
+    """
+    triple = next((rung for rung in reversed(ladder) if len(rung) == 3), [])
+    pairs = []
+    for omitted in range(len(triple)):
+        pair = [word for i, word in enumerate(triple) if i != omitted]
+        if pair not in ladder and pair not in pairs:
+            pairs.append(pair)
+    return pairs
+
+
 def semantic_intent(prompt: str, limit: int = 2000) -> tuple[str, bool]:
     """Raw Unicode intent, independently of lexical eligibility; disclose sampling."""
     if len(prompt) <= limit:
@@ -1196,7 +1212,7 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
     result.coverage = {"local_resolution": "bounded", "lexical": "not_run"}
     if raw_partial:
         result.coverage["raw_prompt"] = "sampled_head_tail"
-    pool, ran = {}, False
+    pool, ran, server_failed, cli_partial = {}, False, False, False
     # Search results still need local source resolution, revision checks and
     # passage selection. Reserve that work before either adapter starts. In
     # auto mode a slow warm server also has to leave time for a real CLI search.
@@ -1235,6 +1251,8 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
         elif settings.engine == "server":
             result.status, result.reason = "unavailable", result.reason or "the recall server did not answer"
             return
+        else:
+            server_failed = True
     if not ran:
         exe = _bounded(lambda: qmd_executable(settings), deadline)
         if not exe:
@@ -1242,24 +1260,33 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
             return
         base = [exe] + (["--index", settings.index] if settings.index else [])
         scopes = [(c, c in settings.memory_collections) for c in dict.fromkeys(settings.collections + settings.memory_collections)] if settings.collections else [(None, False)] + [(c, True) for c in settings.memory_collections]
-        cli_rungs = list(ladder)
+        pairs = complementary_pairs(ladder)
+        cli_rungs = [*ladder, *pairs]
         if settings.single_term_fallback and ladder:
             cli_rungs += [[word] for word in ladder[-1][:2] if [word] not in cli_rungs]
         result.coverage.update(lexical="partial_scoped_cli_sdk_overfetch" if settings.collections or settings.memory_collections
                                else "cli_topk", semantic="unavailable_cli")
+        if server_failed:
+            result.coverage["partial"] = True
+        # A transport failure is the reason for fallback, not the outcome of a
+        # completed keyword search. Preserve its receipt/coverage separately.
+        result.reason = ""
         scheduled_rungs = list(enumerate(cli_rungs))
         if result.attempted_engines == ["server"] and len(ladder) > 1:
-            # Search the least conjunctive rung first under a fallback's smaller
-            # budget, preserving original rung indices for deterministic ranking.
+            # Try complementary narrow queries before repeating rungs that may
+            # all contain one typo. Keep original indices for stable ranking.
             narrow = len(ladder) - 1
-            scheduled_rungs = [scheduled_rungs[narrow],
-                               *(entry for entry in scheduled_rungs if entry[0] != narrow)]
+            preferred = [*range(len(ladder), len(ladder) + len(pairs)), narrow]
+            scheduled_rungs = [*(scheduled_rungs[i] for i in preferred),
+                               *(entry for entry in scheduled_rungs if entry[0] not in preferred)]
         calls = [(scope, is_memory, rung_i, rung) for scope, is_memory in scopes
                  for rung_i, rung in scheduled_rungs]
-        for call_i, (scope, is_memory, rung_i, rung) in enumerate(calls):
+        attempt_cap = max(0, search_deadline - time.monotonic()) / min(2, max(1, len(calls)))
+        for scope, is_memory, rung_i, rung in calls:
             left = search_deadline - time.monotonic()
             if left <= 0:
                 result.deadline_exhausted = True
+                cli_partial = True
                 result.coverage.update(partial=True, lexical="partial_cli_deadline")
                 break
             cmd = base + ["search", " ".join(rung), "-n", str(settings.search_n), "--json"]
@@ -1271,7 +1298,7 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
             # One hung rung must not consume the entire search slice. The
             # absolute per-attempt guard also bounds custom runners that
             # ignore the timeout argument.
-            timeout = min(settings.timeout, left / min(2, len(calls) - call_i))
+            timeout = min(settings.timeout, left, attempt_cap)
             call_deadline = min(search_deadline, time.monotonic() + timeout)
             try:
                 got = _bounded(lambda cmd=cmd, timeout=timeout: runner(cmd, timeout), call_deadline)
@@ -1279,6 +1306,7 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
                 got = None
                 result.deadline_exhausted = True
             if got is None:
+                cli_partial = True
                 result.coverage.update(partial=True, lexical="partial_cli_failure")
                 continue
             ran = True
@@ -1297,8 +1325,10 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
         return
     result.pool = len(pool)
     if not pool:
-        if result.coverage.get("partial"):
+        if cli_partial:
             result.status, result.reason = "unavailable", "CLI search coverage incomplete; no verified match returned"
+        elif server_failed:
+            result.status, result.reason = "unavailable", "no keyword match; semantic search unavailable"
         else:
             result.status, result.reason = "miss", result.reason or "no keyword or semantic match"
         return
@@ -1335,8 +1365,10 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
     if not candidates:
         if result.coverage.get("local_resolution") == "partial_deadline":
             result.status, result.reason = "unavailable", "source verification deadline exhausted"
-        elif result.coverage.get("partial"):
+        elif cli_partial:
             result.status, result.reason = "unavailable", "search coverage incomplete; no eligible source verified"
+        elif server_failed:
+            result.status, result.reason = "unavailable", "no eligible keyword evidence; semantic search unavailable"
         else:
             result.status, result.reason = "miss", "no eligible evidence passages"
         return

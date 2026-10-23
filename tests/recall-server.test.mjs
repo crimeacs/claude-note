@@ -26,6 +26,64 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 
+test('request phase events identify lexical, vector and rerank work without source payloads', async () => {
+  const events = [], id = 'a'.repeat(24), secret = 'PRIVATE phase fixture';
+  const service = createRecallService({ lexical: lex(), store: { searchVector: async () => [row] },
+    llm: { embedModel: {}, rerank: async (_, docs) => ({ model: rerankModel, results: docs.map(doc => ({ file: doc.file, score: .8 })) }) },
+    manifest: rerankManifest, onPhase: event => events.push(event) });
+  await service.request('/search', { request_id: id, question: secret, rungs: [secret] });
+  await service.request('/rerank', { ...rankRequest(), request_id: id, question: secret });
+  assert.deepEqual(events.map(event => `${event.stage}:${event.state}`), [
+    'lexical_sql:start', 'lexical_sql:end', 'lexical_passages:start', 'lexical_passages:end',
+    'vector_search:start', 'vector_search:end', 'vector_passages:start', 'vector_passages:end', 'rerank:start', 'rerank:end']);
+  assert.ok(events.every(event => event.request_id === id)); assert.equal(JSON.stringify(events).includes('PRIVATE'), false);
+  service.close();
+});
+
+test('parent retains bounded phases and external correlation before fatal retirement', async () => {
+  class FixtureWorker extends EventEmitter { sent = []; postMessage(message) { this.sent.push(message); } }
+  const worker = new FixtureWorker(), logged = []; let time = 0, retired = 0;
+  const proxy = createRuntimeProxy(worker, { monotonic: () => time, retireOwner: () => retired++,
+    onDiagnostic: entry => { logged.push(entry); throw new Error('PRIVATE logger error'); } });
+  worker.emit('message', { ready: true, manifest: { ok: true } }); await proxy.ready;
+  const externalId = 'b'.repeat(24), pending = proxy.request('/search', { request_id: externalId, question: 'PRIVATE input' });
+  const id = worker.sent[0].id;
+  worker.emit('message', { started: String(id) }); time = 10;
+  worker.emit('message', { phase: { request_id: String(id), stage: 'lexical_sql', state: 'start' } }); time = 42;
+  worker.emit('message', { phase: { request_id: String(id), stage: 'lexical_sql', state: 'end' } }); time = 45;
+  worker.emit('message', { phase: { request_id: String(id), stage: 'vector_passages', state: 'start', rows: 12, source_chars: 5600000, private: 'PRIVATE data' } }); time = 52;
+  worker.emit('message', { phase: { request_id: String(id), stage: 'PRIVATE unknown stage', state: 'start' } });
+  worker.emit('message', { fatal: true });
+  await assert.rejects(pending, error => error.code === 'poisoned' && error.diagnostic.phase === 'vector_passages');
+  assert.equal(retired, 1); assert.equal(logged.length, 1);
+  assert.equal(logged[0].request_id, externalId); assert.equal(logged[0].internal_request_id, id);
+  assert.equal(logged[0].phase_elapsed_ms, 7); assert.equal(logged[0].phase_ms.lexical_sql, 32);
+  assert.equal(logged[0].counters.vector_passages_source_chars, 5600000);
+  assert.equal(JSON.stringify(logged).includes('PRIVATE'), false); proxy.close();
+});
+
+test('successful requests return bounded timings without logging; invalid ids and excess events are excluded', async () => {
+  class FixtureWorker extends EventEmitter { sent = []; postMessage(message) { this.sent.push(message); } }
+  const worker = new FixtureWorker(), logged = []; let time = 0;
+  const proxy = createRuntimeProxy(worker, { monotonic: () => time, retireOwner: () => {}, onDiagnostic: entry => logged.push(entry) });
+  worker.emit('message', { ready: true, manifest: { ok: true } }); await proxy.ready;
+  const pending = proxy.request('/search', { request_id: 'PRIVATE invalid id' }), id = worker.sent[0].id;
+  worker.emit('message', { started: String(id) }); time = 5;
+  for (let i = 0; i < 100; i++) worker.emit('message', { phase: { request_id: id, stage: 'vector_sql', state: 'start', source_chars: Infinity } });
+  time = 10; worker.emit('message', { id, result: { vec: [] } });
+  const result = await pending;
+  assert.deepEqual(result.vec, []); assert.equal(result.request_diagnostic.events_dropped, 4);
+  assert.equal(result.request_diagnostic.elapsed_ms, 10); assert.equal(result.request_diagnostic.request_id, undefined);
+  assert.deepEqual(logged, []); assert.equal(JSON.stringify(result).includes('PRIVATE'), false); proxy.close();
+});
+
+test('vector SQL phase markers precede synchronous work and settle on errors', () => {
+  const events = [], db = indexedVectorDatabase({ prepare() { return { all() { throw new Error('PRIVATE SQL failure'); } }; } }, { onPhase: event => events.push(event) });
+  assert.throws(() => db.prepare('SELECT hash_seq,distance FROM vectors_vec WHERE embedding MATCH ? AND k=?').all('PRIVATE vector', 3));
+  assert.deepEqual(events.map(event => `${event.stage}:${event.state}`), ['vector_sql:start', 'vector_sql:end']);
+  assert.equal(JSON.stringify(events).includes('PRIVATE'), false);
+});
+
 test('daemon prepares cached models serially and retains them without claiming retrieval readiness', async () => {
   const calls = [], models = { embed: { id: 'embed-id', cached: true }, rerank: { id: rerankModel, cached: true } };
   const llm = { inactivityTimeoutMs: 300000, disposeModelsOnInactivity: true, embedContexts: [{}], rerankContexts: [{}],

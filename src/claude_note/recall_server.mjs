@@ -16,6 +16,13 @@ const PIN = '2.8.3';
 const digest = value => createHash('sha256').update(value).digest('hex');
 const boundedInt = (value, fallback, max) => Math.max(1, Math.min(max, Number(value) || fallback));
 const err = (code, message) => Object.assign(new Error(message), { code });
+const PHASES = new Set(['lexical_sql', 'lexical_passages', 'vector_search', 'embedding', 'vector_sql', 'vector_hydration', 'vector_passages', 'rerank']);
+function beginPhase(emit, stage, details = {}) {
+  const started = performance.now();
+  const send = event => { try { emit(event); } catch { /* diagnostics cannot change request ownership */ } };
+  send({ stage, state: 'start', ...details });
+  return () => send({ stage, state: 'end', elapsed_ms: Math.round(performance.now() - started) });
+}
 const collectionsOf = body => Array.isArray(body.collections)
   ? [...new Set(body.collections.filter(c => typeof c === 'string' && c.length > 0 && c.length <= 200))].slice(0, 40) : [];
 
@@ -235,13 +242,14 @@ export class ScopedLexicalWorker {
 }
 
 export function createRecallService({ store, llm, lexical, manifest = {}, queueLimit = 8, maxRequestMs = 8000,
-  metadataTimeoutMs = 3000, modelAvailable = () => true, fallbackLexical, onFatal = () => {}, onJobStart = () => {}, now = Date.now }) {
+  metadataTimeoutMs = 3000, modelAvailable = () => true, fallbackLexical, onFatal = () => {}, onJobStart = () => {}, onPhase = () => {}, now = Date.now }) {
   const started = now(), waiting = [];
   let active = false, poisoned = false, closed = false, expired = 0, rejected = 0;
   let metadataRefresh = null, activeJob = null;
   let metadata = {}, lexicalReady = false, vectorObserved = false, rerankObserved = false;
   let rerankStatus = 'not_observed';
   const degradation = new Set();
+  const phase = (stage, details) => beginPhase(event => onPhase({ ...event, request_id: activeJob?.body.request_id }), stage, details);
   const capabilities = () => ({ ...manifest, protocol_version: 2, engine: 'qmd-sdk', ok: !poisoned && !closed,
     index: { ...manifest.index, ...metadata,
       generation: metadata.generation ? digest(JSON.stringify([metadata.generation, manifest.index?.config_revision,
@@ -345,19 +353,28 @@ export function createRecallService({ store, llm, lexical, manifest = {}, queueL
     const lex = [], coverage = { lexical: 'complete_scoped_before_limit', semantic: 'disabled' };
     for (const rung of (Array.isArray(body.rungs) ? body.rungs : []).slice(0, 8)) {
       let got;
+      const finishSQL = phase('lexical_sql');
       try { got = await lexicalSearch(String(rung).slice(0, 2000), collections, boundedInt(body.lex_limit, 20, 100), deadline); }
       catch (e) { if (e.code !== 'deadline' || !lex.length) throw e; coverage.lexical = 'partial_deadline'; break; }
-      lex.push(got.rows.map(row => pick(row, body.question || rung, body.passage_chars, true)));
+      finally { finishSQL(); }
+      const finishPassages = phase('lexical_passages', { rows: got.rows.length, source_chars: got.rows.reduce((n, row) => n + String(row.body || row.snippet || '').length, 0) });
+      try { lex.push(got.rows.map(row => pick(row, body.question || rung, body.passage_chars, true))); }
+      finally { finishPassages(); }
       if (got.coverage.startsWith('partial')) coverage.lexical = got.coverage;
     }
     const tl = performance.now(); let vec = [];
     if (body.question) {
       if (modelAvailable('embed')) {
         try {
-          const rows = await modelCall(() => store.searchVector(String(body.question).slice(0, 2400), {
-            limit: boundedInt(body.vec_limit, 40, 100), collection: collections.length ? collections : undefined }), deadline);
-          vec = rows.filter(row => !collections.length || collections.includes(String(row.filepath || row.file).split('/')[2]))
-            .map(row => pick(row, body.question, body.passage_chars));
+          let rows;
+          const finishVector = phase('vector_search');
+          try { rows = await modelCall(() => store.searchVector(String(body.question).slice(0, 2400), {
+            limit: boundedInt(body.vec_limit, 40, 100), collection: collections.length ? collections : undefined }), deadline); }
+          finally { finishVector(); }
+          const finishPassages = phase('vector_passages', { rows: rows.length, source_chars: rows.reduce((n, row) => n + String(row.body || row.snippet || '').length, 0) });
+          try { vec = rows.filter(row => !collections.length || collections.includes(String(row.filepath || row.file).split('/')[2]))
+            .map(row => pick(row, body.question, body.passage_chars)); }
+          finally { finishPassages(); }
           vectorObserved = Boolean(llm?.embedContexts?.length || llm?.embedModel || rows.length)
             && Boolean(metadata.vector_rows) && (!manifest.models?.embed?.id || metadata.vector_models?.includes(manifest.models.embed.id));
           // QMD scopes exact vector scans through 20k rows, then uses capped ANN.
@@ -422,8 +439,10 @@ export function createRecallService({ store, llm, lexical, manifest = {}, queueL
     }
     t = performance.now();
     let ranked;
+    const finishRanking = phase('rerank', { rows: docs.length });
     try { ranked = await modelCall(() => llm.rerank(String(body.question || '').slice(0, 2400), docs), deadline); }
     catch (error) { rerankStatus = error.code === 'deadline' ? 'deadline' : 'failed'; throw error; }
+    finally { finishRanking(); }
     // QMD 2.8.3 returns finite constant scores with model="fallback" when it
     // cannot create a ranking context. Reject the discriminator, not score .5.
     if (ranked?.model === 'fallback') {
@@ -534,7 +553,7 @@ export function createHttpServer(service) {
     req.on('end', async () => {
       try { send(200, await service.request(req.url, JSON.parse(raw || '{}'), () => res.destroyed)); }
       catch (e) { send(e.code === 'deadline' ? 504 : e.code === 'queue_full' || e.code === 'poisoned' ? 503 : 400,
-        { error: e.code || 'request_failed', manifest: service.capabilities() }); }
+        { error: e.code || 'request_failed', ...(e.diagnostic ? { request_diagnostic: e.diagnostic } : {}), manifest: service.capabilities() }); }
     });
   });
 }
@@ -567,7 +586,7 @@ function cachedModel(llm, kind) {
 // search/scoping/ranking logic, but hydrate only the exact matched keys through
 // indexed predicates. This proxy is passed only to the pinned vector function;
 // it neither changes the SDK files nor modifies the database schema.
-export function indexedVectorDatabase(db) {
+export function indexedVectorDatabase(db, { onPhase = () => {} } = {}) {
   const hydration = /WHERE cv\.hash \|\| '_' \|\| cv\.seq IN \((\?(?:,\?)*)\)/;
   return new Proxy(db, { get(target, property) {
     if (property !== 'prepare') {
@@ -576,7 +595,14 @@ export function indexedVectorDatabase(db) {
     }
     return sql => {
       const match = typeof sql === 'string' && sql.match(hydration);
-      if (!match) return target.prepare(sql);
+      if (!match) {
+        const statement = target.prepare(sql);
+        if (!/FROM vectors_vec/i.test(sql) || !/embedding MATCH|vec_distance_cosine/i.test(sql)) return statement;
+        return { all(...parameters) {
+          const finish = beginPhase(onPhase, 'vector_sql');
+          try { return statement.all(...parameters); } finally { finish(); }
+        } };
+      }
       const count = match[1].split(',').length;
       return { all(...parameters) {
         const keys = parameters.slice(0, count).map(value => {
@@ -588,7 +614,9 @@ export function indexedVectorDatabase(db) {
         for (let offset = 0; offset < keys.length; offset += 200) {
           const chunk = keys.slice(offset, offset + 200);
           const indexed = sql.replace(hydration, `WHERE (${chunk.map(() => '(cv.hash = ? AND cv.seq = ?)').join(' OR ')})`);
-          rows.push(...target.prepare(indexed).all(...chunk.flat(), ...parameters.slice(count)));
+          const finish = beginPhase(onPhase, 'vector_hydration', { rows: chunk.length });
+          try { rows.push(...target.prepare(indexed).all(...chunk.flat(), ...parameters.slice(count))); }
+          finally { finish(); }
         }
         return rows;
       } };
@@ -676,7 +704,9 @@ export async function prepareCachedModels(llm, models, { deadline = Date.now() +
   } finally { clearTimeout(timer); }
 }
 
-async function buildRuntime({ sdkPath, dbPath, configPath, indexId = 'default', onFatal = () => {}, onJobStart = () => {} }) {
+async function buildRuntime({ sdkPath, dbPath, configPath, indexId = 'default', onFatal = () => {}, onJobStart = () => {}, onPhase = () => {} }) {
+  let currentRequest;
+  const modelPhase = event => { if (currentRequest) onPhase({ ...event, request_id: currentRequest }); };
   const requireSDK = createRequire(pathToFileURL(resolve(sdkPath)));
   const pkg = JSON.parse(readFileSync(join(dirname(sdkPath), '..', 'package.json'), 'utf8'));
   if (pkg.version !== PIN) throw new Error(`QMD ${PIN} required; found ${pkg.version}`);
@@ -702,8 +732,13 @@ async function buildRuntime({ sdkPath, dbPath, configPath, indexId = 'default', 
     return entry.path;
   };
   await prepareCachedModels(llm, models, { onFatal });
+  const embed = llm.embed.bind(llm);
+  llm.embed = async (...args) => {
+    const finish = beginPhase(modelPhase, 'embedding');
+    try { return await embed(...args); } finally { finish(); }
+  };
   const sdkStore = await import(pathToFileURL(join(dirname(sdkPath), 'store.js')).href);
-  const vectorDb = indexedVectorDatabase(db);
+  const vectorDb = indexedVectorDatabase(db, { onPhase: modelPhase });
   store.searchVector = (query, options) => sdkStore.searchVec(vectorDb, query, llm.embedModelName,
     options?.limit, options?.collection, undefined, undefined, llm);
   const vectorPages = models.embed.warmed ? await prepareVectorPages(store, { onFatal }) : 'model_cache_unavailable';
@@ -718,14 +753,15 @@ async function buildRuntime({ sdkPath, dbPath, configPath, indexId = 'default', 
         vector_policy: 'indexed_hydration_startup_page_warm', vector_pages: vectorPages, sqlite, sdk_revision: digest(Buffer.concat(['index.js', 'store.js', 'llm.js']
         .map(name => readFileSync(join(dirname(sdkPath), name))))), revision_kind: 'sdk_bundle_sha256' },
       models: Object.fromEntries(Object.entries(models).map(([kind, { path, ...model }]) => [kind, model])) },
-    onFatal, onJobStart });
+    onFatal, onPhase, onJobStart: request_id => { currentRequest = request_id; onJobStart(request_id); } });
   await service.refresh(Date.now() + 3000);
   return service;
 }
 
 if (!isMainThread && workerData?.kind === 'claude-note-runtime') {
   buildRuntime({ ...workerData, onFatal: () => parentPort.postMessage({ fatal: true }),
-    onJobStart: request_id => parentPort.postMessage({ started: request_id }) }).then(service => {
+    onJobStart: request_id => parentPort.postMessage({ started: request_id }),
+    onPhase: event => parentPort.postMessage({ phase: event }) }).then(service => {
     const cancelled = new Set(), requests = new Set();
     parentPort.postMessage({ ready: true, manifest: service.capabilities() });
     parentPort.on('message', async message => {
@@ -743,7 +779,8 @@ if (!isMainThread && workerData?.kind === 'claude-note-runtime') {
 
 // The parent event loop performs no QMD/SQLite/model calls. It can therefore
 // enforce a deadline even when a native SDK call blocks the runtime's loop.
-export function createRuntimeProxy(worker, { onFatal = () => {}, retireOwner = () => worker.terminate(), startupMs = 45000, queueLimit = 8 } = {}) {
+export function createRuntimeProxy(worker, { onFatal = () => {}, retireOwner = () => worker.terminate(), startupMs = 45000, queueLimit = 8,
+  onDiagnostic = () => {}, monotonic = () => performance.now() } = {}) {
   // This is the proxy lifetime, not a process-spawn or Worker-construction watchdog.
   const startupDeadline = performance.now() + startupMs;
   const pending = new Map(), expiredJobs = new Map();
@@ -752,6 +789,23 @@ export function createRuntimeProxy(worker, { onFatal = () => {}, retireOwner = (
   const ready = new Promise((accept, reject) => { acceptReady = accept; rejectReady = reject; });
   // Close can precede a caller awaiting startup. The returned promise still rejects.
   void ready.catch(() => {});
+  function requestDiagnostic(job) {
+    const elapsed = Math.max(0, monotonic() - job.created);
+    return { internal_request_id: job.id, request_id: job.externalId, route: job.route,
+      elapsed_ms: Math.round(elapsed), phase: job.phase?.stage || (job.started ? 'request' : 'queue'),
+      phase_state: job.phase?.state || 'start',
+      phase_elapsed_ms: Math.round(Math.max(0, job.phase ? monotonic() - job.phase.at : elapsed)),
+      phase_ms: { ...job.phaseMs }, counters: { ...job.counters }, events_dropped: job.eventsDropped };
+  }
+  function diagnose(job, code) {
+    const diagnostic = requestDiagnostic(job);
+    if (!job.diagnosed) {
+      job.diagnosed = true;
+      try { onDiagnostic({ ...diagnostic, error: /^[a-z_]{1,40}$/.test(code || '') ? code : 'runtime_error' }); }
+      catch { /* logging cannot prevent settlement or retirement */ }
+    }
+    return diagnostic;
+  }
   function settleReady(error) {
     if (readySettled) return;
     readySettled = true; clearTimeout(startupTimer);
@@ -766,7 +820,12 @@ export function createRuntimeProxy(worker, { onFatal = () => {}, retireOwner = (
     settleReady(reason);
     if (poisoned) return;
     poisoned = true;
-    for (const [id, job] of pending) { clearTimeout(job.timer); job.reject(err('poisoned', 'Runtime requires restart')); pending.delete(id); }
+    for (const [id, job] of pending) {
+      clearTimeout(job.timer);
+      const failure = err('poisoned', 'Runtime requires restart');
+      if (job.route !== '/health') failure.diagnostic = diagnose(job, reason.code);
+      job.reject(failure); pending.delete(id);
+    }
     expiredJobs.clear();
     retire(reason);
     onFatal();
@@ -785,6 +844,23 @@ export function createRuntimeProxy(worker, { onFatal = () => {}, retireOwner = (
     if (message.manifest) manifest = message.manifest;
     if (message.startup_error) { poison(err('startup', message.startup_error)); return; }
     if (message.fatal) { poison(); return; }
+    if (message.phase) {
+      const event = message.phase, job = pending.get(Number(event.request_id));
+      if (!job || job.route === '/health' || !PHASES.has(event.stage) || !['start', 'end'].includes(event.state)) return;
+      if (job.events++ >= 96) { job.eventsDropped++; return; }
+      const at = monotonic();
+      if (event.state === 'start') job.phaseStarts.set(event.stage, at);
+      else if (job.phaseStarts.has(event.stage)) {
+        job.phaseMs[event.stage] = Math.round((job.phaseMs[event.stage] || 0) + Math.max(0, at - job.phaseStarts.get(event.stage)));
+        job.phaseStarts.delete(event.stage);
+      }
+      job.phase = { stage: event.stage, state: event.state, at };
+      for (const name of ['rows', 'source_chars']) {
+        if (Number.isSafeInteger(event[name]) && event[name] >= 0 && event[name] <= 1_000_000_000)
+          job.counters[`${event.stage}_${name}`] = event[name];
+      }
+      return;
+    }
     if (message.started) {
       const id = Number(message.started), job = pending.get(id);
       if (expiredJobs.has(id)) poison();
@@ -795,8 +871,12 @@ export function createRuntimeProxy(worker, { onFatal = () => {}, retireOwner = (
     const job = pending.get(message.id);
     if (!job) return;
     clearTimeout(job.timer); pending.delete(message.id);
-    if (message.error) job.reject(err(message.error, 'Runtime request failed'));
-    else job.resolve(message.result);
+    if (message.error) {
+      const failure = err(message.error, 'Runtime request failed');
+      if (job.route !== '/health') failure.diagnostic = diagnose(job, message.error);
+      job.reject(failure);
+    } else job.resolve(job.route !== '/health' && message.result && typeof message.result === 'object'
+      ? { ...message.result, request_diagnostic: requestDiagnostic(job) } : message.result);
   });
   worker.on('error', error => poison(error));
   worker.on('exit', () => poison(err('closed', 'Runtime exited')));
@@ -806,7 +886,9 @@ export function createRuntimeProxy(worker, { onFatal = () => {}, retireOwner = (
     return new Promise((resolveJob, reject) => {
       const timer = setTimeout(() => {
         const job = pending.get(id);
-        pending.delete(id); expired++; reject(err('deadline', 'Runtime absolute deadline expired'));
+        const failure = err('deadline', 'Runtime absolute deadline expired');
+        if (job && job.route !== '/health') failure.diagnostic = diagnose(job, 'deadline');
+        pending.delete(id); expired++; reject(failure);
         if (fatalOnTimeout && job?.started) poison();
         else if (fatalOnTimeout) {
           // Keep a bounded tombstone until the runtime acknowledges/removes the
@@ -815,7 +897,9 @@ export function createRuntimeProxy(worker, { onFatal = () => {}, retireOwner = (
           worker.postMessage({ cancel_id: String(id) });
         }
       }, Math.max(1, deadline - Date.now()));
-      pending.set(id, { resolve: resolveJob, reject, timer, route, started: false });
+      pending.set(id, { resolve: resolveJob, reject, timer, route, started: false, id,
+        externalId: typeof body.request_id === 'string' && /^[0-9a-f]{24}$/.test(body.request_id) ? body.request_id : undefined,
+        created: monotonic(), phase: null, phaseMs: {}, phaseStarts: new Map(), counters: {}, events: 0, eventsDropped: 0, diagnosed: false });
       worker.postMessage({ id, route, body: { ...body, request_id: String(id) }, deadline });
     });
   }
@@ -895,7 +979,8 @@ async function main() {
   const worker = new Worker(new URL(import.meta.url), { env: { ...process.env, QMD_EMBED_PARALLELISM: '1' },
     workerData: { kind: 'claude-note-runtime', sdkPath, dbPath,
     configPath, indexId: process.env.CLAUDE_NOTE_INDEX_ID || 'default' } });
-  const service = createRuntimeProxy(worker, { retireOwner: createProcessRetirement() });
+  const service = createRuntimeProxy(worker, { retireOwner: createProcessRetirement(),
+    onDiagnostic: diagnostic => console.error(`claude-note recall request failure: ${JSON.stringify(diagnostic)}`) });
   let server;
   process.once('SIGTERM', () => { service.close(); server?.close(); });
   await service.ready;
