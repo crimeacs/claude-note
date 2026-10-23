@@ -122,6 +122,14 @@ The pinned QMD vector adapter hydrates matched `(hash, seq)` keys through existi
 preserving collection filters, active-document joins, source bodies and scores. These settings
 and query changes do not add indexes, rewrite the database or change other QMD connections.
 
+On macOS the recall LaunchAgent uses `ProcessType=Interactive` because prompt responsiveness
+depends on it. The previous default process class applies background CPU and I/O throttles.
+Upgrades migrate the installer's former `Nice=5` default to normal priority while preserving
+explicit custom priorities and process classes.
+The runtime worker also limits QMD to one embedding context and one rerank context, matching
+its serialized request queue and avoiding the SDK's larger batch-processing pools. Other QMD
+processes keep their own settings.
+
 Health metadata and search operations now share one lexical-worker lifetime.
 An already pending health refresh settles before a search starts; it cannot
 close the worker while that later search is using it. This preserves deadlines

@@ -648,6 +648,7 @@ export async function prepareCachedModels(llm, models, { deadline = Date.now() +
         }
         if (expired || now() >= deadline) throw timedOut;
         model.warmed = true; model.warmup_status = 'warmed';
+        model.context_count = Array.isArray(llm[`${kind}Contexts`]) ? llm[`${kind}Contexts`].length : 0;
       } catch (error) {
         if (error === timedOut) throw error;
         model.warmup_status = error?.code === 'invalid_embedding' || error?.code === 'invalid_rerank'
@@ -678,8 +679,8 @@ async function buildRuntime({ sdkPath, dbPath, configPath, indexId = 'default', 
   const sdk = await import(pathToFileURL(resolve(sdkPath)).href);
   const store = await sdk.createStore({ dbPath, configPath });
   // Connection-local bounds only: no journal, persistent setting, index, or
-  // schema changes. mmap shares OS file pages instead of copying the full
-  // 333-MiB vector payload into an unbounded private SQLite cache.
+  // schema changes. mmap shares file-backed pages; bound this connection's
+  // private page cache to 128 MiB.
   const db = store.internal.db;
   db.pragma('mmap_size = 2147418112'); db.pragma('cache_size = -131072');
   const sqlite = { mmap_bytes: db.pragma('mmap_size', { simple: true }), cache_kib: db.pragma('cache_size', { simple: true }) };
@@ -709,7 +710,7 @@ async function buildRuntime({ sdkPath, dbPath, configPath, indexId = 'default', 
     fallbackLexical: async (query, collections, limit, deadline) => (await lexical.request({ kind: 'sdk_fallback', query, collections, limit }, deadline)).rows,
     manifest: { index: { id: indexId, db_path: store.dbPath, config_path: configPath,
       config_revision: digest(readFileSync(configPath)) },
-      qmd: { version: pkg.version, native_runtime_policy: 'existing_prebuilt_only', native_model_policy: 'startup_warm_retained',
+      qmd: { version: pkg.version, native_runtime_policy: 'existing_prebuilt_only', native_model_policy: 'startup_warm_retained', context_pool_limit: 1,
         vector_policy: 'indexed_hydration_startup_page_warm', vector_pages: vectorPages, sqlite, sdk_revision: digest(Buffer.concat(['index.js', 'store.js', 'llm.js']
         .map(name => readFileSync(join(dirname(sdkPath), name))))), revision_kind: 'sdk_bundle_sha256' },
       models: Object.fromEntries(Object.entries(models).map(([kind, { path, ...model }]) => [kind, model])) },
@@ -884,7 +885,11 @@ async function main() {
   if (!sdkPath) throw new Error('usage: node recall_server.mjs <qmd-sdk-index.js> [port=8182] [index-db] [index-yml]');
   const dbPath = dbArg || join(process.env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'qmd', 'index.sqlite');
   const configPath = ymlArg || join(process.env.QMD_CONFIG_DIR || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'qmd'), 'index.yml');
-  const worker = new Worker(new URL(import.meta.url), { workerData: { kind: 'claude-note-runtime', sdkPath, dbPath,
+  // The daemon serializes requests. QMD's automatic pools otherwise retain up
+  // to eight embed/four ranking contexts; the supported SDK override caps both
+  // pools and is local to this Worker, leaving other QMD processes unchanged.
+  const worker = new Worker(new URL(import.meta.url), { env: { ...process.env, QMD_EMBED_PARALLELISM: '1' },
+    workerData: { kind: 'claude-note-runtime', sdkPath, dbPath,
     configPath, indexId: process.env.CLAUDE_NOTE_INDEX_ID || 'default' } });
   const service = createRuntimeProxy(worker, { retireOwner: createProcessRetirement() });
   let server;

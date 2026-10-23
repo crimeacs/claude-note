@@ -66,6 +66,24 @@ class UpgradeRecallRuntimeTests(unittest.TestCase):
         install.assert_not_called()
         self.assertFalse((self.root / 'Library').exists())
 
+    def test_latency_service_uses_interactive_policy_and_migrates_old_default(self):
+        previous = {'Label': setup_recall.SERVER_LABEL,
+                    'ProgramArguments': ['/old/node', '/old/recall_server.mjs', '/old/sdk.js', '8182'],
+                    'Nice': 5, 'EnvironmentVariables': {'QMD_METAL_KEEP_RESIDENCY': '1'}}
+        with mock.patch.object(setup_recall.subprocess, 'run', return_value=self.done()):
+            verdict = setup_recall.install_server_agent('/synthetic/qmd', previous=previous)
+        self.assertTrue(verdict.startswith('installed'), verdict)
+        path = self.root / 'Library/LaunchAgents' / (setup_recall.SERVER_LABEL + '.plist')
+        data = plistlib.loads(path.read_bytes())
+        self.assertEqual(data['ProcessType'], 'Interactive')
+        self.assertEqual(data['Nice'], 0)
+        previous.update(ProcessType='Background', Nice=10)
+        with mock.patch.object(setup_recall.subprocess, 'run', return_value=self.done()):
+            setup_recall.install_server_agent('/synthetic/qmd', previous=previous)
+        data = plistlib.loads(path.read_bytes())
+        self.assertEqual(data['ProcessType'], 'Background')
+        self.assertEqual(data['Nice'], 10)
+
     def test_existing_job_with_missing_prerequisite_fails_for_retry(self):
         agent = self.root / 'Library/LaunchAgents' / (setup_recall.SERVER_LABEL + '.plist')
         agent.parent.mkdir(parents=True)

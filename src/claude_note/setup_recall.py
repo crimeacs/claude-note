@@ -594,7 +594,7 @@ def install_server_agent(qmd: str, port: int = 8182, dry_run: bool = False, *, p
     plist = HOME / "Library" / "LaunchAgents" / f"{SERVER_LABEL}.plist"
     body = {"Label": SERVER_LABEL, "ProgramArguments": [node, str(server), str(sdk), str(port)],
             "EnvironmentVariables": {"QMD_METAL_KEEP_RESIDENCY": "1"}, "KeepAlive": True,
-            "RunAtLoad": True, "Nice": 5, "StandardOutPath": "/dev/null",
+            "RunAtLoad": True, "ProcessType": "Interactive", "Nice": 0, "StandardOutPath": "/dev/null",
             "StandardErrorPath": str(SHARE / "recall-server.err")}
     if previous is not None:
         arguments = _server_arguments(previous)
@@ -603,6 +603,10 @@ def install_server_agent(qmd: str, port: int = 8182, dry_run: bool = False, *, p
         body['EnvironmentVariables'] = {"QMD_METAL_KEEP_RESIDENCY": "1", **previous.get('EnvironmentVariables', {})}
         if 'Program' in previous:
             body['Program'] = node
+        # Migrate the installer's old deprioritized CPU default. Explicit custom
+        # priorities and process classes remain the user's configuration.
+        if previous.get('Nice') == 5:
+            body['Nice'] = 0
     if dry_run:
         return f"would install {plist.name} (127.0.0.1:{port})"
     if plist.is_symlink():

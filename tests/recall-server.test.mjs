@@ -28,7 +28,7 @@ const deferred = () => {
 
 test('daemon prepares cached models serially and retains them without claiming retrieval readiness', async () => {
   const calls = [], models = { embed: { id: 'embed-id', cached: true }, rerank: { id: rerankModel, cached: true } };
-  const llm = { inactivityTimeoutMs: 300000, disposeModelsOnInactivity: true,
+  const llm = { inactivityTimeoutMs: 300000, disposeModelsOnInactivity: true, embedContexts: [{}], rerankContexts: [{}],
     async embed() {
       assert.equal(this.inactivityTimeoutMs, 0); assert.equal(this.disposeModelsOnInactivity, false);
       calls.push('embed'); return { model: 'embed-id', embedding: [.2, .4] };
@@ -38,6 +38,7 @@ test('daemon prepares cached models serially and retains them without claiming r
   await prepareCachedModels(llm, models);
   assert.deepEqual(calls, ['embed', 'rerank']);
   assert.equal(models.embed.warmed, true); assert.equal(models.rerank.warmed, true);
+  assert.equal(models.embed.context_count, 1); assert.equal(models.rerank.context_count, 1);
   const service = createRecallService({ store: {}, llm, lexical: lex(), manifest: { models } });
   assert.equal(service.capabilities().models.embed.warmed, true);
   assert.equal(service.capabilities().vector_ready, false); assert.equal(service.capabilities().rerank_ready, false);
