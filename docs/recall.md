@@ -59,7 +59,9 @@ a measured miss on a 15,000-note index.
    literal token to BM25, and each matched nothing. Recall searches their parts.
 3. **A ladder of queries.** The full query, then the 5, 3 and 2 most discriminating words, in the
    prompt's own order. A capitalized word (except the first) and a word with digits rank as
-   specific; then longer words.
+   specific; then longer words. CLI fallback also tries the other pairs from the three-word
+   rung (at most two extra queries), so one misspelling need not survive every query. It uses
+   the original words without guessing their spelling.
 4. **Every rung is pooled.** Taking the first rung that answered let a narrow query with a worse
    note beat a wide one with the right note. Notes that several rungs agree on rank first.
 5. **Noise is skipped.** Session transcripts and the inbox dominate the index by count and their
@@ -98,9 +100,17 @@ After a search attempt, `engine` identifies its last attempted route: a strict s
 labelled `server`; automatic fallback records both attempts and switches to
 `cli` when a CLI search is scheduled. An empty `attempted_engines` means no
 search was attempted; `engine` then retains its legacy `cli` default.
-The client ID correlates the HTTP request
-and its receipt; the runtime proxy uses a separate internal job ID. These fields
-do not expose queue wait versus native execution time or prove a timeout cause.
+Successful keyword fallback clears the earlier server error from its result reason,
+while retaining the transport receipt and partial semantic coverage. A keyword miss
+while semantic search is unavailable reports `unavailable`, rather than a complete miss.
+
+The parent runtime proxy correlates its internal job ID with a valid random client ID.
+It records bounded phase events before potentially blocking work: lexical SQL, passage
+selection, embedding, vector SQL, vector hydration, and reranking. Successful HTTP
+responses include `request_diagnostic`; failed requests also log the last observed phase,
+phase durations and numeric row/character counters before retirement. These diagnostics
+contain no prompt, source paths, SQL or vector contents. A last phase narrows the location
+of a stall; it does not establish its cause or prove native cancellation.
 A search's adapter subdeadline can expire before the whole eight-second
 recall budget. Automatic mode shortens the server slice to leave time for a CLI search and
 source verification; `timeout` remains an upper bound. Read-capacity exhaustion is distinguished in the call outcome;
