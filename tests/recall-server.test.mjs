@@ -12,7 +12,7 @@ import http from 'node:http';
 import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRecallService, createRuntimeProxy, createProcessRetirement, ScopedLexicalWorker, createIndexSnapshotReader, scopedLexical, passage, literalFTS, modelFileIdentity } from '../src/claude_note/recall_server.mjs';
+import { createRecallService, createRuntimeProxy, createProcessRetirement, ScopedLexicalWorker, createIndexSnapshotReader, scopedLexical, passage, literalFTS, modelFileIdentity, prepareCachedModels, prepareVectorPages, indexedVectorDatabase } from '../src/claude_note/recall_server.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const metadata = { corpus_digest: 'corpus', generation: 'generation', vector_rows: 1, vector_models: ['embed-id'] };
@@ -25,6 +25,96 @@ const deferred = () => {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 };
+
+test('daemon prepares cached models serially and retains them without claiming retrieval readiness', async () => {
+  const calls = [], models = { embed: { id: 'embed-id', cached: true }, rerank: { id: rerankModel, cached: true } };
+  const llm = { inactivityTimeoutMs: 300000, disposeModelsOnInactivity: true,
+    async embed() {
+      assert.equal(this.inactivityTimeoutMs, 0); assert.equal(this.disposeModelsOnInactivity, false);
+      calls.push('embed'); return { model: 'embed-id', embedding: [.2, .4] };
+    },
+    async rerank(_, docs) { calls.push('rerank'); return { model: rerankModel, results: docs.map((doc, i) => ({ file: doc.file, score: .8 - i / 2 })) }; },
+  };
+  await prepareCachedModels(llm, models);
+  assert.deepEqual(calls, ['embed', 'rerank']);
+  assert.equal(models.embed.warmed, true); assert.equal(models.rerank.warmed, true);
+  const service = createRecallService({ store: {}, llm, lexical: lex(), manifest: { models } });
+  assert.equal(service.capabilities().models.embed.warmed, true);
+  assert.equal(service.capabilities().vector_ready, false); assert.equal(service.capabilities().rerank_ready, false);
+  service.close();
+});
+
+test('missing cache never invokes native model resolution or loading', async () => {
+  const models = { embed: { cached: false }, rerank: { cached: false } };
+  await prepareCachedModels({ embed() { assert.fail('Missing cache must not load'); }, rerank() { assert.fail('Missing cache must not load'); } }, models);
+  for (const model of Object.values(models)) {
+    assert.equal(model.warmed, false); assert.equal(model.warmup_status, 'model_cache_unavailable');
+  }
+});
+
+test('failed cached model warmup remains unavailable while the other model can prepare', async () => {
+  const models = { embed: { id: 'embed-id', cached: true }, rerank: { id: rerankModel, cached: true } };
+  let fatal = 0;
+  await prepareCachedModels({ embed: async () => ({ model: 'embed-id', embedding: [NaN] }),
+    rerank: async (_, docs) => ({ model: rerankModel, results: docs.map(doc => ({ file: doc.file, score: .5 })) }) }, models,
+  { onFatal: () => fatal++ });
+  assert.equal(models.embed.warmed, false); assert.equal(models.embed.warmup_status, 'invalid_embedding');
+  assert.equal(models.rerank.warmed, true); assert.equal(fatal, 0);
+  models.embed.cached = false;
+  await prepareCachedModels({ rerank: async (_, docs) => ({ model: 'fallback', results: docs.map(doc => ({ file: doc.file, score: .5 })) }) }, models);
+  assert.equal(models.rerank.warmed, false); assert.equal(models.rerank.warmup_status, 'invalid_rerank');
+});
+
+test('startup deadline retires its owner and late native completion cannot warm or start another model', async () => {
+  const held = deferred(), models = { embed: { id: 'embed-id', cached: true }, rerank: { id: rerankModel, cached: true } };
+  let fatal = 0, ranking = 0;
+  await assert.rejects(prepareCachedModels({ embed: () => held.promise, rerank() { ranking++; } }, models,
+    { deadline: Date.now() + 20, onFatal: () => fatal++ }), error => error.code === 'deadline');
+  assert.equal(fatal, 1); assert.equal(ranking, 0);
+  for (const model of Object.values(models)) { assert.equal(model.warmed, false); assert.equal(model.warmup_status, 'deadline'); }
+  held.resolve({ model: 'embed-id', embedding: [.2, .4] }); await sleep(5);
+  assert.equal(ranking, 0); assert.equal(models.embed.warmed, false); assert.equal(models.rerank.warmed, false);
+});
+
+test('vector hydration batches exact indexed keys and retains trailing scope parameters', () => {
+  const prepared = [], hash = 'a'.repeat(64), keys = Array.from({ length: 201 }, (_, i) => `${hash}_${i}`);
+  const db = indexedVectorDatabase({ prepare(sql) { return { all(...parameters) { prepared.push({ sql, parameters }); return []; } }; } });
+  const sql = `SELECT cv.hash,cv.seq FROM content_vectors cv WHERE cv.hash || '_' || cv.seq IN (${keys.map(() => '?').join(',')}) AND d.collection = ?`;
+  db.prepare(sql).all(...keys, 'public');
+  assert.equal(prepared.length, 2);
+  for (const call of prepared) { assert.doesNotMatch(call.sql, /WHERE cv\.hash \|\|/); assert.match(call.sql, /cv.hash = \? AND cv.seq = \?/); assert.equal(call.parameters.at(-1), 'public'); }
+  assert.equal(prepared[0].parameters.length, 401); assert.deepEqual(prepared[1].parameters, [hash, 200, 'public']);
+  assert.throws(() => db.prepare("SELECT * FROM cv WHERE cv.hash || '_' || cv.seq IN (?)").all('invalid_key'), error => error.code === 'invalid_vector_key');
+});
+
+test('indexed hydration matches QMD rows, active filtering, chunks and collection scope', { skip: !process.env.CLAUDE_NOTE_TEST_SQLITE }, () => {
+  const Database = createRequire(import.meta.url)(process.env.CLAUDE_NOTE_TEST_SQLITE), db = new Database(':memory:');
+  try {
+    db.exec('CREATE TABLE content_vectors(hash TEXT,seq INTEGER,pos INTEGER,PRIMARY KEY(hash,seq)); CREATE TABLE documents(hash TEXT,collection TEXT,active INTEGER,path TEXT); CREATE TABLE content(hash TEXT PRIMARY KEY,doc TEXT); CREATE INDEX doc_hash ON documents(hash);');
+    const hash = 'a'.repeat(64), other = 'b'.repeat(64);
+    db.prepare('INSERT INTO content_vectors VALUES(?,?,?)').run(hash, 0, 0); db.prepare('INSERT INTO content_vectors VALUES(?,?,?)').run(hash, 1, 100);
+    db.prepare('INSERT INTO content_vectors VALUES(?,?,?)').run(other, 0, 0);
+    for (const [h, collection, active] of [[hash, 'public', 1], [hash, 'private', 1], [other, 'public', 0]]) db.prepare('INSERT INTO documents VALUES(?,?,?,?)').run(h, collection, active, 'note.md');
+    for (const h of [hash, other]) db.prepare('INSERT INTO content VALUES(?,?)').run(h, 'Public synthetic body');
+    const sql = "SELECT cv.hash,cv.seq,cv.pos,d.collection,content.doc FROM content_vectors cv JOIN documents d ON d.hash=cv.hash AND d.active=1 JOIN content ON content.hash=d.hash WHERE cv.hash || '_' || cv.seq IN (?,?,?) AND d.collection = ?";
+    const args = [`${hash}_0`, `${hash}_1`, `${other}_0`, 'public'];
+    const indexed = indexedVectorDatabase(db).prepare(sql).all(...args);
+    assert.deepEqual(indexed, db.prepare(sql).all(...args)); assert.equal(indexed.length, 2);
+    const plan = db.prepare('EXPLAIN QUERY PLAN SELECT * FROM content_vectors cv WHERE (cv.hash = ? AND cv.seq = ?)').all(hash, 0);
+    assert.ok(plan.some(row => /SEARCH cv USING INDEX.*hash=\? AND seq=\?/.test(row.detail)));
+  } finally { db.close(); }
+});
+
+test('startup vector-page scan is bounded and ordinary failure preserves lexical startup', async () => {
+  const calls = [];
+  assert.equal(await prepareVectorPages({ async searchVector(query, options) { calls.push({ query, options }); return []; } }), 'warmed');
+  assert.deepEqual(calls[0].options, { limit: 1 });
+  assert.equal(await prepareVectorPages({ async searchVector() { throw new Error('Unavailable index'); } }), 'index_warmup_failed');
+  let fatal = 0;
+  await assert.rejects(prepareVectorPages({ searchVector: () => new Promise(() => {}) },
+    { deadline: Date.now() + 20, onFatal: () => fatal++ }), error => error.code === 'deadline');
+  assert.equal(fatal, 1);
+});
 
 test('passage selection retains older matching evidence instead of an unrelated latest block', () => {
   const body = '# Earlier\n\nThe retry handler must preserve idempotency keys across failed payment attempts.\n\n# Latest\n\nBasil grows well beside a sunny window and needs occasional water during winter.\n';

@@ -99,6 +99,88 @@ class RecallTests(unittest.TestCase):
                        "ok thanks", "/compact keep going please now"):
             self.assertEqual(recall.recall(prompt, settings(), lambda c, t: []).status, "skipped")
 
+    def test_subject_free_followup_never_searches_generic_action_notes(self):
+        for prompt in ("fix it", "Please repair this!", "check that please"):
+            with self.subTest(prompt=prompt), mock.patch.object(recall, "server_post") as post:
+                runner = mock.Mock(return_value=[item("qmd://notes/random-fix.md", "Old incident fix")])
+                result = recall.recall(prompt, settings(engine="auto"), runner)
+                self.assertEqual(result.status, "skipped")
+                self.assertIn("no retrieval subject", result.reason)
+                runner.assert_not_called()
+                post.assert_not_called()
+        for prompt in ("codex hooks", "INSUFFICIENTPERMISSIONS", "fix OAuth retry"):
+            with self.subTest(prompt=prompt):
+                runner = mock.Mock(return_value=[])
+                result = recall.recall(prompt, settings(), runner)
+                self.assertEqual(result.status, "miss")
+                runner.assert_called()
+
+    def test_cli_search_preserves_time_for_actual_source_verification(self):
+        # Every rung is slow, but returns a real source. Searching until the
+        # whole deadline would erase every result during source preparation.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "oauth.md"
+            path.write_text("---\ntype: gotcha\n---\nOAuth retry requires removing the stale token before requesting permissions.\n")
+            calls = []
+            def runner(cmd, timeout):
+                calls.append(timeout)
+                time.sleep(min(.09, timeout * .7))
+                return [item("qmd://notes/oauth.md", "OAuth retry")]
+            def resolve(*_args, **_kwargs):
+                time.sleep(.035)
+                return path
+            with mock.patch.object(recall, "local_path", side_effect=resolve):
+                started = time.monotonic()
+                result = recall.recall("OAuth retry stale token permission scope", settings(
+                    budget=.35, memory_collections=["agentmem"]), runner)
+            self.assertLess(time.monotonic() - started, .45)
+            self.assertEqual(result.status, "hit")
+            self.assertEqual(result.hits[0].revision_kind, "source_file_sha256")
+            self.assertEqual(result.hits[0].anchor["start_line"], 4)
+            self.assertGreater(len(calls), 1)
+
+    def test_incomplete_cli_ladder_is_unavailable_instead_of_a_false_miss(self):
+        release = threading.Event()
+        calls = []
+        def runner(cmd, timeout):
+            calls.append(cmd)
+            if len(calls) == 1:
+                return []
+            release.wait(1)  # deliberately ignores the adapter's timeout
+            return []
+        try:
+            started = time.monotonic()
+            result = recall.recall("OAuth payment retry permission stale token", settings(budget=.12), runner)
+            self.assertLess(time.monotonic() - started, .25)
+            self.assertEqual(result.status, "unavailable")
+            self.assertTrue(result.coverage["partial"])
+            self.assertTrue(result.deadline_exhausted)
+            self.assertIn("coverage incomplete", result.reason)
+        finally:
+            release.set()
+
+    def test_source_resolution_timeout_is_unavailable_instead_of_no_eligible_passages(self):
+        release = threading.Event()
+        try:
+            with mock.patch.object(recall, "local_path", side_effect=lambda *_a, **_k: release.wait(1)):
+                result = recall.recall("OAuth retry", settings(budget=.05),
+                                       lambda *_: [item("qmd://notes/oauth.md", "OAuth")])
+            self.assertEqual(result.status, "unavailable")
+            self.assertEqual(result.reason, "source verification deadline exhausted")
+            self.assertEqual(result.coverage["local_resolution"], "partial_deadline")
+        finally:
+            release.set()
+
+    def test_incomplete_search_cannot_turn_an_ineligible_pool_into_a_miss(self):
+        calls = []
+        def runner(*_args):
+            calls.append(True)
+            return [item("qmd://notes/fm.md", "Metadata", "type: gotcha")] if len(calls) == 1 else None
+        with mock.patch.object(recall, "local_path", return_value=None):
+            result = recall.recall("OAuth payment retry stale token", settings(), runner)
+        self.assertEqual(result.status, "unavailable")
+        self.assertIn("coverage incomplete", result.reason)
+
     def test_memory_collection_gets_reserved_slots(self):
         def runner(cmd, timeout):
             if "-c" in cmd and cmd[cmd.index("-c") + 1] == "agentmem":
@@ -356,6 +438,22 @@ class ServerEngineTests(unittest.TestCase):
         self.assertTrue(calls)
         self.assertEqual(res.engine, "cli")
 
+    def test_fallback_scheduling_preserves_original_rung_ranking(self):
+        calls = []
+        def runner(cmd, timeout):
+            query = cmd[cmd.index("search") + 1]
+            calls.append(query)
+            if len(query.split()) == 2:
+                return [item("qmd://notes/narrow.md", "Narrow")]
+            if len(query.split()) == 6:
+                return [item("qmd://notes/wide.md", "Wide")]
+            return []
+        with mock.patch.object(recall, "server_post", return_value=None), \
+                mock.patch.object(recall, "local_path", return_value=None):
+            result = recall.recall("OAuth payment retry permission stale token", settings(engine="auto"), runner)
+        self.assertEqual(len(calls[0].split()), 2)
+        self.assertEqual(result.hits[0].title, "Wide")
+
     def test_server_only_reports_unavailable(self):
         with mock.patch.object(recall, "server_post", return_value=None):
             res = recall.recall("Can I just run npm run build on the 4 GB box?", settings(engine="server"))
@@ -450,6 +548,47 @@ class ServerTransportTests(unittest.TestCase):
                 self.assertEqual(result.status, "miss" if engine == "auto" else "unavailable")
             finally:
                 release.set()
+
+    def test_auto_server_stall_reserves_cli_and_source_time_within_one_budget(self):
+        release = threading.Event()
+        response = self.response({"lex": []})
+        read = response.read
+        response.read = lambda n: (release.wait(1), read(n))[1]
+        queries = []
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "oauth.md"
+            path.write_text("OAuth retry requires deleting the stale token before requesting permission scope.\n")
+            def runner(cmd, timeout):
+                queries.append(cmd[cmd.index("search") + 1])
+                time.sleep(min(.01, timeout * .7))
+                return [item("qmd://notes/oauth.md", "OAuth retry")]
+            try:
+                with mock.patch("urllib.request.urlopen", return_value=response), \
+                        mock.patch.object(recall, "local_path", return_value=path):
+                    started = time.monotonic()
+                    result = recall.recall("OAuth payment retry permission stale token", settings(
+                        engine="auto", timeout=6, budget=.6, memory_collections=["agentmem"]), runner)
+                self.assertLess(time.monotonic() - started, .7)
+                self.assertEqual(result.status, "hit")
+                self.assertEqual(result.attempted_engines, ["server", "cli"])
+                self.assertEqual(len(queries[0].split()), 2)
+                self.assertEqual(result.hits[0].revision_kind, "source_file_sha256")
+                self.assertEqual(result.coverage["semantic"], "unavailable_cli")
+                self.assertEqual(result.hits[0].anchor["start_line"], 1)
+            finally:
+                release.set()
+
+    def test_healthy_semantic_server_keeps_priority_and_avoids_cli(self):
+        row = item("qmd://notes/oauth.md", "OAuth retry")
+        row["score"] = .9
+        runner = mock.Mock(return_value=[])
+        with mock.patch.object(recall, "server_post", return_value={"lex": [], "vec": [row]}), \
+                mock.patch.object(recall, "local_path", return_value=None):
+            result = recall.recall("Unexpected charges after connection failure", settings(
+                engine="auto", budget=.3, rerank=False), runner)
+        self.assertEqual(result.status, "hit")
+        self.assertEqual(result.attempted_engines, ["server"])
+        runner.assert_not_called()
 
     def test_outer_read_capacity_failure_retains_attempt_without_starting_transport(self):
         result = recall.Result(status="skipped", engine="server")

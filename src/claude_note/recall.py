@@ -47,7 +47,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -202,6 +202,13 @@ COMPOUND = re.compile(r"[A-Za-z0-9]+(?:[_.][A-Za-z0-9]+)+")
 AUTOMATED_EVENT = re.compile(r"<task-notification>|\[SYSTEM NOTIFICATION")
 # Wrapper tags keep their inner text but lose their markup (and attributes).
 WRAPPER_TAG = re.compile(r"</?[A-Za-z_][\w-]*(?:\s[^<>]*)?>")
+# These follow-ups depend on the preceding conversation, which a prompt hook
+# does not receive. Searching "fix" alone injects arbitrary incident notes.
+# Keep this narrow: short subjects such as "codex hooks" and single identifiers
+# are still useful queries, and non-English intent still reaches semantic search.
+UNRESOLVED_FOLLOWUP = re.compile(
+    r"^(?:please\s+)?(?:fix|repair|check|handle|do)\s+(?:it|this|that)"
+    r"(?:\s+please)?[.!?]*$", re.IGNORECASE)
 
 
 def content_terms(text: str, max_terms: int = 10) -> list[str]:
@@ -1166,6 +1173,9 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
     if not prompt or re.match(r"^/[A-Za-z][\w-]*(?:\s|$)", prompt):
         result.reason = "prompt too short or a slash command"
         return
+    if not extra_rungs and UNRESOLVED_FOLLOWUP.fullmatch(prompt):
+        result.reason = "follow-up has no retrieval subject; use the preceding conversation"
+        return
     # Bound lexical CPU as well as semantic input. Huge wrappers cannot consume
     # the entire hook budget before the first deadline check.
     terms = _bounded(lambda: content_terms(prompt, max(1, settings.max_terms)), deadline)
@@ -1183,13 +1193,33 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
     if raw_partial:
         result.coverage["raw_prompt"] = "sampled_head_tail"
     pool, ran = {}, False
+    # Search results still need local source resolution, revision checks and
+    # passage selection. Reserve that work before either adapter starts. In
+    # auto mode a slow warm server also has to leave time for a real CLI search.
+    # These are slices of the existing absolute budget, never extra timeouts.
+    left = max(0, deadline - time.monotonic())
+    source_reserve = min(1.0, left * .2)
+    search_deadline = deadline - source_reserve
+    cli_reserve = min(2.0, left * .3) if settings.engine == "auto" else 0
+    server_deadline = search_deadline - cli_reserve
     use_server = settings.engine == "server" or (settings.engine == "auto" and not settings.index)
     if use_server and not extra_rungs:
         result.engine = "server"
         result.attempted_engines.append("server")
         server_result = Result(status="skipped")
-        got = _server_attempt(result, "/search", deadline, lambda request_id: _server_pool(
-            prompt, ladder, settings, started, server_result, request_id))
+        # Leave a small scheduling margin between the transport's timeout and
+        # its outer guard so the transport can retain its failure receipt.
+        server_settings = replace(settings, timeout=min(settings.timeout,
+            max(0, server_deadline - time.monotonic() - min(.01, left * .01))))
+        try:
+            got = _server_attempt(result, "/search", server_deadline, lambda request_id: _server_pool(
+                prompt, ladder, server_settings, started, server_result, request_id))
+        except TimeoutError:
+            got = None
+            server_result.reason = "recall server search deadline exhausted"
+            server_result.coverage = {"search": "partial_server_deadline"}
+            if settings.engine == "server":
+                result.deadline_exhausted = True
         result.manifest, result.coverage = server_result.manifest, server_result.coverage or result.coverage
         if server_result.server_calls:
             result.server_calls[-1] = server_result.server_calls[0]
@@ -1213,38 +1243,60 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
             cli_rungs += [[word] for word in ladder[-1][:2] if [word] not in cli_rungs]
         result.coverage.update(lexical="partial_scoped_cli_sdk_overfetch" if settings.collections or settings.memory_collections
                                else "cli_topk", semantic="unavailable_cli")
-        for scope, is_memory in scopes:
-            for rung_i, rung in enumerate(cli_rungs):
-                left = deadline - time.monotonic()
-                if left <= 0:
-                    result.deadline_exhausted = True
-                    break
-                cmd = base + ["search", " ".join(rung), "-n", str(settings.search_n), "--json"]
-                if scope:
-                    cmd += ["-c", scope]
-                result.engine = "cli"
-                if "cli" not in result.attempted_engines:
-                    result.attempted_engines.append("cli")
-                got = _bounded(lambda cmd=cmd, left=left: runner(cmd, min(settings.timeout, left)), deadline)
-                if got is None:
+        scheduled_rungs = list(enumerate(cli_rungs))
+        if result.attempted_engines == ["server"] and len(ladder) > 1:
+            # Search the least conjunctive rung first under a fallback's smaller
+            # budget, preserving original rung indices for deterministic ranking.
+            narrow = len(ladder) - 1
+            scheduled_rungs = [scheduled_rungs[narrow],
+                               *(entry for entry in scheduled_rungs if entry[0] != narrow)]
+        calls = [(scope, is_memory, rung_i, rung) for scope, is_memory in scopes
+                 for rung_i, rung in scheduled_rungs]
+        for call_i, (scope, is_memory, rung_i, rung) in enumerate(calls):
+            left = search_deadline - time.monotonic()
+            if left <= 0:
+                result.deadline_exhausted = True
+                result.coverage.update(partial=True, lexical="partial_cli_deadline")
+                break
+            cmd = base + ["search", " ".join(rung), "-n", str(settings.search_n), "--json"]
+            if scope:
+                cmd += ["-c", scope]
+            result.engine = "cli"
+            if "cli" not in result.attempted_engines:
+                result.attempted_engines.append("cli")
+            # One hung rung must not consume the entire search slice. The
+            # absolute per-attempt guard also bounds custom runners that
+            # ignore the timeout argument.
+            timeout = min(settings.timeout, left / min(2, len(calls) - call_i))
+            call_deadline = min(search_deadline, time.monotonic() + timeout)
+            try:
+                got = _bounded(lambda cmd=cmd, timeout=timeout: runner(cmd, timeout), call_deadline)
+            except TimeoutError:
+                got = None
+                result.deadline_exhausted = True
+            if got is None:
+                result.coverage.update(partial=True, lexical="partial_cli_failure")
+                continue
+            ran = True
+            for pos, item in enumerate(got[:max(1, settings.search_n)]):
+                if not isinstance(item, dict):
                     continue
-                ran = True
-                for pos, item in enumerate(got[:max(1, settings.search_n)]):
-                    if not isinstance(item, dict):
-                        continue
-                    uri = item.get("file") or item.get("path")
-                    if not isinstance(uri, str) or not uri:
-                        continue
-                    c = pool.setdefault(uri, {"item": item, "votes": 0, "best": 1e9, "memory": False})
-                    c["votes"] += 1
-                    c["best"] = min(c["best"], pos + 3 * rung_i)
-                    c["memory"] |= is_memory
+                uri = item.get("file") or item.get("path")
+                if not isinstance(uri, str) or not uri:
+                    continue
+                c = pool.setdefault(uri, {"item": item, "votes": 0, "best": 1e9, "memory": False})
+                c["votes"] += 1
+                c["best"] = min(c["best"], pos + 3 * rung_i)
+                c["memory"] |= is_memory
     if not ran:
         result.status, result.reason = "unavailable", "qmd failed, hung, or its index was locked"
         return
     result.pool = len(pool)
     if not pool:
-        result.status, result.reason = "miss", result.reason or "no keyword or semantic match"
+        if result.coverage.get("partial"):
+            result.status, result.reason = "unavailable", "CLI search coverage incomplete; no verified match returned"
+        else:
+            result.status, result.reason = "miss", result.reason or "no keyword or semantic match"
         return
     skip = [re.compile(p) for p in settings.skip_paths]
     candidates = []
@@ -1257,6 +1309,7 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
             hit = _prepare_hit(item, c, prompt, settings, deadline)
         except TimeoutError:
             result.deadline_exhausted = True
+            result.coverage.update(partial=True, local_resolution="partial_deadline")
             break
         if hit:
             candidates.append(hit)
@@ -1276,7 +1329,12 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
     except TimeoutError:
         result.deadline_exhausted = True
     if not candidates:
-        result.status, result.reason = "miss", "no eligible evidence passages"
+        if result.coverage.get("local_resolution") == "partial_deadline":
+            result.status, result.reason = "unavailable", "source verification deadline exhausted"
+        elif result.coverage.get("partial"):
+            result.status, result.reason = "unavailable", "search coverage incomplete; no eligible source verified"
+        else:
+            result.status, result.reason = "miss", "no eligible evidence passages"
         return
     result.candidates = [h.path or h.uri for h in candidates]
     memories = [h for h in candidates if h.memory][:max(0, settings.memory_slots)]
