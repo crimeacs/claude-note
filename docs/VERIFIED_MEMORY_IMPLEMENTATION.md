@@ -117,6 +117,13 @@ remain readable and are not pruned. A capture-only worker mode leaves synthesis
 requests pending without provider calls or retry consumption. These storage
 contracts do not establish cold native readiness or learned-memory benefit.
 
+Version 2.1.16 adds a 16 MiB aggregate persisted-record byte budget to pending
+event delivery, alongside the existing event count and 4 MiB individual record
+limits. Whole records resume on later polls; capture acknowledgements and
+corrupt-source blocking remain independent of delivery. This bounds serialized
+payload collected by a poll, not total RSS, parser/state-cache memory or native
+runtime allocations. No historical evidence is pruned by this limit.
+
 The original 15-workstream research and A–F deliverables remain broader than
 these implementation contracts. Full task outcomes, each baseline's own learned
 memory across phases, dense-only comparison, evidence × extraction and

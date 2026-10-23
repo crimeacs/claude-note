@@ -14,6 +14,10 @@ from . import models
 from .state_io import append_line, atomic_json, read_json
 
 
+MAX_EVENT_BYTES = 4 * 1024 * 1024
+MAX_PENDING_BYTES = 16 * 1024 * 1024
+
+
 def get_queue_file(date: Optional[datetime] = None) -> Path:
     """Get the queue file path for a given date (default: today)."""
     if date is None:
@@ -69,7 +73,7 @@ def read_all_events() -> Iterator[models.QueuedEvent]:
         yield from read_events(queue_file)
 
 
-def read_pending_events(limit: int = 10000) -> Iterator[models.QueuedEvent]:
+def read_pending_events(limit: int = 10000, *, max_bytes: int = MAX_PENDING_BYTES) -> Iterator[models.QueuedEvent]:
     """Advance append-journal offsets only past durably captured session events.
 
     Delivery itself does not acknowledge a record. Prefix digests detect edits
@@ -79,10 +83,22 @@ def read_pending_events(limit: int = 10000) -> Iterator[models.QueuedEvent]:
     acknowledgement, all visible import snapshots for that session are hashed.
     Idle captured batches need no snapshot reads; metadata work still scales
     with the visible backlog. Source use/capture has its own current checks.
+
+    One delivery is bounded by both count and persisted UTF-8 record bytes,
+    including each newline. The byte budget must fit one maximum-size journal
+    record so a valid event can always make progress in an empty delivery.
+    This bounds the returned payload, not Python object overhead or the memory
+    needed to verify retained import metadata and source evidence.
     """
+    if type(limit) is not int or limit < 0:
+        raise ValueError("Pending event count limit must be a nonnegative integer")
+    if type(max_bytes) is not int or max_bytes < MAX_EVENT_BYTES:
+        raise ValueError("Pending byte budget must fit one maximum-size event")
+    if not limit:
+        return
     from .session_tracker import load_session_state
     state_cache = {}
-    delivered = 0
+    delivered, delivered_bytes = 0, 0
     from . import import_publication
     paths = list(read_queue_files())
     batches, session_batches, blocked_sessions = {}, {}, set()
@@ -141,8 +157,12 @@ def read_pending_events(limit: int = 10000) -> Iterator[models.QueuedEvent]:
             for payload in record["events"]:
                 event = models.QueuedEvent(**payload).validate()
                 if event.event_id not in captured:
-                    yield event
+                    size = len(import_publication._json(payload)) + 1
+                    if delivered_bytes + size > max_bytes:
+                        return
                     delivered += 1
+                    delivered_bytes += size
+                    yield event
                     if delivered >= limit:
                         return
             continue
@@ -170,11 +190,12 @@ def read_pending_events(limit: int = 10000) -> Iterator[models.QueuedEvent]:
                 offset, digest = 0, hashlib.sha256()
             acknowledged, contiguous = offset, True
             acknowledged_digest = digest.hexdigest()
+            budget_exhausted = False
             while True:
-                line = handle.readline(4 * 1024 * 1024 + 1)
+                line = handle.readline(MAX_EVENT_BYTES + 1)
                 if not line:
                     break
-                if len(line) > 4 * 1024 * 1024 or not line.endswith(b"\n"):
+                if len(line) > MAX_EVENT_BYTES or not line.endswith(b"\n"):
                     break  # incomplete/oversized evidence is never acknowledged
                 digest.update(line)
                 try:
@@ -223,13 +244,17 @@ def read_pending_events(limit: int = 10000) -> Iterator[models.QueuedEvent]:
                     acknowledged, acknowledged_digest = handle.tell(), digest.hexdigest()
                 elif not captured:
                     contiguous = False
-                    yield event
+                    if delivered_bytes + len(line) > max_bytes:
+                        budget_exhausted = True
+                        break
                     delivered += 1
+                    delivered_bytes += len(line)
+                    yield event
                     if delivered >= limit:
                         break
             if acknowledged > offset:
                 atomic_json(cursor, {"version": 1, "offset": acknowledged, "prefix_revision": acknowledged_digest})
-        if delivered >= limit:
+        if delivered >= limit or budget_exhausted:
             return
 
 

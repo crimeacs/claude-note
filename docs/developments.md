@@ -1,5 +1,26 @@
 # Developments
 
+## 2.1.16 — bound pending event payloads (23 October 2026)
+
+Pending worker polls previously limited delivery to 10,000 events, while each
+journal record could contain up to 4 MiB. A poll could therefore collect a large
+aggregate payload despite the individual record limit. Pending delivery now
+also stops at 16 MiB of persisted UTF-8 record bytes, including newlines. Journal
+records are charged at their original encoded size; canonical import events use
+their canonical encoded size.
+
+Events remain complete. Delivery does not acknowledge capture: only a durably
+captured contiguous prefix advances its cursor, and a later poll resumes at the
+first undelivered event. The byte budget must fit a maximum-size record, so a
+valid event can make progress in an empty delivery. Import evidence, restrictive
+source controls, partial-line handling and historical journals are preserved.
+
+This bounds delivered serialized payload. Python object overhead, state-cache
+and source verification memory remain separate; the patch does not establish a
+total RSS limit or explain an observed production RSS sample. Capture-only mode
+and the existing storage, native-runtime and actual-agent evaluation gates are
+unchanged.
+
 ## 2.1.15 — share captured transcript prefixes (21 October 2026)
 
 Recovery imports previously persisted a complete immutable transcript for every
