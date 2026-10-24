@@ -136,17 +136,17 @@ are still needed to establish those capabilities. Model work that exceeds its de
 the existing whole-process retirement behavior.
 
 Startup also scans vector pages once before accepting requests. On a large, cold index this
-file I/O can exceed a hook's entire budget even when the models are already warm. The service
-has a separate 45-second startup watchdog; each hook keeps its eight-second total deadline.
+file I/O can exceed a hook's entire budget even when the models are already warm. Worker
+construction, model identities, warming, vector pages and initial metadata share one
+15-second monotonic startup lifetime; each hook keeps its eight-second total deadline.
 Its SQLite connection uses a bounded 128-MiB page cache and up to about 2 GiB of file mapping.
 The pinned QMD vector adapter hydrates matched `(hash, seq)` keys through existing indexes,
 preserving collection filters, active-document joins, source bodies and scores. These settings
 and query changes do not add indexes, rewrite the database or change other QMD connections.
 
-On macOS the recall LaunchAgent uses `ProcessType=Interactive` because prompt responsiveness
-depends on it. The previous default process class applies background CPU and I/O throttles.
-Upgrades migrate the installer's former `Nice=5` default to normal priority while preserving
-explicit custom priorities and process classes.
+New macOS recall LaunchAgents use `ProcessType=Interactive` and `Nice=0` for prompt responsiveness.
+Upgrades preserve existing process classes and priorities, including `Nice=5` and omitted fields.
+A value matching an earlier installer default does not identify it as generated configuration.
 The runtime worker also limits QMD to one embedding context and one rerank context, matching
 its serialized request queue and avoiding the SDK's larger batch-processing pools. Other QMD
 processes keep their own settings.
