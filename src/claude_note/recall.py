@@ -575,6 +575,8 @@ def _server_pool(prompt: str, ladder: list[list[str]], settings: "Settings", sta
         return None
     result.coverage = {**(got.get("coverage") or {"lexical": "unknown_legacy_server"}),
                        "query": "sampled_head_tail_identifiers" if query_partial else "complete"}
+    if got.get("partial") is True:
+        result.coverage["partial"] = True
     if result.manifest.get("index", {}).get("id", settings.index or "default") != (settings.index or "default"):
         result.reason = "server index identity does not match request"
         return None
@@ -1226,7 +1228,7 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
     result.coverage = {"local_resolution": "bounded", "lexical": "not_run"}
     if raw_partial:
         result.coverage["raw_prompt"] = "sampled_head_tail"
-    pool, ran, server_failed, cli_partial = {}, False, False, False
+    pool, ran, server_failed, server_partial, cli_partial = {}, False, False, False, False
     # Search results still need local source resolution, revision checks and
     # passage selection. Reserve that work before either adapter starts. In
     # auto mode a slow warm server also has to leave time for a real CLI search.
@@ -1262,6 +1264,7 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
         result.reason = server_result.reason
         if got is not None:
             pool, ran, result.engine = got, True, "server"
+            server_partial = server_result.coverage.get("partial") is True
         elif settings.engine == "server":
             result.status, result.reason = "unavailable", result.reason or "the recall server did not answer"
             return
@@ -1359,6 +1362,8 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
     if not pool:
         if cli_partial:
             result.status, result.reason = "unavailable", ("SQLite keyword" if result.engine == "sqlite" else "CLI") + " search coverage incomplete; no verified match returned"
+        elif server_partial:
+            result.status, result.reason = "unavailable", "recall server search coverage incomplete; no verified match returned"
         elif server_failed:
             result.status, result.reason = "unavailable", "no keyword match; semantic search unavailable"
         else:
@@ -1398,6 +1403,8 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
         if result.coverage.get("local_resolution") == "partial_deadline":
             result.status, result.reason = "unavailable", "source verification deadline exhausted"
         elif cli_partial:
+            result.status, result.reason = "unavailable", "search coverage incomplete; no eligible source verified"
+        elif server_partial:
             result.status, result.reason = "unavailable", "search coverage incomplete; no eligible source verified"
         elif server_failed:
             result.status, result.reason = "unavailable", "no eligible keyword evidence; semantic search unavailable"
