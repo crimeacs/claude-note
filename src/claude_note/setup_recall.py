@@ -603,10 +603,11 @@ def install_server_agent(qmd: str, port: int = 8182, dry_run: bool = False, *, p
         body['EnvironmentVariables'] = {"QMD_METAL_KEEP_RESIDENCY": "1", **previous.get('EnvironmentVariables', {})}
         if 'Program' in previous:
             body['Program'] = node
-        # Migrate the installer's old deprioritized CPU default. Explicit custom
-        # priorities and process classes remain the user's configuration.
-        if previous.get('Nice') == 5:
-            body['Nice'] = 0
+        # A value matching an old installer default is still owner configuration.
+        # Apply new resource defaults only to a new agent, preserving absence too.
+        for key in ('Nice', 'ProcessType'):
+            if key not in previous:
+                body.pop(key, None)
     if dry_run:
         return f"would install {plist.name} (127.0.0.1:{port})"
     if plist.is_symlink():
