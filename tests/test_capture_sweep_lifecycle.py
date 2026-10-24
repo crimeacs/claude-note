@@ -102,7 +102,7 @@ class SweepLifecycleTests(unittest.TestCase):
 
     def spawn_public_child(self, command, **kwargs):
         if command == [sys.executable, "-m", "claude_note.capture_sweep"]:
-            child = self.real_popen([sys.executable, str(self.fixture), str(self.root), self.mode,
+            child = self.real_popen([sys.executable, "-I", "-S", "-B", str(self.fixture), str(self.root), self.mode,
                                      str(self.source)], cwd=self.root, **kwargs)
             self.children.append(child)
             return child

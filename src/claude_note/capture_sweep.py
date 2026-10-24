@@ -1,4 +1,9 @@
-"""Resource-supervised import sweep, separate from hook capture's heap."""
+"""Resource-supervised import sweep, separate from hook capture's heap.
+
+The owner supervises and reaps its exact direct child. Current importers do not
+spawn subprocesses; no empty process-group/tree guarantee is asserted. Resource
+checks are periodic stop thresholds, with additional cleanup grace, not OS caps.
+"""
 
 import shutil
 import subprocess
@@ -84,7 +89,7 @@ class Sweep:
         child = self.child
         if child is None:
             return
-        # Keep ownership until wait() reaps this exact child. Atomic publication
+        # Keep direct-child ownership until wait() reaps this exact PID. Atomic publication
         # leaves an interrupted intent replayable, without a false heartbeat.
         if child.poll() is None:
             try:

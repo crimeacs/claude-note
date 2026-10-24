@@ -36,6 +36,7 @@ def public_expanduser(path):
     return expanduser(path)
 mock.patch.object(Path, "home", return_value=root).start()
 mock.patch.object(os.path, "expanduser", side_effect=public_expanduser).start()
+sys.path.insert(0, sys.argv[1])
 from claude_note import capture_sweep, importers, models, session_tracker, source_store
 
 free = int(os.environ.get("PUBLIC_CAPTURE_FREE", str(8 * 1024 ** 3)))
@@ -66,10 +67,10 @@ class CaptureSweepProfileTests(unittest.TestCase):
     def child(self, *, hook_state=False, free=8 * 1024 ** 3):
         environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PUBLIC_CAPTURE_ROOT": str(self.root),
                        "XDG_CONFIG_HOME": str(self.root / "config"), "CLAUDE_NOTE_VAULT": str(self.vault),
-                       "PYTHONPATH": str(self.source_root), "PUBLIC_CAPTURE_FREE": str(free)}
+                       "PUBLIC_CAPTURE_FREE": str(free)}
         if hook_state:
             environment["PUBLIC_CAPTURE_HOOK_STATE"] = "1"
-        result = subprocess.run([sys.executable, "-c", CHILD], env=environment,
+        result = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", CHILD, str(self.source_root)], env=environment,
                                 cwd=self.root, capture_output=True, text=True, timeout=15)
         self.assertIn(result.returncode, (0, 1), result.stderr)
         report = json.loads(result.stdout)
@@ -226,7 +227,7 @@ class CaptureSweepProfileTests(unittest.TestCase):
     def test_real_child_rss_is_measured_stopped_and_reaped_without_spawning_worker(self):
         marker = self.root / "ready"
         code = "import pathlib,sys,time; data=bytearray(24*1024*1024); pathlib.Path(sys.argv[1]).write_text('ready'); time.sleep(30)"
-        child = subprocess.Popen([sys.executable, "-c", code, str(marker)], stdin=subprocess.DEVNULL,
+        child = subprocess.Popen([sys.executable, "-I", "-S", "-B", "-c", code, str(marker)], stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         def reap():
             if child.poll() is None:
