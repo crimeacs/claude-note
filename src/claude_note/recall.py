@@ -47,7 +47,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -202,6 +202,17 @@ COMPOUND = re.compile(r"[A-Za-z0-9]+(?:[_.][A-Za-z0-9]+)+")
 AUTOMATED_EVENT = re.compile(r"<task-notification>|\[SYSTEM NOTIFICATION")
 # Wrapper tags keep their inner text but lose their markup (and attributes).
 WRAPPER_TAG = re.compile(r"</?[A-Za-z_][\w-]*(?:\s[^<>]*)?>")
+# These follow-ups depend on the preceding conversation, which a prompt hook
+# does not receive. Searching "fix" alone injects arbitrary incident notes.
+# Keep this narrow: short subjects such as "codex hooks" and single identifiers
+# are still useful queries, and non-English intent still reaches semantic search.
+UNRESOLVED_FOLLOWUP = re.compile(
+    r"^(?:(?:please\s+)?(?:(?:fix|repair|check|handle|do)\s+(?:it|this|that)"
+    r"|get\s+(?:it|this|that)\s+to\s+work)(?:\s+please)?"
+    r"(?:[.!?]+\s*|\s+and\s+|\s*;\s*|$))+$", re.IGNORECASE)
+SUBJECT_FREE_ACKNOWLEDGEMENT = re.compile(
+    r"^(?:(?:yes|no|yep|nope|ok|okay|sure)(?:[\s,]+(?:please|thanks|thank\s+you))?"
+    r"|thanks|thank\s+you)[.!?]*$", re.IGNORECASE)
 
 
 def content_terms(text: str, max_terms: int = 10) -> list[str]:
@@ -257,6 +268,22 @@ def query_ladder(terms: list[str], first_word: str = "") -> list[list[str]]:
         return [terms]
     ladder = [rung for rung in (terms, top(5), top(3), top(2)) if len(rung) >= 2]
     return [r for i, r in enumerate(ladder) if i == 0 or r != ladder[i - 1]]
+
+
+def complementary_pairs(ladder: list[list[str]]) -> list[list[str]]:
+    """Bounded leave-one-out alternatives, without guessing a term's spelling.
+
+    Length ranking can keep the same typo in every narrower query. The other
+    pairs of the three-term rung let one poisoned term drop out while retaining
+    two original subject words. Normal ladders add at most two queries.
+    """
+    triple = next((rung for rung in reversed(ladder) if len(rung) == 3), [])
+    pairs = []
+    for omitted in range(len(triple)):
+        pair = [word for i, word in enumerate(triple) if i != omitted]
+        if pair not in ladder and pair not in pairs:
+            pairs.append(pair)
+    return pairs
 
 
 def semantic_intent(prompt: str, limit: int = 2000) -> tuple[str, bool]:
@@ -548,6 +575,8 @@ def _server_pool(prompt: str, ladder: list[list[str]], settings: "Settings", sta
         return None
     result.coverage = {**(got.get("coverage") or {"lexical": "unknown_legacy_server"}),
                        "query": "sampled_head_tail_identifiers" if query_partial else "complete"}
+    if got.get("partial") is True:
+        result.coverage["partial"] = True
     if result.manifest.get("index", {}).get("id", settings.index or "default") != (settings.index or "default"):
         result.reason = "server index identity does not match request"
         return None
@@ -1149,6 +1178,19 @@ def _server_attempt(result: Result, route: str, deadline: float, call):
         entry["elapsed_ms"] = int((time.monotonic() - started) * 1000)
 
 
+def _pool_keyword_rows(pool, rows, rung_i, is_memory, limit):
+    for pos, item in enumerate(rows[:max(1, limit)]):
+        if not isinstance(item, dict):
+            continue
+        uri = item.get("file") or item.get("path")
+        if not isinstance(uri, str) or not uri:
+            continue
+        candidate = pool.setdefault(uri, {"item": item, "votes": 0, "best": 1e9, "memory": False})
+        candidate["votes"] += 1
+        candidate["best"] = min(candidate["best"], pos + 3 * rung_i)
+        candidate["memory"] |= is_memory
+
+
 def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs):
     deadline = started + max(0, settings.budget)
     if not settings.enabled:
@@ -1166,6 +1208,10 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
     if not prompt or re.match(r"^/[A-Za-z][\w-]*(?:\s|$)", prompt):
         result.reason = "prompt too short or a slash command"
         return
+    if not extra_rungs and (UNRESOLVED_FOLLOWUP.fullmatch(prompt) or
+                            SUBJECT_FREE_ACKNOWLEDGEMENT.fullmatch(prompt)):
+        result.reason = "follow-up has no retrieval subject; use the preceding conversation"
+        return
     # Bound lexical CPU as well as semantic input. Huge wrappers cannot consume
     # the entire hook budget before the first deadline check.
     terms = _bounded(lambda: content_terms(prompt, max(1, settings.max_terms)), deadline)
@@ -1182,14 +1228,34 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
     result.coverage = {"local_resolution": "bounded", "lexical": "not_run"}
     if raw_partial:
         result.coverage["raw_prompt"] = "sampled_head_tail"
-    pool, ran = {}, False
+    pool, ran, server_failed, server_partial, cli_partial = {}, False, False, False, False
+    # Search results still need local source resolution, revision checks and
+    # passage selection. Reserve that work before either adapter starts. In
+    # auto mode a slow warm server also has to leave time for a real CLI search.
+    # These are slices of the existing absolute budget, never extra timeouts.
+    left = max(0, deadline - time.monotonic())
+    source_reserve = min(1.0, left * .2)
+    search_deadline = deadline - source_reserve
+    cli_reserve = min(2.0, left * .3) if settings.engine == "auto" else 0
+    server_deadline = search_deadline - cli_reserve
     use_server = settings.engine == "server" or (settings.engine == "auto" and not settings.index)
     if use_server and not extra_rungs:
         result.engine = "server"
         result.attempted_engines.append("server")
         server_result = Result(status="skipped")
-        got = _server_attempt(result, "/search", deadline, lambda request_id: _server_pool(
-            prompt, ladder, settings, started, server_result, request_id))
+        # Leave a small scheduling margin between the transport's timeout and
+        # its outer guard so the transport can retain its failure receipt.
+        server_settings = replace(settings, timeout=min(settings.timeout,
+            max(0, server_deadline - time.monotonic() - min(.01, left * .01))))
+        try:
+            got = _server_attempt(result, "/search", server_deadline, lambda request_id: _server_pool(
+                prompt, ladder, server_settings, started, server_result, request_id))
+        except TimeoutError:
+            got = None
+            server_result.reason = "recall server search deadline exhausted"
+            server_result.coverage = {"search": "partial_server_deadline"}
+            if settings.engine == "server":
+                result.deadline_exhausted = True
         result.manifest, result.coverage = server_result.manifest, server_result.coverage or result.coverage
         if server_result.server_calls:
             result.server_calls[-1] = server_result.server_calls[0]
@@ -1198,9 +1264,51 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
         result.reason = server_result.reason
         if got is not None:
             pool, ran, result.engine = got, True, "server"
+            server_partial = server_result.coverage.get("partial") is True
         elif settings.engine == "server":
             result.status, result.reason = "unavailable", result.reason or "the recall server did not answer"
             return
+        else:
+            server_failed = True
+    pairs = complementary_pairs(ladder)
+    cli_rungs = [*ladder, *pairs]
+    if settings.single_term_fallback and ladder:
+        cli_rungs += [[word] for word in ladder[-1][:2] if [word] not in cli_rungs]
+    scheduled_rungs = list(enumerate(cli_rungs))
+    if "server" in result.attempted_engines and len(ladder) > 1:
+        narrow = len(ladder) - 1
+        preferred = [narrow, *range(len(ladder), len(ladder) + len(pairs))]
+        scheduled_rungs = [*(scheduled_rungs[i] for i in preferred),
+                           *(entry for entry in scheduled_rungs if entry[0] not in preferred)]
+    if not ran and ladder and settings.engine == "auto" and runner is _run_qmd:
+        # A cold vector scan can spend the server slice and restart its owner.
+        # Read the same keyword index in one bounded, read-only connection;
+        # spawning a QMD CLI for every rung can exhaust the remaining slice.
+        from .recall_lexical import search_batch
+        result.engine = "sqlite"
+        result.attempted_engines.append("sqlite")
+        sqlite_deadline = min(search_deadline - .03, time.monotonic() + 2.0)
+        try:
+            batch = _bounded(lambda: search_batch(
+                [(i, " ".join(rung)) for i, rung in scheduled_rungs], settings.collections,
+                settings.memory_collections, settings.index, sqlite_deadline,
+                settings.search_n), min(search_deadline, sqlite_deadline + .02))
+        except Exception:
+            batch = None
+        if batch is not None:
+            ran = True
+            cli_partial = not batch["complete"]
+            result.reason = ""
+            if not cli_partial:
+                lexical_coverage = "complete_sqlite_scoped_before_limit"
+            elif batch.get("reason") == "deadline":
+                lexical_coverage = "partial_sqlite_deadline"
+            else:
+                lexical_coverage = "partial_sqlite_failure"
+            result.coverage.update(lexical=lexical_coverage,
+                                   semantic="unavailable_sqlite", partial=server_failed or cli_partial)
+            for _scope, is_memory, rung_i, rows in batch["calls"]:
+                _pool_keyword_rows(pool, rows, rung_i, is_memory, settings.search_n)
     if not ran:
         exe = _bounded(lambda: qmd_executable(settings), deadline)
         if not exe:
@@ -1208,43 +1316,58 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
             return
         base = [exe] + (["--index", settings.index] if settings.index else [])
         scopes = [(c, c in settings.memory_collections) for c in dict.fromkeys(settings.collections + settings.memory_collections)] if settings.collections else [(None, False)] + [(c, True) for c in settings.memory_collections]
-        cli_rungs = list(ladder)
-        if settings.single_term_fallback and ladder:
-            cli_rungs += [[word] for word in ladder[-1][:2] if [word] not in cli_rungs]
         result.coverage.update(lexical="partial_scoped_cli_sdk_overfetch" if settings.collections or settings.memory_collections
                                else "cli_topk", semantic="unavailable_cli")
-        for scope, is_memory in scopes:
-            for rung_i, rung in enumerate(cli_rungs):
-                left = deadline - time.monotonic()
-                if left <= 0:
-                    result.deadline_exhausted = True
-                    break
-                cmd = base + ["search", " ".join(rung), "-n", str(settings.search_n), "--json"]
-                if scope:
-                    cmd += ["-c", scope]
-                result.engine = "cli"
-                if "cli" not in result.attempted_engines:
-                    result.attempted_engines.append("cli")
-                got = _bounded(lambda cmd=cmd, left=left: runner(cmd, min(settings.timeout, left)), deadline)
-                if got is None:
-                    continue
-                ran = True
-                for pos, item in enumerate(got[:max(1, settings.search_n)]):
-                    if not isinstance(item, dict):
-                        continue
-                    uri = item.get("file") or item.get("path")
-                    if not isinstance(uri, str) or not uri:
-                        continue
-                    c = pool.setdefault(uri, {"item": item, "votes": 0, "best": 1e9, "memory": False})
-                    c["votes"] += 1
-                    c["best"] = min(c["best"], pos + 3 * rung_i)
-                    c["memory"] |= is_memory
+        if server_failed:
+            result.coverage["partial"] = True
+        # A transport failure is the reason for fallback, not the outcome of a
+        # completed keyword search. Preserve its receipt/coverage separately.
+        result.reason = ""
+        calls = [(scope, is_memory, rung_i, rung) for scope, is_memory in scopes
+                 for rung_i, rung in scheduled_rungs]
+        attempt_cap = max(0, search_deadline - time.monotonic()) / min(2, max(1, len(calls)))
+        for scope, is_memory, rung_i, rung in calls:
+            left = search_deadline - time.monotonic()
+            if left <= 0:
+                result.deadline_exhausted = True
+                cli_partial = True
+                result.coverage.update(partial=True, lexical="partial_cli_deadline")
+                break
+            cmd = base + ["search", " ".join(rung), "-n", str(settings.search_n), "--json"]
+            if scope:
+                cmd += ["-c", scope]
+            result.engine = "cli"
+            if "cli" not in result.attempted_engines:
+                result.attempted_engines.append("cli")
+            # One hung rung must not consume the entire search slice. The
+            # absolute per-attempt guard also bounds custom runners that
+            # ignore the timeout argument.
+            timeout = min(settings.timeout, left, attempt_cap)
+            call_deadline = min(search_deadline, time.monotonic() + timeout)
+            try:
+                got = _bounded(lambda cmd=cmd, timeout=timeout: runner(cmd, timeout), call_deadline)
+            except TimeoutError:
+                got = None
+                result.deadline_exhausted = True
+            if got is None:
+                cli_partial = True
+                result.coverage.update(partial=True, lexical="partial_cli_failure")
+                continue
+            ran = True
+            _pool_keyword_rows(pool, got, rung_i, is_memory, settings.search_n)
     if not ran:
         result.status, result.reason = "unavailable", "qmd failed, hung, or its index was locked"
         return
     result.pool = len(pool)
     if not pool:
-        result.status, result.reason = "miss", result.reason or "no keyword or semantic match"
+        if cli_partial:
+            result.status, result.reason = "unavailable", ("SQLite keyword" if result.engine == "sqlite" else "CLI") + " search coverage incomplete; no verified match returned"
+        elif server_partial:
+            result.status, result.reason = "unavailable", "recall server search coverage incomplete; no verified match returned"
+        elif server_failed:
+            result.status, result.reason = "unavailable", "no keyword match; semantic search unavailable"
+        else:
+            result.status, result.reason = "miss", result.reason or "no keyword or semantic match"
         return
     skip = [re.compile(p) for p in settings.skip_paths]
     candidates = []
@@ -1257,6 +1380,7 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
             hit = _prepare_hit(item, c, prompt, settings, deadline)
         except TimeoutError:
             result.deadline_exhausted = True
+            result.coverage.update(partial=True, local_resolution="partial_deadline")
             break
         if hit:
             candidates.append(hit)
@@ -1276,7 +1400,16 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
     except TimeoutError:
         result.deadline_exhausted = True
     if not candidates:
-        result.status, result.reason = "miss", "no eligible evidence passages"
+        if result.coverage.get("local_resolution") == "partial_deadline":
+            result.status, result.reason = "unavailable", "source verification deadline exhausted"
+        elif cli_partial:
+            result.status, result.reason = "unavailable", "search coverage incomplete; no eligible source verified"
+        elif server_partial:
+            result.status, result.reason = "unavailable", "search coverage incomplete; no eligible source verified"
+        elif server_failed:
+            result.status, result.reason = "unavailable", "no eligible keyword evidence; semantic search unavailable"
+        else:
+            result.status, result.reason = "miss", "no eligible evidence passages"
         return
     result.candidates = [h.path or h.uri for h in candidates]
     memories = [h for h in candidates if h.memory][:max(0, settings.memory_slots)]

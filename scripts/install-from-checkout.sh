@@ -11,9 +11,10 @@
 # The source tree is a git checkout or a bundled copy (for example the one the
 # Sweat app ships; a copy records its ref in a SOURCE_REF file). Without
 # --non-interactive this updates an existing install only: it replaces the
-# package, restarts existing worker/recall jobs, and never touches config.toml,
-# the vault or the worker plist. The installed ref is recorded in
+# package, restarts a running worker and existing recall jobs, and never touches
+# config.toml, the vault or the worker plist. The installed ref is recorded in
 # ~/.local/share/claude-note/installed-from.json.
+# A stopped or unloaded existing worker stays stopped.
 #
 #   --non-interactive  set up a new machine too: write config.toml if there is
 #                      none, create the vault (from vault-template) and install
@@ -65,6 +66,19 @@ json_escape() {
 xml_escape() {
     printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' \
         -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
+}
+
+# A loaded LaunchAgent may be deliberately idle. Only a running process owned
+# by this login is eligible for restart; querying a missing job is not an error.
+worker_launchd_status() {
+    if WORKER_STATUS="$(launchctl print "$WORKER_TARGET" 2>&1)"; then
+        return 0
+    fi
+    if [[ "$WORKER_STATUS" == *"Could not find service"* ]]; then
+        return 1
+    fi
+    echo "cannot determine worker service state: $WORKER_STATUS; installation remains incomplete" >&2
+    exit 1
 }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -241,6 +255,9 @@ if [[ $NON_INTERACTIVE -eq 1 ]]; then
 
     if [[ "$(uname -s)" == "Darwin" ]]; then
         PLIST="$HOME/Library/LaunchAgents/com.claude-note.worker.plist"
+        WORKER_UID="$(id -u)"
+        WORKER_TARGET="gui/$WORKER_UID/com.claude-note.worker"
+        WORKER_INSTALLED=0
         mkdir -p "$VAULT_ROOT/.claude-note/tmp"
         if [[ ! -f "$PLIST" ]]; then
             mkdir -p "$HOME/Library/LaunchAgents"
@@ -263,9 +280,10 @@ if [[ $NON_INTERACTIVE -eq 1 ]]; then
 </plist>
 EOF
             echo "Installed $PLIST"
+            WORKER_INSTALLED=1
         fi
-        if ! launchctl print "gui/$(id -u)/com.claude-note.worker" >/dev/null 2>&1; then
-            if launchctl bootstrap "gui/$(id -u)" "$PLIST"; then
+        if [[ $WORKER_INSTALLED -eq 1 ]] && ! worker_launchd_status; then
+            if launchctl bootstrap "gui/$WORKER_UID" "$PLIST"; then
                 echo "Started the worker"; WORKER_STARTED=1
             else
                 echo "could not start the worker ($PLIST); claude-note status --json will show it" >&2
@@ -276,10 +294,26 @@ EOF
 fi
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
-    if [[ $WORKER_STARTED -eq 0 ]] && launchctl print "gui/$(id -u)/com.claude-note.worker" >/dev/null 2>&1; then
-        launchctl kickstart -k "gui/$(id -u)/com.claude-note.worker" \
-            || { echo "could not restart the worker; installation remains incomplete" >&2; exit 1; }
-        echo "Restarted the worker"
+    WORKER_UID="$(id -u)"
+    WORKER_TARGET="gui/$WORKER_UID/com.claude-note.worker"
+    if [[ $WORKER_STARTED -eq 0 ]]; then
+        if worker_launchd_status; then
+            WORKER_PID="$(printf '%s\n' "$WORKER_STATUS" | sed -nE 's/^[[:space:]]*pid = ([1-9][0-9]*)[[:space:]]*$/\1/p' | head -1)"
+            WORKER_PROCESS_UID=""
+            if [[ "$WORKER_PID" =~ ^[1-9][0-9]*$ ]] \
+                && printf '%s\n' "$WORKER_STATUS" | grep -qE '^[[:space:]]*state = running[[:space:]]*$'; then
+                WORKER_PROCESS_UID="$(ps -p "$WORKER_PID" -o uid= 2>/dev/null | tr -d '[:space:]')" || WORKER_PROCESS_UID=""
+            fi
+            if [[ "$WORKER_PROCESS_UID" == "$WORKER_UID" ]]; then
+                launchctl kickstart -k "$WORKER_TARGET" \
+                    || { echo "could not restart the worker; installation remains incomplete" >&2; exit 1; }
+                echo "Restarted the worker"
+            else
+                echo "Worker has no verified running process owned by this login; left unchanged"
+            fi
+        else
+            echo "Worker is unloaded; left stopped"
+        fi
     fi
     # Run through the newly installed package, never this checkout's Python.
     # The helper refreshes only an existing recall agent; it does not set one up.

@@ -1,5 +1,49 @@
 # Developments
 
+## 2.1.24 — reconcile recall and capture repairs (24 October 2026)
+
+Prepared-model and vector-page startup share the original 15-second lifetime;
+late responses and async failures cannot restore expired readiness. Partial
+server searches retain their coverage and do not become complete misses when
+no eligible evidence is returned. Existing service resource settings, including
+an authored priority of five, are preserved during upgrades.
+
+Queue appends revalidate their locked inode before writing and after syncing.
+A writer waiting behind retention retries a replaced target or reports failure;
+it cannot report success after appending to an unlinked journal. Capture recovery
+supervision owns its direct child; sampled limits are not an OS memory cap or a
+process-tree containment guarantee. No historical evidence is pruned by this repair.
+
+## 2.1.23 — capture recent prompts ahead of recovery history (23 October 2026)
+
+The bounded delivery budget could fill with old recovery events before today's
+hook journal was opened. Capture-only polls now prefer recent dated journals;
+normal/manual delivery retains chronological order. All visible import metadata
+and each affected session's historical source evidence still pass the same
+checks. Older records remain queued and unacknowledged until captured.
+
+Recall-agent upgrades preserve owner resource settings, including `Nice=5`
+and omitted process-class or priority fields. New-agent defaults apply only
+when creating a new agent.
+
+## 2.1.22 — keep capture within its working resources (23 October 2026)
+
+Retention previously loaded and split an entire old journal every poll. A
+retained 980 MB journal bypassed the 16 MiB delivery limit and could explain a
+large worker heap. Retention now streams capped records; capture-only workers
+retain journals and poll at least 15 seconds apart. Legacy source verification
+also streams. Missing dependencies fail before earlier snapshots are hashed,
+with a bounded negative retry delay that never authorizes acknowledgement.
+
+Capture-only recovery imports use a separate supervised child with a small
+input profile, a 30-second deadline, a 256 MiB RSS stop threshold and a 6 GiB
+disk reserve. Interrupted publications remain replayable; the child is reaped
+before ownership is released. These periodic checks do not establish a hard
+memory cap. Installation preserves an existing stopped or idle worker.
+
+Subject-free compound follow-ups such as "get it to work! fix it" also stay
+quiet instead of injecting unrelated generic fix notes.
+
 ## 2.1.16 — bound pending event payloads (23 October 2026)
 
 Pending worker polls previously limited delivery to 10,000 events, while each

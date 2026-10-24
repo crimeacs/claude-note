@@ -124,6 +124,27 @@ corrupt-source blocking remain independent of delivery. This bounds serialized
 payload collected by a poll, not total RSS, parser/state-cache memory or native
 runtime allocations. No historical evidence is pruned by this limit.
 
+Version 2.1.24 reconciles the subsequent local recall and capture repairs.
+Capture-only workers keep retained journals, prioritize recent hook journals
+and supervise recovery in a separate child with sampled resource checks.
+Retention and legacy evidence verification stream their inputs. These bounds
+do not establish an OS memory reservation, process-tree containment or a hard
+parser memory cap. Historical missing evidence remains unacknowledged; neither
+current-event priority nor a retry delay repairs missing source revisions.
+Queue writers revalidate the locked inode before writing and after syncing, so
+retention cannot turn a queued append into a successful write to an unlinked
+file. Existing worker state and authored service resource settings are preserved.
+
+Recall can retain prepared local model contexts and vector pages, and its
+automatic path reserves time for bounded read-only keyword fallback and source
+verification. Runtime preparation shares the original 15-second startup lifetime;
+late completions cannot restore expired readiness. Query deadlines remain
+absolute. An incomplete server response stays visibly partial, and an empty
+partial search is unavailable rather than a complete miss. Public synthetic
+contracts establish these mechanisms, not production cold reliability, the
+cause of prior native failures, or learned-memory benefit. Any installed public
+query, host delivery and paired task outcomes need their own source-bound proof.
+
 The original 15-workstream research and A–F deliverables remain broader than
 these implementation contracts. Full task outcomes, each baseline's own learned
 memory across phases, dense-only comparison, evidence × extraction and

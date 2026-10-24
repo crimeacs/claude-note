@@ -30,6 +30,7 @@ from . import version_checker
 # Global flag for graceful shutdown
 _shutdown = False
 _capture_only = False
+_wake = threading.Event()
 
 
 def setup_logging(verbose: bool = False) -> logging.Logger:
@@ -57,6 +58,7 @@ def handle_signal(signum, frame):
     """Handle shutdown signals gracefully."""
     global _shutdown
     _shutdown = True
+    _wake.set()
 
 
 def update_session_summary(state: models.SessionState, pack, logger: logging.Logger) -> bool:
@@ -289,7 +291,9 @@ def poll_once(logger: logging.Logger) -> int:
     """
     # Group events by session
     sessions: dict[str, list] = {}
-    for event in queue_manager.read_pending_events():
+    pending = (queue_manager.read_pending_events(recent_first=True) if _capture_only
+               else queue_manager.read_pending_events())
+    for event in pending:
         if event.session_id not in sessions:
             sessions[event.session_id] = []
         sessions[event.session_id].append(event)
@@ -301,6 +305,8 @@ def poll_once(logger: logging.Logger) -> int:
 
     notes_written = 0
     for session_id, events in sessions.items():
+        if _shutdown:
+            break  # Undelivered events remain unacknowledged for the next run.
         if process_session(session_id, events, logger):
             notes_written += 1
 
@@ -363,45 +369,63 @@ def _run_worker(foreground: bool = False, verbose: bool = False) -> int:
     # Set up signal handlers
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
+    _wake.clear()
 
     # Sources without a hook (Cursor, export zips, untrusted Codex hooks) are
     # swept on a background thread so a slow disk never stalls the queue.
     sweeper = None
     sweep_started = 0.0
     sweep_warned = False
+    from .capture_sweep import Sweep
+    bounded_sweep = Sweep(logger) if _capture_only else None
+    if bounded_sweep is not None:
+        bounded_sweep.start()
 
-    # Main poll loop
-    while not _shutdown:
-        now = time.time()
-        if sweeper is not None and sweeper.is_alive():
-            if now - sweep_started > 600 and not sweep_warned:
-                logger.warning("Import sweep running for >10 min; retaining ownership until it finishes")
-                sweep_warned = True
-        elif now - sweep_started >= importers.SWEEP_INTERVAL:
-            def _sweep():
-                try:
-                    counts = importers.sweep()
-                    logger.info(f"Import sweep: {counts}")
-                except Exception as e:
-                    logger.error(f"Import sweep failed: {e}")
-            sweeper = threading.Thread(target=_sweep, name="import-sweep", daemon=True)
-            sweeper.start()
-            sweep_started = now
-            sweep_warned = False
+    # Always reap an owned sweep, including exceptions during capture.
+    try:
+        while not _shutdown:
+            now = time.time()
+            if bounded_sweep is not None:
+                pass  # The supervisor checks resources even while capture polls.
+            elif sweeper is not None and sweeper.is_alive():
+                if now - sweep_started > 600 and not sweep_warned:
+                    logger.warning("Import sweep running for >10 min; retaining ownership until it finishes")
+                    sweep_warned = True
+            elif now - sweep_started >= importers.SWEEP_INTERVAL:
+                def _sweep():
+                    try:
+                        counts = importers.sweep()
+                        logger.info(f"Import sweep: {counts}")
+                    except Exception as e:
+                        logger.error(f"Import sweep failed: {e}")
+                sweeper = threading.Thread(target=_sweep, name="import-sweep", daemon=True)
+                sweeper.start()
+                sweep_started = now
+                sweep_warned = False
 
-        try:
-            notes_written = poll_once(logger)
-            if notes_written > 0:
-                logger.debug(f"Poll cycle: wrote {notes_written} notes")
+            try:
+                notes_written = poll_once(logger)
+                if notes_written > 0:
+                    logger.debug(f"Poll cycle: wrote {notes_written} notes")
 
-            # Clean up old queue files periodically (once per poll)
-            queue_manager.cleanup_old_queue_files(keep_days=7)
+                # Clean up old queue files periodically (once per poll)
+                if not _capture_only:
+                    queue_manager.cleanup_old_queue_files(keep_days=7)
 
-        except Exception as e:
-            logger.error(f"Error in poll cycle: {e}")
+            except Exception as e:
+                logger.error(f"Error in poll cycle: {e}")
 
-        # Sleep until next poll
-        time.sleep(config.POLL_INTERVAL)
+            # Sleep until next poll
+            # Capture has no reason to rescan historical journals and 15k state
+            # files every two seconds. Supervise the child during an interruptible
+            # wait; no import heap shares this process.
+            until = time.monotonic() + max(config.POLL_INTERVAL, 15 if _capture_only else 0)
+            while not _shutdown and time.monotonic() < until:
+                _wake.wait(max(0, until - time.monotonic()))
+
+    finally:
+        if bounded_sweep is not None:
+            bounded_sweep.shutdown()
 
     logger.info("Worker shutting down")
     return 0

@@ -66,6 +66,30 @@ class UpgradeRecallRuntimeTests(unittest.TestCase):
         install.assert_not_called()
         self.assertFalse((self.root / 'Library').exists())
 
+    def test_new_latency_service_uses_interactive_policy(self):
+        with mock.patch.object(setup_recall.subprocess, 'run', return_value=self.done()):
+            verdict = setup_recall.install_server_agent('/synthetic/qmd')
+        self.assertTrue(verdict.startswith('installed'), verdict)
+        path = self.root / 'Library/LaunchAgents' / (setup_recall.SERVER_LABEL + '.plist')
+        data = plistlib.loads(path.read_bytes())
+        self.assertEqual(data['ProcessType'], 'Interactive')
+        self.assertEqual(data['Nice'], 0)
+
+    def test_existing_resource_configuration_including_custom_five_is_preserved(self):
+        previous = {'Label': setup_recall.SERVER_LABEL,
+                    'ProgramArguments': ['/old/node', '/old/recall_server.mjs', '/old/sdk.js', '8182'],
+                    'EnvironmentVariables': {'QMD_METAL_KEEP_RESIDENCY': '1'}}
+        path = self.root / 'Library/LaunchAgents' / (setup_recall.SERVER_LABEL + '.plist')
+        for resource_fields in ({'Nice': 5, 'ProcessType': 'Background'}, {'Nice': 5},
+                                {'Nice': 10, 'ProcessType': 'Interactive'}, {}, {'ProcessType': 'Background'}):
+            owner = {**previous, **resource_fields}
+            with self.subTest(resource_fields=resource_fields), \
+                    mock.patch.object(setup_recall.subprocess, 'run', return_value=self.done()):
+                verdict = setup_recall.install_server_agent('/synthetic/qmd', previous=owner)
+            self.assertTrue(verdict.startswith('installed'), verdict)
+            data = plistlib.loads(path.read_bytes())
+            self.assertEqual({key: data[key] for key in ('Nice', 'ProcessType') if key in data}, resource_fields)
+
     def test_existing_job_with_missing_prerequisite_fails_for_retry(self):
         agent = self.root / 'Library/LaunchAgents' / (setup_recall.SERVER_LABEL + '.plist')
         agent.parent.mkdir(parents=True)

@@ -12,7 +12,7 @@ import http from 'node:http';
 import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRecallService, createRuntimeProxy, createProcessRetirement, ScopedLexicalWorker, createIndexSnapshotReader, scopedLexical, passage, literalFTS, modelFileIdentity } from '../src/claude_note/recall_server.mjs';
+import { createRecallService, createRuntimeProxy, createProcessRetirement, ScopedLexicalWorker, createIndexSnapshotReader, scopedLexical, passage, literalFTS, modelFileIdentity, prepareCachedModels, prepareVectorPages, indexedVectorDatabase } from '../src/claude_note/recall_server.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const metadata = { corpus_digest: 'corpus', generation: 'generation', vector_rows: 1, vector_models: ['embed-id'] };
@@ -25,6 +25,178 @@ const deferred = () => {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 };
+
+test('request phase events identify lexical, vector and rerank work without source payloads', async () => {
+  const events = [], id = 'a'.repeat(24), secret = 'PRIVATE phase fixture';
+  const service = createRecallService({ lexical: lex(), store: { searchVector: async () => [row] },
+    llm: { embedModel: {}, rerank: async (_, docs) => ({ model: rerankModel, results: docs.map(doc => ({ file: doc.file, score: .8 })) }) },
+    manifest: rerankManifest, onPhase: event => events.push(event) });
+  await service.request('/search', { request_id: id, question: secret, rungs: [secret] });
+  await service.request('/rerank', { ...rankRequest(), request_id: id, question: secret });
+  assert.deepEqual(events.map(event => `${event.stage}:${event.state}`), [
+    'lexical_sql:start', 'lexical_sql:end', 'lexical_passages:start', 'lexical_passages:end',
+    'vector_search:start', 'vector_search:end', 'vector_passages:start', 'vector_passages:end', 'rerank:start', 'rerank:end']);
+  assert.ok(events.every(event => event.request_id === id)); assert.equal(JSON.stringify(events).includes('PRIVATE'), false);
+  service.close();
+});
+
+test('parent retains bounded phases and external correlation before fatal retirement', async () => {
+  class FixtureWorker extends EventEmitter { sent = []; postMessage(message) { this.sent.push(message); } }
+  const worker = new FixtureWorker(), logged = []; let time = 0, retired = 0;
+  const proxy = createRuntimeProxy(worker, { monotonic: () => time, retireOwner: () => retired++,
+    onDiagnostic: entry => { logged.push(entry); throw new Error('PRIVATE logger error'); } });
+  worker.emit('message', { ready: true, manifest: { ok: true } }); await proxy.ready;
+  const externalId = 'b'.repeat(24), pending = proxy.request('/search', { request_id: externalId, question: 'PRIVATE input' });
+  const id = worker.sent[0].id;
+  worker.emit('message', { started: String(id) }); time = 10;
+  worker.emit('message', { phase: { request_id: String(id), stage: 'lexical_sql', state: 'start' } }); time = 42;
+  worker.emit('message', { phase: { request_id: String(id), stage: 'lexical_sql', state: 'end' } }); time = 45;
+  worker.emit('message', { phase: { request_id: String(id), stage: 'vector_passages', state: 'start', rows: 12, source_chars: 5600000, private: 'PRIVATE data' } }); time = 52;
+  worker.emit('message', { phase: { request_id: String(id), stage: 'PRIVATE unknown stage', state: 'start' } });
+  worker.emit('message', { fatal: true });
+  await assert.rejects(pending, error => error.code === 'poisoned' && error.diagnostic.phase === 'vector_passages');
+  assert.equal(retired, 1); assert.equal(logged.length, 1);
+  assert.equal(logged[0].request_id, externalId); assert.equal(logged[0].internal_request_id, id);
+  assert.equal(logged[0].phase_elapsed_ms, 7); assert.equal(logged[0].phase_ms.lexical_sql, 32);
+  assert.equal(logged[0].counters.vector_passages_source_chars, 5600000);
+  assert.equal(JSON.stringify(logged).includes('PRIVATE'), false); proxy.close();
+});
+
+test('successful requests return bounded timings without logging; invalid ids and excess events are excluded', async () => {
+  class FixtureWorker extends EventEmitter { sent = []; postMessage(message) { this.sent.push(message); } }
+  const worker = new FixtureWorker(), logged = []; let time = 0;
+  const proxy = createRuntimeProxy(worker, { monotonic: () => time, retireOwner: () => {}, onDiagnostic: entry => logged.push(entry) });
+  worker.emit('message', { ready: true, manifest: { ok: true } }); await proxy.ready;
+  const pending = proxy.request('/search', { request_id: 'PRIVATE invalid id' }), id = worker.sent[0].id;
+  worker.emit('message', { started: String(id) }); time = 5;
+  for (let i = 0; i < 100; i++) worker.emit('message', { phase: { request_id: id, stage: 'vector_sql', state: 'start', source_chars: Infinity } });
+  time = 10; worker.emit('message', { id, result: { vec: [] } });
+  const result = await pending;
+  assert.deepEqual(result.vec, []); assert.equal(result.request_diagnostic.events_dropped, 4);
+  assert.equal(result.request_diagnostic.elapsed_ms, 10); assert.equal(result.request_diagnostic.request_id, undefined);
+  assert.deepEqual(logged, []); assert.equal(JSON.stringify(result).includes('PRIVATE'), false); proxy.close();
+});
+
+test('vector SQL phase markers precede synchronous work and settle on errors', () => {
+  const events = [], db = indexedVectorDatabase({ prepare() { return { all() { throw new Error('PRIVATE SQL failure'); } }; } }, { onPhase: event => events.push(event) });
+  assert.throws(() => db.prepare('SELECT hash_seq,distance FROM vectors_vec WHERE embedding MATCH ? AND k=?').all('PRIVATE vector', 3));
+  assert.deepEqual(events.map(event => `${event.stage}:${event.state}`), ['vector_sql:start', 'vector_sql:end']);
+  assert.equal(JSON.stringify(events).includes('PRIVATE'), false);
+});
+
+test('daemon prepares cached models serially and retains them without claiming retrieval readiness', async () => {
+  const calls = [], models = { embed: { id: 'embed-id', cached: true }, rerank: { id: rerankModel, cached: true } };
+  const llm = { inactivityTimeoutMs: 300000, disposeModelsOnInactivity: true, embedContexts: [{}], rerankContexts: [{}],
+    async embed() {
+      assert.equal(this.inactivityTimeoutMs, 0); assert.equal(this.disposeModelsOnInactivity, false);
+      calls.push('embed'); return { model: 'embed-id', embedding: [.2, .4] };
+    },
+    async rerank(_, docs) { calls.push('rerank'); return { model: rerankModel, results: docs.map((doc, i) => ({ file: doc.file, score: .8 - i / 2 })) }; },
+  };
+  await prepareCachedModels(llm, models);
+  assert.deepEqual(calls, ['embed', 'rerank']);
+  assert.equal(models.embed.warmed, true); assert.equal(models.rerank.warmed, true);
+  assert.equal(models.embed.context_count, 1); assert.equal(models.rerank.context_count, 1);
+  const service = createRecallService({ store: {}, llm, lexical: lex(), manifest: { models } });
+  assert.equal(service.capabilities().models.embed.warmed, true);
+  assert.equal(service.capabilities().vector_ready, false); assert.equal(service.capabilities().rerank_ready, false);
+  service.close();
+});
+
+test('missing cache never invokes native model resolution or loading', async () => {
+  const models = { embed: { cached: false }, rerank: { cached: false } };
+  await prepareCachedModels({ embed() { assert.fail('Missing cache must not load'); }, rerank() { assert.fail('Missing cache must not load'); } }, models);
+  for (const model of Object.values(models)) {
+    assert.equal(model.warmed, false); assert.equal(model.warmup_status, 'model_cache_unavailable');
+  }
+});
+
+test('failed cached model warmup remains unavailable while the other model can prepare', async () => {
+  const models = { embed: { id: 'embed-id', cached: true }, rerank: { id: rerankModel, cached: true } };
+  let fatal = 0;
+  await prepareCachedModels({ embed: async () => ({ model: 'embed-id', embedding: [NaN] }),
+    rerank: async (_, docs) => ({ model: rerankModel, results: docs.map(doc => ({ file: doc.file, score: .5 })) }) }, models,
+  { onFatal: () => fatal++ });
+  assert.equal(models.embed.warmed, false); assert.equal(models.embed.warmup_status, 'invalid_embedding');
+  assert.equal(models.rerank.warmed, true); assert.equal(fatal, 0);
+  models.embed.cached = false;
+  await prepareCachedModels({ rerank: async (_, docs) => ({ model: 'fallback', results: docs.map(doc => ({ file: doc.file, score: .5 })) }) }, models);
+  assert.equal(models.rerank.warmed, false); assert.equal(models.rerank.warmup_status, 'invalid_rerank');
+});
+
+test('startup deadline retires its owner and late native completion cannot warm or start another model', async () => {
+  const held = deferred(), models = { embed: { id: 'embed-id', cached: true }, rerank: { id: rerankModel, cached: true } };
+  let fatal = 0, ranking = 0;
+  await assert.rejects(prepareCachedModels({ embed: () => held.promise, rerank() { ranking++; } }, models,
+    { deadline: Date.now() + 20, onFatal: () => fatal++ }), error => error.code === 'deadline');
+  assert.equal(fatal, 1); assert.equal(ranking, 0);
+  for (const model of Object.values(models)) { assert.equal(model.warmed, false); assert.equal(model.warmup_status, 'deadline'); }
+  held.resolve({ model: 'embed-id', embedding: [.2, .4] }); await sleep(5);
+  assert.equal(ranking, 0); assert.equal(models.embed.warmed, false); assert.equal(models.rerank.warmed, false);
+});
+
+test('startup deadline remains terminal after a late cached-model rejection', async () => {
+  const held = deferred(), models = { embed: { id: 'embed-id', cached: true }, rerank: { id: rerankModel, cached: true } };
+  let fatal = 0, ranking = 0;
+  await assert.rejects(prepareCachedModels({ embed: () => held.promise, rerank() { ranking++; } }, models,
+    { deadline: Date.now() + 20, onFatal: () => fatal++ }), error => error.code === 'deadline');
+  const terminal = structuredClone(models);
+  held.reject(Object.assign(new Error('Public delayed failure'), { code: 'public_late_failure' })); await sleep(5);
+  assert.deepEqual(models, terminal); assert.equal(ranking, 0); assert.equal(fatal, 1);
+});
+
+test('startup model and page preparation consume one shared absolute deadline', async () => {
+  let clock = 100, fatal = 0;
+  const deadline = 120, now = () => clock;
+  const models = { embed: { id: 'embed-id', cached: true }, rerank: { id: rerankModel, cached: true } };
+  await prepareCachedModels({ async embed() { clock += 12; return { model: 'embed-id', embedding: [.2] }; },
+    async rerank(_, docs) { clock += 7; return { model: rerankModel, results: docs.map(doc => ({ file: doc.file, score: .5 })) }; } },
+  models, { deadline, now });
+  assert.equal(clock, 119);
+  await assert.rejects(prepareVectorPages({ async searchVector() { clock += 2; throw new Error('Public late page failure'); } },
+    { deadline, now, onFatal: () => fatal++ }), error => error.code === 'deadline');
+  assert.equal(fatal, 1);
+});
+
+test('vector hydration batches exact indexed keys and retains trailing scope parameters', () => {
+  const prepared = [], hash = 'a'.repeat(64), keys = Array.from({ length: 201 }, (_, i) => `${hash}_${i}`);
+  const db = indexedVectorDatabase({ prepare(sql) { return { all(...parameters) { prepared.push({ sql, parameters }); return []; } }; } });
+  const sql = `SELECT cv.hash,cv.seq FROM content_vectors cv WHERE cv.hash || '_' || cv.seq IN (${keys.map(() => '?').join(',')}) AND d.collection = ?`;
+  db.prepare(sql).all(...keys, 'public');
+  assert.equal(prepared.length, 2);
+  for (const call of prepared) { assert.doesNotMatch(call.sql, /WHERE cv\.hash \|\|/); assert.match(call.sql, /cv.hash = \? AND cv.seq = \?/); assert.equal(call.parameters.at(-1), 'public'); }
+  assert.equal(prepared[0].parameters.length, 401); assert.deepEqual(prepared[1].parameters, [hash, 200, 'public']);
+  assert.throws(() => db.prepare("SELECT * FROM cv WHERE cv.hash || '_' || cv.seq IN (?)").all('invalid_key'), error => error.code === 'invalid_vector_key');
+});
+
+test('indexed hydration matches QMD rows, active filtering, chunks and collection scope', { skip: !process.env.CLAUDE_NOTE_TEST_SQLITE }, () => {
+  const Database = createRequire(import.meta.url)(process.env.CLAUDE_NOTE_TEST_SQLITE), db = new Database(':memory:');
+  try {
+    db.exec('CREATE TABLE content_vectors(hash TEXT,seq INTEGER,pos INTEGER,PRIMARY KEY(hash,seq)); CREATE TABLE documents(hash TEXT,collection TEXT,active INTEGER,path TEXT); CREATE TABLE content(hash TEXT PRIMARY KEY,doc TEXT); CREATE INDEX doc_hash ON documents(hash);');
+    const hash = 'a'.repeat(64), other = 'b'.repeat(64);
+    db.prepare('INSERT INTO content_vectors VALUES(?,?,?)').run(hash, 0, 0); db.prepare('INSERT INTO content_vectors VALUES(?,?,?)').run(hash, 1, 100);
+    db.prepare('INSERT INTO content_vectors VALUES(?,?,?)').run(other, 0, 0);
+    for (const [h, collection, active] of [[hash, 'public', 1], [hash, 'private', 1], [other, 'public', 0]]) db.prepare('INSERT INTO documents VALUES(?,?,?,?)').run(h, collection, active, 'note.md');
+    for (const h of [hash, other]) db.prepare('INSERT INTO content VALUES(?,?)').run(h, 'Public synthetic body');
+    const sql = "SELECT cv.hash,cv.seq,cv.pos,d.collection,content.doc FROM content_vectors cv JOIN documents d ON d.hash=cv.hash AND d.active=1 JOIN content ON content.hash=d.hash WHERE cv.hash || '_' || cv.seq IN (?,?,?) AND d.collection = ?";
+    const args = [`${hash}_0`, `${hash}_1`, `${other}_0`, 'public'];
+    const indexed = indexedVectorDatabase(db).prepare(sql).all(...args);
+    assert.deepEqual(indexed, db.prepare(sql).all(...args)); assert.equal(indexed.length, 2);
+    const plan = db.prepare('EXPLAIN QUERY PLAN SELECT * FROM content_vectors cv WHERE (cv.hash = ? AND cv.seq = ?)').all(hash, 0);
+    assert.ok(plan.some(row => /SEARCH cv USING INDEX.*hash=\? AND seq=\?/.test(row.detail)));
+  } finally { db.close(); }
+});
+
+test('startup vector-page scan is bounded and ordinary failure preserves lexical startup', async () => {
+  const calls = [];
+  assert.equal(await prepareVectorPages({ async searchVector(query, options) { calls.push({ query, options }); return []; } }), 'warmed');
+  assert.deepEqual(calls[0].options, { limit: 1 });
+  assert.equal(await prepareVectorPages({ async searchVector() { throw new Error('Unavailable index'); } }), 'index_warmup_failed');
+  let fatal = 0;
+  await assert.rejects(prepareVectorPages({ searchVector: () => new Promise(() => {}) },
+    { deadline: Date.now() + 20, onFatal: () => fatal++ }), error => error.code === 'deadline');
+  assert.equal(fatal, 1);
+});
 
 test('passage selection retains older matching evidence instead of an unrelated latest block', () => {
   const body = '# Earlier\n\nThe retry handler must preserve idempotency keys across failed payment attempts.\n\n# Latest\n\nBasil grows well beside a sunny window and needs occasional water during winter.\n';
@@ -54,6 +226,25 @@ test('scope is sent structurally to both lanes; rank sees and identifies exactly
   assert.deepEqual(ranked.scored_passage_ids, [p.passage_id]);
   assert.equal(ranked.passage_scores[p.passage_id], .8);
   service.close();
+});
+
+test('late model completion before timer delivery cannot publish retrieval readiness', async () => {
+  for (const route of ['/search', '/rerank']) {
+    let clock = 100, fatal = 0;
+    const service = createRecallService({ now: () => clock, lexical: lex(), onFatal: () => fatal++,
+      store: { async searchVector() { clock = 111; return [row]; } },
+      manifest: { models: { embed: { id: 'embed-id' }, rerank: { id: rerankModel } } },
+      llm: { embedModel: {}, async rerank(_, docs) { clock = 111; return { model: rerankModel,
+        results: docs.map(doc => ({ file: doc.file, score: .8 })) }; } } });
+    try {
+      const pending = service.request(route, { ...rankRequest(), question: 'retry', rungs: ['retry'], deadline_at_ms: 110 });
+      if (route === '/search') assert.equal((await pending).coverage.semantic, 'partial_deadline');
+      else await assert.rejects(pending, error => error.code === 'deadline');
+      assert.equal(fatal, 1); assert.equal(service.capabilities().ok, false);
+      assert.equal(service.capabilities().vector_ready, false); assert.equal(service.capabilities().rerank_ready, false);
+      await assert.rejects(service.request('/search', {}), error => error.code === 'poisoned');
+    } finally { service.close(); }
+  }
 });
 
 test('lexical evidence remains available without cached models or vectors', async () => {
@@ -147,6 +338,29 @@ test('QMD2.8.3 scoped worker retrieves past more than ten times global distracto
     assert.equal(cjk.rows[0].filepath, 'qmd://public/cjk.md');
     await assert.rejects(worker.request({ kind: 'search', query: 'retry', collections: [], limit: 3 }, Date.now() - 1), e => e.code === 'deadline');
   } finally { worker.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('scoped lexical misses use one FTS MATCH scan instead of probing every active rowid', { skip: !process.env.CLAUDE_NOTE_TEST_SQLITE }, () => {
+  const Database = createRequire(import.meta.url)(process.env.CLAUDE_NOTE_TEST_SQLITE), db = new Database(':memory:');
+  try {
+    db.exec(`CREATE TABLE documents(id INTEGER PRIMARY KEY,collection TEXT,path TEXT,title TEXT,hash TEXT,active INTEGER);
+      CREATE TABLE content(hash TEXT PRIMARY KEY,doc TEXT);
+      CREATE VIRTUAL TABLE documents_fts USING fts5(filepath,title,body);`);
+    for (const [id, collection, active] of [[1, 'private', 1], [2, 'public', 0], [3, 'public', 1]]) {
+      db.prepare('INSERT INTO documents VALUES(?,?,?,?,?,?)').run(id, collection, `${id}.md`, 'Fixture', `${id}`, active);
+      db.prepare('INSERT INTO content VALUES(?,?)').run(`${id}`, 'saved knowledge hooks');
+      db.prepare('INSERT INTO documents_fts(rowid,filepath,title,body) VALUES(?,?,?,?)').run(id, `${collection}/${id}.md`, 'Fixture', 'saved knowledge hooks');
+    }
+    let sql;
+    const adapter = { prepare(statement) { sql = statement; return db.prepare(statement); } };
+    assert.deepEqual(scopedLexical(adapter, 'absentrareword', ['public'], 1), []);
+    const plan = db.prepare('EXPLAIN QUERY PLAN ' + sql).all('"absentrareword"*', 'public', 1);
+    const fts = plan.filter(row => /documents_fts VIRTUAL TABLE/.test(row.detail));
+    assert.equal(fts.length, 1); assert.match(fts[0].detail, /INDEX \d+:M\d+/);
+    assert.doesNotMatch(fts[0].detail, /INDEX \d+:.*=/); // '=' encodes a rowid-constrained FTS probe.
+    assert.deepEqual(scopedLexical(db, 'hooks', ['public'], 1).map(row => row.filepath), ['qmd://public/3.md']);
+    assert.deepEqual(scopedLexical(db, 'hooks', ['public', 'private'], 3).map(row => row.filepath).sort(), ['qmd://private/1.md', 'qmd://public/3.md']);
+  } finally { db.close(); }
 });
 
 test('metadata cache: real SQLite snapshots reuse scans and invalidate external document/vector commits', { skip: !process.env.CLAUDE_NOTE_TEST_SQLITE }, () => {
@@ -511,7 +725,7 @@ test('runtime proxy startup has one monotonic readiness lifetime', async t => {
       }
       wall += target - mono; mono = target; await flush();
     };
-    const make = () => {
+    const make = (options = {}) => {
       class FakeWorker extends EventEmitter {
         sent = []; terminations = 0;
         postMessage(message) { this.sent.push(message); }
@@ -519,11 +733,11 @@ test('runtime proxy startup has one monotonic readiness lifetime', async t => {
         terminate() { this.terminations++; return new Promise(() => {}); }
       }
       const worker = new FakeWorker(); let fatal = 0;
-      const proxy = createRuntimeProxy(worker, { startupMs: 20, onFatal: () => fatal++ });
+      const proxy = createRuntimeProxy(worker, { startupMs: 20, onFatal: () => fatal++, ...options });
       proxies.push(proxy);
       return { worker, proxy, ready: observe(proxy.ready), fatal: () => fatal };
     };
-    try { await run({ make, advance, wallNow: () => wall, changeWall: delta => { wall += delta; } }); }
+    try { await run({ make, advance, monoNow: () => mono, wallNow: () => wall, changeWall: delta => { wall += delta; } }); }
     finally {
       for (const proxy of proxies) proxy.close();
       await flush(); assert.equal(timers.size, 0, 'no startup or request timer survives close');
@@ -625,6 +839,17 @@ test('runtime proxy startup has one monotonic readiness lifetime', async t => {
     await advance(30); const { worker, ready } = make(); await advance(5);
     worker.emit('message', { ready: true, manifest: initial }); await flush(); assert.equal(ready.state, 'fulfilled');
   });
+  await run('default readiness lifetime is exactly fifteen seconds', async ({ make, advance }) => {
+    const { ready } = make({ startupMs: undefined }); await advance(14999);
+    assert.equal(ready.state, 'pending'); await advance(1);
+    assert.deepEqual(ready, { state: 'rejected', code: 'deadline', settlements: 1 });
+  });
+  await run('a precomputed startup deadline includes Worker-construction time', async ({ make, advance, monoNow }) => {
+    const startupDeadline = monoNow() + 20;
+    await advance(7); const { ready } = make({ startupDeadline });
+    await advance(12); assert.equal(ready.state, 'pending'); await advance(1);
+    assert.equal(ready.code, 'deadline');
+  });
   await run('ready at deadline rejects even before timer callback', async ({ make, advance }) => {
     const { worker, proxy, ready } = make(); await advance(20, false);
     worker.emit('message', { ready: true, manifest: late }); await flush();
@@ -633,6 +858,27 @@ test('runtime proxy startup has one monotonic readiness lifetime', async t => {
   await run('delayed timer cannot accept late ready', async ({ make, advance }) => {
     const { worker, ready } = make(); await advance(21, false);
     worker.emit('message', { ready: true, manifest: initial }); await flush(); assert.equal(ready.code, 'deadline');
+  });
+  for (const event of ['result', 'phase', 'started']) {
+    await run(`late ${event} expires the query before delayed timer or manifest mutation`, async ({ make, advance, wallNow }) => {
+      const { worker, proxy, fatal } = make(); worker.emit('message', { ready: true, manifest: initial }); await flush();
+      const job = observe(proxy.request('/search', { deadline_at_ms: wallNow() + 10 })), id = worker.sent[0].id;
+      if (event !== 'started') worker.emit('message', { started: String(id) });
+      await advance(10, false);
+      worker.emit('message', event === 'phase' ? { phase: { request_id: String(id), stage: 'vector_search', state: 'end' }, manifest: late }
+        : event === 'started' ? { started: String(id), manifest: late } : { id, result: { vec: [row] }, manifest: late });
+      await flush();
+      assert.deepEqual(job, { state: 'rejected', code: 'deadline', settlements: 1 });
+      assert.equal(proxy.capabilities().index.generation, 'initial'); assert.equal(proxy.capabilities().vector_ready, false);
+      assert.equal(proxy.capabilities().ok, false); assert.equal(fatal(), 1); assert.equal(worker.terminations, 1);
+    });
+  }
+  await run('late health response expires only its waiter and cannot publish a manifest', async ({ make, advance, wallNow }) => {
+    const { worker, proxy, fatal } = make(); worker.emit('message', { ready: true, manifest: initial }); await flush();
+    const health = observe(proxy.refresh(wallNow() + 10)), id = worker.sent[0].id;
+    await advance(10, false); worker.emit('message', { id, result: late, manifest: late }); await flush();
+    assert.equal(health.state, 'fulfilled'); assert.equal(proxy.capabilities().index.generation, 'initial');
+    assert.equal(proxy.capabilities().ok, true); assert.equal(fatal(), 0); assert.equal(worker.terminations, 0);
   });
   await run('wall-clock jumps do not extend or expire monotonic startup', async ({ make, advance, changeWall }) => {
     const { worker, ready } = make(); changeWall(3600000); await advance(5);
@@ -990,6 +1236,20 @@ test('metadata ownership: the first short health waiter cannot set the shared bo
     assert.equal(calls, 1); assert.equal(closed, 0);
     assert.equal(service.capabilities().degradation.includes('deadline'), false);
   } finally { held.resolve(); await Promise.allSettled([short, longer]); service.close(); }
+});
+
+test('startup metadata borrow is capped by the remaining shared lifetime', async () => {
+  const held = deferred(); let closed = 0, borrowed;
+  const service = createRecallService({ store: {}, llm: {}, lexical: {
+    request(_, deadline) { borrowed = deadline; return held.promise; }, close() { closed++; },
+  } });
+  const deadline = Date.now() + 20;
+  try {
+    const health = await service.refresh(deadline, { operationDeadline: deadline });
+    assert.equal(borrowed, deadline); assert.equal(closed, 1); assert.equal(health.lexical_ready, false);
+    held.resolve({ rows: [], metadata }); await new Promise(setImmediate);
+    assert.equal(service.capabilities().lexical_ready, false);
+  } finally { held.resolve({ rows: [], metadata }); service.close(); }
 });
 
 test('metadata ownership: an unresolved adapter is bounded and late success is ignored', async () => {

@@ -56,6 +56,15 @@ class QueryTests(unittest.TestCase):
         ladder = recall.query_ladder(["What", "retry", "idempotency"], first_word="What")
         self.assertNotIn("What", ladder[-1])
 
+    def test_complementary_pairs_drop_one_poisoned_term_without_guessing(self):
+        ladder = [["test", "knowdge", "design", "everyday"],
+                  ["knowdge", "design", "everyday"], ["knowdge", "everyday"]]
+        self.assertEqual(recall.complementary_pairs(ladder),
+                         [["design", "everyday"], ["knowdge", "design"]])
+        self.assertEqual(recall.complementary_pairs([["Google", "Drive", "access"], ["Google", "access"]]),
+                         [["Drive", "access"], ["Google", "Drive"]])
+        self.assertEqual(recall.complementary_pairs([["codex", "hooks"]]), [])
+
 
 class RecallTests(unittest.TestCase):
     def test_pools_every_rung_and_ranks_by_votes(self):
@@ -98,6 +107,127 @@ class RecallTests(unittest.TestCase):
         for prompt in ("<task-notification>done</task-notification> bhww6b9lv",
                        "ok thanks", "/compact keep going please now"):
             self.assertEqual(recall.recall(prompt, settings(), lambda c, t: []).status, "skipped")
+
+    def test_subject_free_followup_never_searches_generic_action_notes(self):
+        for prompt in ("fix it", "Please repair this!", "check that please", "get it to work! fix it",
+                       "get this to work", "please fix it and check that"):
+            with self.subTest(prompt=prompt), mock.patch.object(recall, "server_post") as post:
+                runner = mock.Mock(return_value=[item("qmd://notes/random-fix.md", "Old incident fix")])
+                result = recall.recall(prompt, settings(engine="auto"), runner)
+                self.assertEqual(result.status, "skipped")
+                self.assertIn("no retrieval subject", result.reason)
+                runner.assert_not_called()
+                post.assert_not_called()
+        for prompt in ("codex hooks", "INSUFFICIENTPERMISSIONS", "fix OAuth retry", "get OAuth to work",
+                       "fix it! Citizens bank"):
+            with self.subTest(prompt=prompt):
+                runner = mock.Mock(return_value=[])
+                result = recall.recall(prompt, settings(), runner)
+                self.assertEqual(result.status, "miss")
+                runner.assert_called()
+
+    def test_subject_free_acknowledgements_skip_both_engines_and_context_injection(self):
+        for prompt in ("yes", "NO.", "okay", "Thanks!", "thank you", "yes please", "no, thanks",
+                       "Okay, thank you.", "sure", "yep!", "nope"):
+            with self.subTest(prompt=prompt), mock.patch.object(recall, "server_post") as post:
+                runner = mock.Mock(return_value=[item("qmd://notes/yes.md", "Unrelated yes note")])
+                result = recall.recall(prompt, settings(engine="auto"), runner)
+                self.assertEqual(result.status, "skipped")
+                self.assertIn("no retrieval subject", result.reason)
+                self.assertEqual(recall.format_context(result), "")
+                runner.assert_not_called()
+                post.assert_not_called()
+
+    def test_acknowledgement_words_do_not_hide_a_short_subject_or_explicit_query(self):
+        for prompt in ("yes hooks", "no authentication", "okay OAuth", "THANKYOU_ERROR", "codex hooks"):
+            with self.subTest(prompt=prompt):
+                runner = mock.Mock(return_value=[])
+                result = recall.recall(prompt, settings(), runner)
+                self.assertEqual(result.status, "miss")
+                runner.assert_called()
+        runner = mock.Mock(return_value=[])
+        result = recall.recall("yes", settings(), runner, extra_rungs=[["codex", "hooks"]])
+        self.assertEqual(result.status, "miss")
+        runner.assert_called()
+
+    def test_actual_hook_entrypoint_stays_quiet_for_acknowledgements(self):
+        for prompt in ("yes", "no", "okay", "thanks"):
+            output = io.StringIO()
+            payload = {"hook_event_name": "UserPromptSubmit", "prompt": prompt}
+            with self.subTest(prompt=prompt), \
+                    mock.patch.object(recall.Settings, "load", return_value=settings(engine="auto")), \
+                    mock.patch.object(recall, "server_post") as post, \
+                    mock.patch.object(recall, "memory_md_warning", return_value=""), \
+                    mock.patch("sys.stdout", output):
+                self.assertEqual(recall.hook_main(io.StringIO(json.dumps(payload))), 0)
+            self.assertEqual(output.getvalue(), "")
+            post.assert_not_called()
+
+    def test_cli_search_preserves_time_for_actual_source_verification(self):
+        # Every rung is slow, but returns a real source. Searching until the
+        # whole deadline would erase every result during source preparation.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "oauth.md"
+            path.write_text("---\ntype: gotcha\n---\nOAuth retry requires removing the stale token before requesting permissions.\n")
+            calls = []
+            def runner(cmd, timeout):
+                calls.append(timeout)
+                time.sleep(min(.09, timeout * .7))
+                return [item("qmd://notes/oauth.md", "OAuth retry")]
+            def resolve(*_args, **_kwargs):
+                time.sleep(.035)
+                return path
+            with mock.patch.object(recall, "local_path", side_effect=resolve):
+                started = time.monotonic()
+                result = recall.recall("OAuth retry stale token permission scope", settings(
+                    budget=.35, memory_collections=["agentmem"]), runner)
+            self.assertLess(time.monotonic() - started, .45)
+            self.assertEqual(result.status, "hit")
+            self.assertEqual(result.hits[0].revision_kind, "source_file_sha256")
+            self.assertEqual(result.hits[0].anchor["start_line"], 4)
+            self.assertGreater(len(calls), 1)
+
+    def test_incomplete_cli_ladder_is_unavailable_instead_of_a_false_miss(self):
+        release = threading.Event()
+        calls = []
+        def runner(cmd, timeout):
+            calls.append(cmd)
+            if len(calls) == 1:
+                return []
+            release.wait(1)  # deliberately ignores the adapter's timeout
+            return []
+        try:
+            started = time.monotonic()
+            result = recall.recall("OAuth payment retry permission stale token", settings(budget=.12), runner)
+            self.assertLess(time.monotonic() - started, .25)
+            self.assertEqual(result.status, "unavailable")
+            self.assertTrue(result.coverage["partial"])
+            self.assertTrue(result.deadline_exhausted)
+            self.assertIn("coverage incomplete", result.reason)
+        finally:
+            release.set()
+
+    def test_source_resolution_timeout_is_unavailable_instead_of_no_eligible_passages(self):
+        release = threading.Event()
+        try:
+            with mock.patch.object(recall, "local_path", side_effect=lambda *_a, **_k: release.wait(1)):
+                result = recall.recall("OAuth retry", settings(budget=.05),
+                                       lambda *_: [item("qmd://notes/oauth.md", "OAuth")])
+            self.assertEqual(result.status, "unavailable")
+            self.assertEqual(result.reason, "source verification deadline exhausted")
+            self.assertEqual(result.coverage["local_resolution"], "partial_deadline")
+        finally:
+            release.set()
+
+    def test_incomplete_search_cannot_turn_an_ineligible_pool_into_a_miss(self):
+        calls = []
+        def runner(*_args):
+            calls.append(True)
+            return [item("qmd://notes/fm.md", "Metadata", "type: gotcha")] if len(calls) == 1 else None
+        with mock.patch.object(recall, "local_path", return_value=None):
+            result = recall.recall("OAuth payment retry stale token", settings(), runner)
+        self.assertEqual(result.status, "unavailable")
+        self.assertIn("coverage incomplete", result.reason)
 
     def test_memory_collection_gets_reserved_slots(self):
         def runner(cmd, timeout):
@@ -356,6 +486,111 @@ class ServerEngineTests(unittest.TestCase):
         self.assertTrue(calls)
         self.assertEqual(res.engine, "cli")
 
+    def test_server_down_typo_prompt_recovers_original_subject_via_cli(self):
+        prompt = "test it, what do we have in knowdge on design of everyday things"
+        body = "The Design of Everyday Things explains how visible affordances and feedback make actions understandable."
+        queries = []
+        document_terms = {word.casefold() for word in recall.content_terms(body)}
+        def runner(cmd, timeout):
+            query = cmd[cmd.index("search") + 1]
+            queries.append(query)
+            return [item("qmd://notes/book.md", "The Design of Everyday Things", body)] \
+                if set(query.casefold().split()) <= document_terms else []
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "book.md"
+            path.write_text(body)
+            with mock.patch.object(recall, "server_post", return_value={"error": "transport_error"}), \
+                    mock.patch.object(recall, "local_path", return_value=path):
+                result = recall.recall(prompt, settings(engine="auto"), runner)
+        self.assertEqual(result.status, "hit")
+        self.assertEqual(result.attempted_engines, ["server", "cli"])
+        self.assertEqual(queries[:2], ["knowdge everyday", "design everyday"])
+        self.assertEqual(result.hits[0].revision_kind, "source_file_sha256")
+        self.assertEqual(result.reason, "")
+        self.assertEqual(result.coverage["search"], "transport_error")
+        self.assertEqual(result.coverage["semantic"], "unavailable_cli")
+        self.assertTrue(result.coverage["partial"])
+        self.assertIn("Coverage is partial", recall.format_context(result))
+
+    def test_timed_out_server_leaves_two_normal_cli_attempts_and_source_time(self):
+        release = threading.Event()
+        prompt = "test knowdge design everyday things"
+        body = "The Design of Everyday Things explains how visible affordances and feedback make actions understandable."
+        queries, completed = [], []
+        document_terms = {word.casefold() for word in recall.content_terms(body)}
+        def runner(cmd, timeout):
+            query = cmd[cmd.index("search") + 1]
+            queries.append(query)
+            time.sleep(.09)
+            completed.append(query)
+            return [item("qmd://notes/book.md", "The Design of Everyday Things", body)] \
+                if set(query.casefold().split()) <= document_terms else []
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "book.md"
+                path.write_text(body)
+                with mock.patch.object(recall, "server_post", side_effect=lambda *_: release.wait(2)), \
+                        mock.patch.object(recall, "local_path", return_value=path):
+                    started = time.monotonic()
+                    result = recall.recall(prompt, settings(engine="auto", timeout=6, budget=.8), runner)
+                self.assertLess(time.monotonic() - started, .95)
+            self.assertEqual(result.status, "hit")
+            self.assertEqual(queries[:2], ["knowdge everyday", "design everyday"])
+            self.assertIn("design everyday", completed)
+            self.assertEqual(result.hits[0].revision_kind, "source_file_sha256")
+            self.assertTrue(result.coverage["partial"])
+            self.assertEqual(result.coverage["semantic"], "unavailable_cli")
+        finally:
+            release.set()
+            time.sleep(.1)  # release the final deliberately late CLI fixture
+
+    def test_fallback_protects_original_narrow_query_when_complementary_pairs_miss(self):
+        release = threading.Event()
+        body = "Knowledge of everyday interactions makes familiar controls and feedback easier to understand."
+        document_terms = {word.casefold() for word in recall.content_terms(body)}
+        queries = []
+        def runner(cmd, timeout):
+            query = cmd[cmd.index("search") + 1]
+            queries.append(query)
+            time.sleep(.09)
+            return [item("qmd://notes/knowledge.md", "Everyday knowledge", body)] \
+                if set(query.casefold().split()) <= document_terms else []
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "knowledge.md"
+                path.write_text(body)
+                with mock.patch.object(recall, "server_post", side_effect=lambda *_: release.wait(2)), \
+                        mock.patch.object(recall, "local_path", return_value=path):
+                    started = time.monotonic()
+                    result = recall.recall("knowledge desgn everyday", settings(
+                        engine="auto", timeout=6, budget=.8), runner)
+                self.assertLess(time.monotonic() - started, .95)
+            self.assertEqual(queries[:3], ["knowledge everyday", "desgn everyday", "knowledge desgn"])
+            self.assertEqual(result.status, "hit")
+            self.assertEqual(result.hits[0].revision_kind, "source_file_sha256")
+            self.assertTrue(result.coverage["partial"])
+        finally:
+            release.set()
+            time.sleep(.1)
+
+    def test_fallback_scheduling_preserves_original_rung_ranking(self):
+        calls = []
+        prompt = "OAuth payment retry permission stale token"
+        narrow_query = " ".join(recall.query_ladder(recall.content_terms(prompt), "OAuth")[-1])
+        def runner(cmd, timeout):
+            query = cmd[cmd.index("search") + 1]
+            calls.append(query)
+            if query == narrow_query:
+                return [item("qmd://notes/narrow.md", "Narrow")]
+            if len(query.split()) == 6:
+                return [item("qmd://notes/wide.md", "Wide")]
+            return []
+        with mock.patch.object(recall, "server_post", return_value=None), \
+                mock.patch.object(recall, "local_path", return_value=None):
+            result = recall.recall(prompt, settings(engine="auto"), runner)
+        self.assertEqual(len(calls[0].split()), 2)
+        self.assertEqual(result.hits[0].title, "Wide")
+
     def test_server_only_reports_unavailable(self):
         with mock.patch.object(recall, "server_post", return_value=None):
             res = recall.recall("Can I just run npm run build on the 4 GB box?", settings(engine="server"))
@@ -447,9 +682,53 @@ class ServerTransportTests(unittest.TestCase):
                 self.assertEqual(result.server_calls[0]["outcome"], "client_deadline")
                 self.assertFalse(result.deadline_exhausted)
                 self.assertEqual(bool(calls), engine == "auto")
-                self.assertEqual(result.status, "miss" if engine == "auto" else "unavailable")
+                self.assertEqual(result.status, "unavailable")
+                if engine == "auto":
+                    self.assertEqual(result.reason, "no keyword match; semantic search unavailable")
+                    self.assertTrue(result.coverage["partial"])
             finally:
                 release.set()
+
+    def test_auto_server_stall_reserves_cli_and_source_time_within_one_budget(self):
+        release = threading.Event()
+        response = self.response({"lex": []})
+        read = response.read
+        response.read = lambda n: (release.wait(1), read(n))[1]
+        queries = []
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "oauth.md"
+            path.write_text("OAuth retry requires deleting the stale token before requesting permission scope.\n")
+            def runner(cmd, timeout):
+                queries.append(cmd[cmd.index("search") + 1])
+                time.sleep(min(.01, timeout * .7))
+                return [item("qmd://notes/oauth.md", "OAuth retry")]
+            try:
+                with mock.patch("urllib.request.urlopen", return_value=response), \
+                        mock.patch.object(recall, "local_path", return_value=path):
+                    started = time.monotonic()
+                    result = recall.recall("OAuth payment retry permission stale token", settings(
+                        engine="auto", timeout=6, budget=.6, memory_collections=["agentmem"]), runner)
+                self.assertLess(time.monotonic() - started, .7)
+                self.assertEqual(result.status, "hit")
+                self.assertEqual(result.attempted_engines, ["server", "cli"])
+                self.assertEqual(len(queries[0].split()), 2)
+                self.assertEqual(result.hits[0].revision_kind, "source_file_sha256")
+                self.assertEqual(result.coverage["semantic"], "unavailable_cli")
+                self.assertEqual(result.hits[0].anchor["start_line"], 1)
+            finally:
+                release.set()
+
+    def test_healthy_semantic_server_keeps_priority_and_avoids_cli(self):
+        row = item("qmd://notes/oauth.md", "OAuth retry")
+        row["score"] = .9
+        runner = mock.Mock(return_value=[])
+        with mock.patch.object(recall, "server_post", return_value={"lex": [], "vec": [row]}), \
+                mock.patch.object(recall, "local_path", return_value=None):
+            result = recall.recall("Unexpected charges after connection failure", settings(
+                engine="auto", budget=.3, rerank=False), runner)
+        self.assertEqual(result.status, "hit")
+        self.assertEqual(result.attempted_engines, ["server"])
+        runner.assert_not_called()
 
     def test_outer_read_capacity_failure_retains_attempt_without_starting_transport(self):
         result = recall.Result(status="skipped", engine="server")
@@ -580,3 +859,49 @@ class ServerIndexTests(unittest.TestCase):
 
     def test_explicit_server_engine_is_honoured(self):
         self.assertTrue(self._run("cn-demo2", "server"))
+
+
+class SqliteFallbackTests(unittest.TestCase):
+    def test_default_auto_fallback_verifies_source_without_starting_a_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "book.md"
+            path.write_text("Design of everyday things: visible actions, feedback and recoverable errors.\n")
+            batch = {"complete": True, "reason": "", "calls": [
+                (None, False, 2, [item("qmd://notes/book.md", "Design of everyday things", "")])]}
+            with mock.patch.object(recall, "server_post", return_value={"error": "transport_error"}), \
+                    mock.patch("claude_note.recall_lexical.search_batch", return_value=batch) as search, \
+                    mock.patch.object(recall, "local_path", return_value=path), \
+                    mock.patch.object(recall, "_process") as run:
+                result = recall.recall("knowledge design everyday", settings(engine="auto"))
+            self.assertEqual(result.status, "hit")
+            self.assertEqual(result.engine, "sqlite")
+            self.assertEqual(result.attempted_engines, ["server", "sqlite"])
+            self.assertEqual(result.hits[0].revision_kind, "source_file_sha256")
+            self.assertEqual(result.coverage["lexical"], "complete_sqlite_scoped_before_limit")
+            self.assertTrue(result.coverage["partial"])
+            self.assertEqual(search.call_count, 1)
+            self.assertLessEqual(search.call_args.args[4] - time.monotonic(), 2.0)
+            run.assert_not_called()
+
+    def test_missing_sqlite_adapter_keeps_real_cli_compatibility_fallback(self):
+        with mock.patch.object(recall, "server_post", return_value={"error": "transport_error"}), \
+                mock.patch("claude_note.recall_lexical.search_batch", return_value=None), \
+                mock.patch.object(recall, "_process", return_value=(0, '[]')) as run:
+            result = recall.recall("design everyday things", settings(engine="auto"))
+        self.assertEqual(result.engine, "cli")
+        self.assertEqual(result.attempted_engines, ["server", "sqlite", "cli"])
+        self.assertEqual(result.status, "unavailable")
+        self.assertIn("semantic search unavailable", result.reason)
+        self.assertTrue(run.called)
+
+    def test_partial_sqlite_miss_is_unavailable_within_original_budget(self):
+        batch = {"complete": False, "reason": "deadline", "calls": []}
+        with mock.patch.object(recall, "server_post", return_value={"error": "transport_error"}), \
+                mock.patch("claude_note.recall_lexical.search_batch", return_value=batch), \
+                mock.patch.object(recall, "_process") as run:
+            result = recall.recall("design everyday things", settings(engine="auto"))
+        self.assertEqual(result.status, "unavailable")
+        self.assertEqual(result.engine, "sqlite")
+        self.assertIn("SQLite keyword", result.reason)
+        self.assertTrue(result.coverage["partial"])
+        run.assert_not_called()

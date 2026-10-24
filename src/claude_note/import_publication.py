@@ -26,6 +26,7 @@ MAX_RAW = 256 * 1024 * 1024
 MAX_RECORD = 1024 * 1024
 MAX_BATCH = 2 * MAX_RECORD
 CHUNKED_SNAPSHOT_BYTES = 256 * 1024
+VERIFY_READ_BYTES = 1024 * 1024
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -106,7 +107,48 @@ def _verify_source(record):
         source_store.verify(Path(record["snapshot_path"]), record["captured_revision"],
                             scope=source_scope(record["transcript_path"]))
     else:
-        _read_source(record)
+        # Preflight needs a current digest, not a transcript-sized allocation.
+        # Keep the legacy reader for consumers that actually need the bytes.
+        path = Path(record["snapshot_path"])
+        with state_io._parent(path) as (parent, name):
+            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            with os.fdopen(descriptor, "rb") as handle:
+                before = os.fstat(handle.fileno())
+                if (not stat.S_ISREG(before.st_mode) or before.st_nlink not in (1, 2)
+                        or before.st_size > MAX_RAW):
+                    raise PublicationError("Invalid bounded publication file", record["session_id"])
+                digest, size = hashlib.sha256(), 0
+                while True:
+                    raw = handle.read(min(VERIFY_READ_BYTES, MAX_RAW - size + 1))
+                    if not raw:
+                        break
+                    size += len(raw)
+                    if size > MAX_RAW:
+                        raise PublicationError("Imported evidence exceeds bound", record["session_id"])
+                    digest.update(raw)
+                after = os.fstat(handle.fileno())
+                identity = lambda info: (info.st_dev, info.st_ino, info.st_size,
+                                         info.st_mtime_ns, info.st_ctime_ns, info.st_nlink)
+                if identity(before) != identity(after) or size != before.st_size:
+                    raise PublicationError("Publication file changed during inspection", record["session_id"])
+                if digest.hexdigest() != record["captured_revision"]:
+                    raise PublicationError("Imported evidence missing or changed", record["session_id"])
+                if before.st_nlink == 2:
+                    # A verification-only read need not finish interrupted
+                    # publication cleanup, but must prove the same exact alias
+                    # that state_io.create_bytes would recover. Arbitrary
+                    # hardlinks remain invalid. The consumer can recover later.
+                    intent = _record(path.with_name(path.name + ".intent.json"))
+                    temporary = intent.get("temporary", "")
+                    if (not isinstance(temporary, str)
+                            or not re.fullmatch(r"\.claude-note-[0-9a-f]{32}", temporary)
+                            or intent.get("revision") != record["captured_revision"]
+                            or type(intent.get("size")) is not int or intent["size"] != size):
+                        raise PublicationError("Unrecognized evidence hardlink", record["session_id"])
+                    linked = os.stat(temporary, dir_fd=parent, follow_symlinks=False)
+                    if (not stat.S_ISREG(linked.st_mode)
+                            or (linked.st_dev, linked.st_ino) != (before.st_dev, before.st_ino)):
+                        raise PublicationError("Unrecognized evidence hardlink", record["session_id"])
 
 
 def _protect_source(record, *, origins, captured_text):

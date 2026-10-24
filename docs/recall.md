@@ -59,14 +59,17 @@ a measured miss on a 15,000-note index.
    literal token to BM25, and each matched nothing. Recall searches their parts.
 3. **A ladder of queries.** The full query, then the 5, 3 and 2 most discriminating words, in the
    prompt's own order. A capitalized word (except the first) and a word with digits rank as
-   specific; then longer words.
+   specific; then longer words. CLI fallback also tries the other pairs from the three-word
+   rung (at most two extra queries), so one misspelling need not survive every query. It uses
+   the original words without guessing their spelling.
 4. **Every rung is pooled.** Taking the first rung that answered let a narrow query with a worse
    note beat a wide one with the right note. Notes that several rungs agree on rank first.
 5. **Noise is skipped.** Session transcripts and the inbox dominate the index by count and their
    snippets are frontmatter. When a match landed in frontmatter, the note's first prose is shown.
-6. **The newest update wins the snippet.** Notes that grow by appended managed blocks keep their
-   current truth at the bottom, while BM25 serves the snippet from wherever it matched (usually the
-   oldest text). Recall shows the newest dated block and says how much history is behind it.
+6. **Deliver the matching source passage.** Recall selects evidence from the source revision and
+   keeps its line coordinates. A later appended block about another subject cannot replace the
+   passage that matched; equal matches favor the later passage. Open the full note and check
+   whether newer evidence changes its applicability before relying on it.
 7. **Agent memories get reserved slots.** Short, hand-written memories (Claude Code's
    `~/.claude/projects/*/memory/*.md`) rank low in BM25 against long notes, yet are the
    highest-signal entries. `memory_collections` are searched separately and placed first.
@@ -74,7 +77,10 @@ a measured miss on a 15,000-note index.
    never ran; agents read the silence as "nothing is known" and stop looking.
 9. **It fails open, on a deadline.** Each search has a wall-clock `timeout`, the whole recall a
    `budget`, and every failure path returns normally. Harness events (task notifications), slash
-   commands and prompts under 15 characters are not searched.
+   commands, acknowledgements and subject-free follow-ups such as "fix it" are not searched. Specific short
+   subjects remain searchable. Search leaves time for source verification, and automatic mode
+   reserves a keyword fallback slice before calling the server. Incomplete coverage is reported as
+   partial or unavailable instead of an ordinary no-match result.
 
 Optional: `rerank_command` receives `{"request": …, "candidates": [{"id", "title", "excerpt", "uri"}]}`
 on stdin and returns `{"keep": ["c3", "c0"]}`, best first. An empty list means "nothing relevant"
@@ -91,15 +97,59 @@ Transport diagnostics contain no prompt, URL, response body or exception message
 The existing local log still contains query terms and note URIs.
 
 After a search attempt, `engine` identifies its last attempted route: a strict server failure is
-labelled `server`; automatic fallback records both attempts and switches to
-`cli` when a CLI search is scheduled. An empty `attempted_engines` means no
+labelled `server`; automatic fallback records each attempted adapter and switches to
+`sqlite` for the read-only keyword adapter, or `cli` for the compatibility adapter.
+An empty `attempted_engines` means no
 search was attempted; `engine` then retains its legacy `cli` default.
-The client ID correlates the HTTP request
-and its receipt; the runtime proxy uses a separate internal job ID. These fields
-do not expose queue wait versus native execution time or prove a timeout cause.
-A search's six-second subdeadline can expire before the whole eight-second
-recall budget. Read-capacity exhaustion is distinguished in the call outcome;
+Successful keyword fallback clears the earlier server error from its result reason,
+while retaining the transport receipt and partial semantic coverage. A keyword miss
+while semantic search is unavailable reports `unavailable`, rather than a complete miss.
+
+Automatic fallback batches the literal query rungs and collection scopes in one
+read-only connection to the existing QMD keyword index. It validates the pinned schema,
+honors named indices and `INDEX_PATH`, bounds SQLite work to the remaining search
+slice, and returns metadata only. The normal source-reading path still verifies the
+actual file and selects its evidence passage. Unsupported or unavailable databases
+retain the QMD CLI compatibility path. Explicit `cli` mode and supplied custom runners
+keep their existing routing. This fallback loads no models, changes no index, and
+avoids paying CLI startup time for every query while the semantic service restarts.
+
+The parent runtime proxy correlates its internal job ID with a valid random client ID.
+It records bounded phase events before potentially blocking work: lexical SQL, passage
+selection, embedding, vector SQL, vector hydration, and reranking. Successful HTTP
+responses include `request_diagnostic`; failed requests also log the last observed phase,
+phase durations and numeric row/character counters before retirement. These diagnostics
+contain no prompt, source paths, SQL or vector contents. A last phase narrows the location
+of a stall; it does not establish its cause or prove native cancellation.
+A search's adapter subdeadline can expire before the whole eight-second
+recall budget. Automatic mode shortens the server slice to leave time for keyword search and
+source verification; `timeout` remains an upper bound. Read-capacity exhaustion is distinguished in the call outcome;
 the legacy overall `deadline_exhausted` flag also covers that bounded-read failure.
+
+The daemon warms existing cached embedding and rerank models during bounded startup, before
+admitting hook requests, and retains them across idle periods. The SDK store configures its
+five-minute idle cleanup to release both inference contexts and model objects, making a later
+prompt recreate native state inside its search deadline.
+Startup never downloads a model or builds native dependencies. Warm-up metadata records model
+loading separately from retrieval readiness: a successful real search and exact-passage rerank
+are still needed to establish those capabilities. Model work that exceeds its deadline retains
+the existing whole-process retirement behavior.
+
+Startup also scans vector pages once before accepting requests. On a large, cold index this
+file I/O can exceed a hook's entire budget even when the models are already warm. Worker
+construction, model identities, warming, vector pages and initial metadata share one
+15-second monotonic startup lifetime; each hook keeps its eight-second total deadline.
+Its SQLite connection uses a bounded 128-MiB page cache and up to about 2 GiB of file mapping.
+The pinned QMD vector adapter hydrates matched `(hash, seq)` keys through existing indexes,
+preserving collection filters, active-document joins, source bodies and scores. These settings
+and query changes do not add indexes, rewrite the database or change other QMD connections.
+
+New macOS recall LaunchAgents use `ProcessType=Interactive` and `Nice=0` for prompt responsiveness.
+Upgrades preserve existing process classes and priorities, including `Nice=5` and omitted fields.
+A value matching an earlier installer default does not identify it as generated configuration.
+The runtime worker also limits QMD to one embedding context and one rerank context, matching
+its serialized request queue and avoiding the SDK's larger batch-processing pools. Other QMD
+processes keep their own settings.
 
 Health metadata and search operations now share one lexical-worker lifetime.
 An already pending health refresh settles before a search starts; it cannot

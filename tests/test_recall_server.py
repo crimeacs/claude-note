@@ -23,7 +23,8 @@ class RecallServerTests(unittest.TestCase):
                 if found.returncode == 0:
                     env["CLAUDE_NOTE_TEST_SQLITE"] = found.stdout.strip()
         root = Path(__file__).resolve().parents[1]
-        result = subprocess.run([node, "--test", str(root / "tests/recall-server.test.mjs")], env=env,
+        fixtures = sorted((root / "tests").glob("recall*.test.mjs"))
+        result = subprocess.run([node, "--test", *(str(path) for path in fixtures)], env=env,
                                 capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 

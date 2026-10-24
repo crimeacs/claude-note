@@ -13,9 +13,17 @@ import { readFileSync, readdirSync, statSync, openSync, readSync, closeSync } fr
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 
 const PIN = '2.8.3';
+const STARTUP_MS = 15000;
 const digest = value => createHash('sha256').update(value).digest('hex');
 const boundedInt = (value, fallback, max) => Math.max(1, Math.min(max, Number(value) || fallback));
 const err = (code, message) => Object.assign(new Error(message), { code });
+const PHASES = new Set(['lexical_sql', 'lexical_passages', 'vector_search', 'embedding', 'vector_sql', 'vector_hydration', 'vector_passages', 'rerank']);
+function beginPhase(emit, stage, details = {}) {
+  const started = performance.now();
+  const send = event => { try { emit(event); } catch { /* diagnostics cannot change request ownership */ } };
+  send({ stage, state: 'start', ...details });
+  return () => send({ stage, state: 'end', elapsed_ms: Math.round(performance.now() - started) });
+}
 const collectionsOf = body => Array.isArray(body.collections)
   ? [...new Set(body.collections.filter(c => typeof c === 'string' && c.length > 0 && c.length <= 200))].slice(0, 40) : [];
 
@@ -56,10 +64,22 @@ export function passage(text, question, chars = 260) {
       const score = [...terms].filter(t => words.has(t)).reduce((n, t) => n + 1 + Math.min(t.length, 20) / 20, 0);
       if (!best || score > best.score || (score === best.score && begin + i > best.anchor.start_char)) {
         const a = begin + i, b = a + original.length;
-        best = { text: value, score, anchor: { start_char: a, end_char: b,
-          start_line: text.slice(0, a).split('\n').length, end_line: text.slice(0, b).split('\n').length } };
+        best = { text: value, score, anchor: { start_char: a, end_char: b } };
       }
     }
+  }
+  // Equal-score windows favor the latest passage. Counting every candidate's
+  // prefix lines makes a long note with weak lexical overlap quadratic; only
+  // the winning passage needs its source line coordinates.
+  if (best) {
+    const { start_char: a, end_char: b } = best.anchor;
+    let line = 1, startLine = 1;
+    for (let i = 0; i < b; i++) {
+      if (i === a) startLine = line;
+      if (text.charCodeAt(i) === 10) line++;
+    }
+    best.anchor.start_line = startLine;
+    best.anchor.end_line = line;
   }
   return best || { text: '', anchor: {} };
 }
@@ -96,20 +116,24 @@ function openReadOnly({ dbPath, sqliteModule, version }) {
 export function scopedLexical(db, query, collections, limit) {
   const match = literalFTS(query);
   if (!match) return [];
-  const filter = collections.length ? `AND collection IN (${collections.map(() => '?').join(',')})` : '';
-  // Materialize allowed IDs before rank/limit. This deliberately avoids QMD
-  // 2.8.3's global limit*10 CTE, which can starve a small requested collection.
-  const sql = `WITH allowed AS MATERIALIZED (
-      SELECT id FROM documents WHERE active=1 ${filter}
-    ), matches AS MATERIALIZED (
+  const filter = collections.length ? `AND d.collection IN (${collections.map(() => '?').join(',')})` : '';
+  // FTS must find matching rowids before scope filtering. Combining MATCH with
+  // rowid IN(all allowed documents) makes FTS5 repeat a rowid-constrained MATCH
+  // for every allowed document, even when rare terms should miss immediately.
+  // Scope still precedes LIMIT, so small collections cannot be starved by a
+  // global candidate cap. Fetch bodies only after the final scoped rank limit.
+  const sql = `WITH fts_matches AS MATERIALIZED (
       SELECT rowid, bm25(documents_fts,1.5,4.0,1.0) AS rank FROM documents_fts
-      WHERE documents_fts MATCH ? AND rowid IN (SELECT id FROM allowed)
-      ORDER BY rank ASC, rowid ASC LIMIT ?
+      WHERE documents_fts MATCH ?
+    ), matches AS MATERIALIZED (
+      SELECT fm.rowid, fm.rank FROM fts_matches fm JOIN documents d ON d.id=fm.rowid
+      WHERE d.active=1 ${filter}
+      ORDER BY fm.rank ASC, fm.rowid ASC LIMIT ?
     ) SELECT 'qmd://' || d.collection || '/' || d.path AS filepath, d.title, d.hash,
       content.doc AS body, matches.rank FROM matches
       JOIN documents d ON d.id=matches.rowid JOIN content ON content.hash=d.hash
       ORDER BY matches.rank ASC, d.collection ASC, d.path ASC`;
-  return db.prepare(sql).all(...collections, match, limit).map(row => ({ ...row,
+  return db.prepare(sql).all(match, ...collections, limit).map(row => ({ ...row,
     score: Math.abs(row.rank) / (1 + Math.abs(row.rank)) }));
 }
 
@@ -184,11 +208,11 @@ if (!isMainThread && workerData?.kind === 'claude-note-model-identity') {
   finally { if (fd !== undefined) closeSync(fd); }
 }
 
-export async function modelFileIdentity(path, deadline = Date.now() + 3000) {
+export async function modelFileIdentity(path, deadline = Date.now() + 3000, now = Date.now) {
   const worker = new Worker(new URL(import.meta.url), { workerData: { kind: 'claude-note-model-identity', path } });
   return new Promise(resolveIdentity => {
     const finish = value => { clearTimeout(timer); void worker.terminate(); resolveIdentity(value); };
-    const timer = setTimeout(() => finish({ revision: 'unknown', revision_kind: 'unknown' }), Math.max(1, deadline - Date.now()));
+    const timer = setTimeout(() => finish({ revision: 'unknown', revision_kind: 'unknown' }), Math.max(1, deadline - now()));
     worker.once('message', finish); worker.once('error', () => finish({ revision: 'unknown', revision_kind: 'unknown' }));
   });
 }
@@ -219,13 +243,14 @@ export class ScopedLexicalWorker {
 }
 
 export function createRecallService({ store, llm, lexical, manifest = {}, queueLimit = 8, maxRequestMs = 8000,
-  metadataTimeoutMs = 3000, modelAvailable = () => true, fallbackLexical, onFatal = () => {}, onJobStart = () => {}, now = Date.now }) {
+  metadataTimeoutMs = 3000, modelAvailable = () => true, fallbackLexical, onFatal = () => {}, onJobStart = () => {}, onPhase = () => {}, now = Date.now }) {
   const started = now(), waiting = [];
   let active = false, poisoned = false, closed = false, expired = 0, rejected = 0;
   let metadataRefresh = null, activeJob = null;
   let metadata = {}, lexicalReady = false, vectorObserved = false, rerankObserved = false;
   let rerankStatus = 'not_observed';
   const degradation = new Set();
+  const phase = (stage, details) => beginPhase(event => onPhase({ ...event, request_id: activeJob?.body.request_id }), stage, details);
   const capabilities = () => ({ ...manifest, protocol_version: 2, engine: 'qmd-sdk', ok: !poisoned && !closed,
     index: { ...manifest.index, ...metadata,
       generation: metadata.generation ? digest(JSON.stringify([metadata.generation, manifest.index?.config_revision,
@@ -290,14 +315,26 @@ export function createRecallService({ store, llm, lexical, manifest = {}, queueL
     remaining(deadline);
     if (poisoned) throw err('poisoned', 'Model worker requires restart');
     let timer;
+    const expire = () => {
+      if (!poisoned) {
+        poisoned = true; degradation.add('model_deadline_requires_restart');
+        try { lexical.close?.(); } catch (error) { degradation.add(error?.code || 'adapter_close_failed'); }
+        try { onFatal(); } catch { /* the owner remains poisoned */ }
+      }
+      return err('deadline', 'Model deadline expired; restart required');
+    };
     try {
-      return await Promise.race([Promise.resolve().then(() => { remaining(deadline); return fn(); }), new Promise((_, reject) => {
-        timer = setTimeout(() => {
-          poisoned = true; degradation.add('model_deadline_requires_restart');
-          lexical.close?.(); reject(err('deadline', 'Model deadline expired; restart required'));
-          onFatal();
-        }, Math.max(1, deadline - now()));
+      const result = await Promise.race([Promise.resolve().then(() => { remaining(deadline); return fn(); }), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(expire()), Math.max(1, deadline - now()));
       })]);
+      // A synchronous native call can return after its deadline before this
+      // loop gets a chance to deliver the timer. It cannot publish readiness.
+      if (!closed && now() >= deadline) throw expire();
+      remaining(deadline);
+      return result;
+    } catch (error) {
+      if (!closed && now() >= deadline) throw expire();
+      throw error;
     } finally { clearTimeout(timer); }
   }
   async function lexicalSearch(query, collections, limit, deadline) {
@@ -329,19 +366,28 @@ export function createRecallService({ store, llm, lexical, manifest = {}, queueL
     const lex = [], coverage = { lexical: 'complete_scoped_before_limit', semantic: 'disabled' };
     for (const rung of (Array.isArray(body.rungs) ? body.rungs : []).slice(0, 8)) {
       let got;
+      const finishSQL = phase('lexical_sql');
       try { got = await lexicalSearch(String(rung).slice(0, 2000), collections, boundedInt(body.lex_limit, 20, 100), deadline); }
       catch (e) { if (e.code !== 'deadline' || !lex.length) throw e; coverage.lexical = 'partial_deadline'; break; }
-      lex.push(got.rows.map(row => pick(row, body.question || rung, body.passage_chars, true)));
+      finally { finishSQL(); }
+      const finishPassages = phase('lexical_passages', { rows: got.rows.length, source_chars: got.rows.reduce((n, row) => n + String(row.body || row.snippet || '').length, 0) });
+      try { lex.push(got.rows.map(row => pick(row, body.question || rung, body.passage_chars, true))); }
+      finally { finishPassages(); }
       if (got.coverage.startsWith('partial')) coverage.lexical = got.coverage;
     }
     const tl = performance.now(); let vec = [];
     if (body.question) {
       if (modelAvailable('embed')) {
         try {
-          const rows = await modelCall(() => store.searchVector(String(body.question).slice(0, 2400), {
-            limit: boundedInt(body.vec_limit, 40, 100), collection: collections.length ? collections : undefined }), deadline);
-          vec = rows.filter(row => !collections.length || collections.includes(String(row.filepath || row.file).split('/')[2]))
-            .map(row => pick(row, body.question, body.passage_chars));
+          let rows;
+          const finishVector = phase('vector_search');
+          try { rows = await modelCall(() => store.searchVector(String(body.question).slice(0, 2400), {
+            limit: boundedInt(body.vec_limit, 40, 100), collection: collections.length ? collections : undefined }), deadline); }
+          finally { finishVector(); }
+          const finishPassages = phase('vector_passages', { rows: rows.length, source_chars: rows.reduce((n, row) => n + String(row.body || row.snippet || '').length, 0) });
+          try { vec = rows.filter(row => !collections.length || collections.includes(String(row.filepath || row.file).split('/')[2]))
+            .map(row => pick(row, body.question, body.passage_chars)); }
+          finally { finishPassages(); }
           vectorObserved = Boolean(llm?.embedContexts?.length || llm?.embedModel || rows.length)
             && Boolean(metadata.vector_rows) && (!manifest.models?.embed?.id || metadata.vector_models?.includes(manifest.models.embed.id));
           // QMD scopes exact vector scans through 20k rows, then uses capped ANN.
@@ -406,8 +452,10 @@ export function createRecallService({ store, llm, lexical, manifest = {}, queueL
     }
     t = performance.now();
     let ranked;
+    const finishRanking = phase('rerank', { rows: docs.length });
     try { ranked = await modelCall(() => llm.rerank(String(body.question || '').slice(0, 2400), docs), deadline); }
     catch (error) { rerankStatus = error.code === 'deadline' ? 'deadline' : 'failed'; throw error; }
+    finally { finishRanking(); }
     // QMD 2.8.3 returns finite constant scores with model="fallback" when it
     // cannot create a ranking context. Reject the discriminator, not score .5.
     if (ranked?.model === 'fallback') {
@@ -464,13 +512,13 @@ export function createRecallService({ store, llm, lexical, manifest = {}, queueL
   }
   return {
     capabilities,
-    refresh(deadline = now() + 300) {
+    refresh(deadline = now() + 300, { operationDeadline = Infinity } = {}) {
       if (active || closed || poisoned) return Promise.resolve(capabilities());
       const requested = Number.isFinite(deadline) ? deadline : now();
       if (requested <= now()) return Promise.resolve(capabilities());
       // Health callers have short response budgets, but do not own the shared
       // SQLite borrow. Let one bounded refresh finish across later polls.
-      const operation = metadataRefresh || beginMetadataRefresh(now() + boundedInt(metadataTimeoutMs, 3000, 3000));
+      const operation = metadataRefresh || beginMetadataRefresh(Math.min(operationDeadline, now() + boundedInt(metadataTimeoutMs, 3000, 3000)));
       return waitForMetadata(operation, requested);
     },
     request(route, body, cancelled = () => false) {
@@ -518,7 +566,7 @@ export function createHttpServer(service) {
     req.on('end', async () => {
       try { send(200, await service.request(req.url, JSON.parse(raw || '{}'), () => res.destroyed)); }
       catch (e) { send(e.code === 'deadline' ? 504 : e.code === 'queue_full' || e.code === 'poisoned' ? 503 : 400,
-        { error: e.code || 'request_failed', manifest: service.capabilities() }); }
+        { error: e.code || 'request_failed', ...(e.diagnostic ? { request_diagnostic: e.diagnostic } : {}), manifest: service.capabilities() }); }
     });
   });
 }
@@ -546,43 +594,202 @@ function cachedModel(llm, kind) {
   return { id: uri || 'unknown', revision: 'unknown', revision_kind: 'unknown', cached: false };
 }
 
-async function buildRuntime({ sdkPath, dbPath, configPath, indexId = 'default', onFatal = () => {}, onJobStart = () => {} }) {
+// QMD 2.8.3 hydrates ANN keys through an expression over every vector hash,
+// which prevents its existing (hash,seq) primary key from being used. Keep its
+// search/scoping/ranking logic, but hydrate only the exact matched keys through
+// indexed predicates. This proxy is passed only to the pinned vector function;
+// it neither changes the SDK files nor modifies the database schema.
+export function indexedVectorDatabase(db, { onPhase = () => {} } = {}) {
+  const hydration = /WHERE cv\.hash \|\| '_' \|\| cv\.seq IN \((\?(?:,\?)*)\)/;
+  return new Proxy(db, { get(target, property) {
+    if (property !== 'prepare') {
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    }
+    return sql => {
+      const match = typeof sql === 'string' && sql.match(hydration);
+      if (!match) {
+        const statement = target.prepare(sql);
+        if (!/FROM vectors_vec/i.test(sql) || !/embedding MATCH|vec_distance_cosine/i.test(sql)) return statement;
+        return { all(...parameters) {
+          const finish = beginPhase(onPhase, 'vector_sql');
+          try { return statement.all(...parameters); } finally { finish(); }
+        } };
+      }
+      const count = match[1].split(',').length;
+      return { all(...parameters) {
+        const keys = parameters.slice(0, count).map(value => {
+          const parsed = typeof value === 'string' && value.match(/^([0-9a-f]{64})_(\d+)$/);
+          if (!parsed || !Number.isSafeInteger(Number(parsed[2]))) throw err('invalid_vector_key', 'Unsupported QMD vector key');
+          return [parsed[1], Number(parsed[2])];
+        });
+        const rows = [];
+        for (let offset = 0; offset < keys.length; offset += 200) {
+          const chunk = keys.slice(offset, offset + 200);
+          const indexed = sql.replace(hydration, `WHERE (${chunk.map(() => '(cv.hash = ? AND cv.seq = ?)').join(' OR ')})`);
+          const finish = beginPhase(onPhase, 'vector_hydration', { rows: chunk.length });
+          try { rows.push(...target.prepare(indexed).all(...chunk.flat(), ...parameters.slice(count))); }
+          finally { finish(); }
+        }
+        return rows;
+      } };
+    };
+  } });
+}
+
+export async function prepareVectorPages(store, { deadline = Date.now() + STARTUP_MS, onFatal = () => {}, now = Date.now } = {}) {
+  let timer, expired = false;
+  const timeout = err('deadline', 'Vector index startup deadline expired; restart required');
+  try {
+    await Promise.race([Promise.resolve().then(async () => {
+      if (now() >= deadline) throw timeout;
+      // sqlite-vec scans every vector for MATCH, even with k=3. Doing that once
+      // at startup prevents cold index-page I/O from consuming a hook deadline.
+      await store.searchVector('Recall saved knowledge before starting work.', { limit: 1 });
+      if (expired || now() >= deadline) throw timeout;
+    }), new Promise((_, reject) => {
+      timer = setTimeout(() => { expired = true; reject(timeout); }, Math.max(1, deadline - now()));
+    })]);
+    return 'warmed';
+  } catch (error) {
+    if (expired || now() >= deadline || error === timeout) { expired = true; onFatal(); throw timeout; }
+    return 'index_warmup_failed';
+  } finally { clearTimeout(timer); }
+}
+
+// QMD's SDK createStore configures model/context unloading after five idle
+// minutes. A recall daemon must retain them: a cold embed plus rerank can
+// consume almost the entire hook deadline before retrieval has done any work.
+// Warm only provisioned cache entries before admitting HTTP requests. This is
+// model readiness, not proof that an indexed query retrieved/ranked evidence.
+export async function prepareCachedModels(llm, models, { deadline = Date.now() + STARTUP_MS,
+  onFatal = () => {}, now = Date.now } = {}) {
+  llm.inactivityTimeoutMs = 0;
+  llm.disposeModelsOnInactivity = false;
+  let timer, expired = false;
+  const timedOut = err('deadline', 'Native model startup deadline expired; restart required');
+  const warm = async () => {
+    for (const kind of ['embed', 'rerank']) {
+      const model = models[kind];
+      if (!model) continue;
+      if (expired || now() >= deadline) throw timedOut;
+      model.warmed = false;
+      if (!model.cached) { model.warmup_status = 'model_cache_unavailable'; continue; }
+      try {
+        if (kind === 'embed') {
+          const result = await llm.embed('task: search result | query: Recall saved knowledge before starting work.');
+          if (result?.model !== model.id || !Array.isArray(result.embedding) || !result.embedding.length
+              || !result.embedding.every(Number.isFinite) || !result.embedding.some(value => value !== 0))
+            throw err('invalid_embedding', 'Cached embedding model did not produce a verified vector');
+        } else {
+          const docs = [{ file: 'knowledge', text: 'Read saved knowledge before starting work.' },
+            { file: 'unrelated', text: 'Fresh basil grows beside a sunny window.' }];
+          const result = await llm.rerank('Recall saved knowledge before work', docs);
+          const scores = result?.results;
+          if (result?.model !== model.id || !Array.isArray(scores) || scores.length !== docs.length
+              || new Set(scores.map(row => row?.file)).size !== docs.length
+              || !scores.every(row => docs.some(doc => doc.file === row?.file) && Number.isFinite(row?.score)))
+            throw err('invalid_rerank', 'Cached reranker did not produce verified scores');
+        }
+        if (expired || now() >= deadline) throw timedOut;
+        model.warmed = true; model.warmup_status = 'warmed';
+        model.context_count = Array.isArray(llm[`${kind}Contexts`]) ? llm[`${kind}Contexts`].length : 0;
+      } catch (error) {
+        if (expired || now() >= deadline || error === timedOut) throw timedOut;
+        model.warmup_status = error?.code === 'invalid_embedding' || error?.code === 'invalid_rerank'
+          ? error.code : 'model_warmup_failed';
+      }
+    }
+  };
+  try {
+    await Promise.race([warm(), new Promise((_, reject) => {
+      timer = setTimeout(() => { expired = true; reject(timedOut); }, Math.max(1, deadline - now()));
+    })]);
+    return models;
+  } catch (error) {
+    // Native work cannot be cancelled by rejecting its Promise. Invalidate all
+    // observations and ask the owner to retire the entire process, as for a
+    // request deadline; never terminate a Worker with a live native context.
+    expired = true;
+    for (const model of Object.values(models)) { model.warmed = false; model.warmup_status = 'deadline'; }
+    onFatal();
+    throw error;
+  } finally { clearTimeout(timer); }
+}
+
+async function buildRuntime({ sdkPath, dbPath, configPath, indexId = 'default', startupDeadline,
+  onFatal = () => {}, onJobStart = () => {}, onPhase = () => {} }) {
+  // The parent captures this monotonic lifetime before constructing the Worker.
+  // Hashing, model/page preparation and metadata all consume its remaining time.
+  const now = () => performance.now();
+  const checkStartup = () => { if (now() >= startupDeadline) throw err('deadline', 'Runtime startup deadline'); };
+  checkStartup();
+  let currentRequest;
+  const modelPhase = event => { if (currentRequest) onPhase({ ...event, request_id: currentRequest }); };
   const requireSDK = createRequire(pathToFileURL(resolve(sdkPath)));
   const pkg = JSON.parse(readFileSync(join(dirname(sdkPath), '..', 'package.json'), 'utf8'));
   if (pkg.version !== PIN) throw new Error(`QMD ${PIN} required; found ${pkg.version}`);
   const sdk = await import(pathToFileURL(resolve(sdkPath)).href);
+  checkStartup();
   const store = await sdk.createStore({ dbPath, configPath });
+  checkStartup();
+  // Connection-local bounds only: no journal, persistent setting, index, or
+  // schema changes. mmap shares file-backed pages; bound this connection's
+  // private page cache to 128 MiB.
+  const db = store.internal.db;
+  db.pragma('mmap_size = 2147418112'); db.pragma('cache_size = -131072');
+  const sqlite = { mmap_bytes: db.pragma('mmap_size', { simple: true }), cache_kib: db.pragma('cache_size', { simple: true }) };
   const llm = store.internal.llm;
   const loadRuntime = llm.loadLlamaRuntime.bind(llm);
   llm.loadLlamaRuntime = () => loadRuntime(false); // pinned SDK: no native source download/build during recall
   const models = { embed: cachedModel(llm, 'embed'), rerank: cachedModel(llm, 'rerank') };
   await Promise.all(Object.values(models).filter(model => model.cached).map(async model => {
-    Object.assign(model, await modelFileIdentity(model.path));
+    Object.assign(model, await modelFileIdentity(model.path, startupDeadline, now));
   }));
+  checkStartup();
   // A pinned, inspected advanced adapter. No resolveModelFile()/network calls.
   llm.resolveModel = async uri => {
     const entry = Object.values(models).find(model => model.id === uri);
     if (!entry?.cached) throw err('model_cache_unavailable', 'Model must be provisioned before recall');
     return entry.path;
   };
+  await prepareCachedModels(llm, models, { deadline: startupDeadline, now, onFatal });
+  checkStartup();
+  const embed = llm.embed.bind(llm);
+  llm.embed = async (...args) => {
+    const finish = beginPhase(modelPhase, 'embedding');
+    try { return await embed(...args); } finally { finish(); }
+  };
+  const sdkStore = await import(pathToFileURL(join(dirname(sdkPath), 'store.js')).href);
+  checkStartup();
+  const vectorDb = indexedVectorDatabase(db, { onPhase: modelPhase });
+  store.searchVector = (query, options) => sdkStore.searchVec(vectorDb, query, llm.embedModelName,
+    options?.limit, options?.collection, undefined, undefined, llm);
+  const vectorPages = models.embed.warmed ? await prepareVectorPages(store, { deadline: startupDeadline, now, onFatal }) : 'model_cache_unavailable';
+  checkStartup();
   const lexical = new ScopedLexicalWorker({ dbPath: store.dbPath, sqliteModule: requireSDK.resolve('better-sqlite3'), version: pkg.version,
     sdkStorePath: join(dirname(sdkPath), 'store.js') });
   const service = createRecallService({ store, llm, lexical,
-    modelAvailable: kind => models[kind]?.cached,
+    modelAvailable: kind => Boolean(models[kind]?.cached && models[kind]?.warmed),
     fallbackLexical: async (query, collections, limit, deadline) => (await lexical.request({ kind: 'sdk_fallback', query, collections, limit }, deadline)).rows,
     manifest: { index: { id: indexId, db_path: store.dbPath, config_path: configPath,
       config_revision: digest(readFileSync(configPath)) },
-      qmd: { version: pkg.version, native_runtime_policy: 'existing_prebuilt_only', sdk_revision: digest(Buffer.concat(['index.js', 'store.js', 'llm.js']
+      qmd: { version: pkg.version, native_runtime_policy: 'existing_prebuilt_only', native_model_policy: 'startup_warm_retained', context_pool_limit: 1,
+        vector_policy: 'indexed_hydration_startup_page_warm', vector_pages: vectorPages, sqlite, sdk_revision: digest(Buffer.concat(['index.js', 'store.js', 'llm.js']
         .map(name => readFileSync(join(dirname(sdkPath), name))))), revision_kind: 'sdk_bundle_sha256' },
       models: Object.fromEntries(Object.entries(models).map(([kind, { path, ...model }]) => [kind, model])) },
-    onFatal, onJobStart });
-  await service.refresh(Date.now() + 3000);
+    onFatal, onPhase, onJobStart: request_id => { currentRequest = request_id; onJobStart(request_id); } });
+  const metadataDeadline = Date.now() + Math.max(0, startupDeadline - now());
+  await service.refresh(metadataDeadline, { operationDeadline: metadataDeadline });
+  checkStartup();
   return service;
 }
 
 if (!isMainThread && workerData?.kind === 'claude-note-runtime') {
   buildRuntime({ ...workerData, onFatal: () => parentPort.postMessage({ fatal: true }),
-    onJobStart: request_id => parentPort.postMessage({ started: request_id }) }).then(service => {
+    onJobStart: request_id => parentPort.postMessage({ started: request_id }),
+    onPhase: event => parentPort.postMessage({ phase: event }) }).then(service => {
+    if (performance.now() >= workerData.startupDeadline) throw err('deadline', 'Runtime startup deadline');
     const cancelled = new Set(), requests = new Set();
     parentPort.postMessage({ ready: true, manifest: service.capabilities() });
     parentPort.on('message', async message => {
@@ -600,15 +807,32 @@ if (!isMainThread && workerData?.kind === 'claude-note-runtime') {
 
 // The parent event loop performs no QMD/SQLite/model calls. It can therefore
 // enforce a deadline even when a native SDK call blocks the runtime's loop.
-export function createRuntimeProxy(worker, { onFatal = () => {}, retireOwner = () => worker.terminate(), startupMs = 15000, queueLimit = 8 } = {}) {
-  // This is the proxy lifetime, not a process-spawn or Worker-construction watchdog.
-  const startupDeadline = performance.now() + startupMs;
+export function createRuntimeProxy(worker, { onFatal = () => {}, retireOwner = () => worker.terminate(), startupMs = STARTUP_MS, startupDeadline = performance.now() + startupMs, queueLimit = 8,
+  onDiagnostic = () => {}, monotonic = () => performance.now() } = {}) {
+  // main supplies the same deadline to this proxy and its runtime Worker.
   const pending = new Map(), expiredJobs = new Map();
   let serial = 0, poisoned = false, manifest = { ok: false }, refreshPromise, expired = 0, rejected = 0;
   let acceptReady, rejectReady, startupTimer, readySettled = false;
   const ready = new Promise((accept, reject) => { acceptReady = accept; rejectReady = reject; });
   // Close can precede a caller awaiting startup. The returned promise still rejects.
   void ready.catch(() => {});
+  function requestDiagnostic(job) {
+    const elapsed = Math.max(0, monotonic() - job.created);
+    return { internal_request_id: job.id, request_id: job.externalId, route: job.route,
+      elapsed_ms: Math.round(elapsed), phase: job.phase?.stage || (job.started ? 'request' : 'queue'),
+      phase_state: job.phase?.state || 'start',
+      phase_elapsed_ms: Math.round(Math.max(0, job.phase ? monotonic() - job.phase.at : elapsed)),
+      phase_ms: { ...job.phaseMs }, counters: { ...job.counters }, events_dropped: job.eventsDropped };
+  }
+  function diagnose(job, code) {
+    const diagnostic = requestDiagnostic(job);
+    if (!job.diagnosed) {
+      job.diagnosed = true;
+      try { onDiagnostic({ ...diagnostic, error: /^[a-z_]{1,40}$/.test(code || '') ? code : 'runtime_error' }); }
+      catch { /* logging cannot prevent settlement or retirement */ }
+    }
+    return diagnostic;
+  }
   function settleReady(error) {
     if (readySettled) return;
     readySettled = true; clearTimeout(startupTimer);
@@ -623,7 +847,12 @@ export function createRuntimeProxy(worker, { onFatal = () => {}, retireOwner = (
     settleReady(reason);
     if (poisoned) return;
     poisoned = true;
-    for (const [id, job] of pending) { clearTimeout(job.timer); job.reject(err('poisoned', 'Runtime requires restart')); pending.delete(id); }
+    for (const [id, job] of pending) {
+      clearTimeout(job.timer);
+      const failure = err('poisoned', 'Runtime requires restart');
+      if (job.route !== '/health') failure.diagnostic = diagnose(job, reason.code);
+      job.reject(failure); pending.delete(id);
+    }
     expiredJobs.clear();
     retire(reason);
     onFatal();
@@ -639,40 +868,78 @@ export function createRuntimeProxy(worker, { onFatal = () => {}, retireOwner = (
       if (message.manifest) manifest = message.manifest;
       settleReady(); return;
     }
-    if (message.manifest) manifest = message.manifest;
     if (message.startup_error) { poison(err('startup', message.startup_error)); return; }
     if (message.fatal) { poison(); return; }
+    if (message.phase) {
+      const event = message.phase, job = pending.get(Number(event.request_id));
+      if (!job || job.route === '/health' || !PHASES.has(event.stage) || !['start', 'end'].includes(event.state)) return;
+      if (Date.now() >= job.deadline) { expire(job.id, true); return; }
+      if (job.events++ >= 96) { job.eventsDropped++; return; }
+      const at = monotonic();
+      if (event.state === 'start') job.phaseStarts.set(event.stage, at);
+      else if (job.phaseStarts.has(event.stage)) {
+        job.phaseMs[event.stage] = Math.round((job.phaseMs[event.stage] || 0) + Math.max(0, at - job.phaseStarts.get(event.stage)));
+        job.phaseStarts.delete(event.stage);
+      }
+      job.phase = { stage: event.stage, state: event.state, at };
+      for (const name of ['rows', 'source_chars']) {
+        if (Number.isSafeInteger(event[name]) && event[name] >= 0 && event[name] <= 1_000_000_000)
+          job.counters[`${event.stage}_${name}`] = event[name];
+      }
+      return;
+    }
     if (message.started) {
       const id = Number(message.started), job = pending.get(id);
       if (expiredJobs.has(id)) poison();
-      else if (job) job.started = true;
+      else if (job) {
+        if (Date.now() >= job.deadline) expire(id, true);
+        else job.started = true;
+      }
       return;
     }
     if (expiredJobs.has(message.id)) { expiredJobs.delete(message.id); return; }
     const job = pending.get(message.id);
     if (!job) return;
+    if (Date.now() >= job.deadline) {
+      expire(message.id);
+      // A completion acknowledges removal of a never-started cancelled job.
+      expiredJobs.delete(message.id);
+      return;
+    }
+    if (message.manifest) manifest = message.manifest;
     clearTimeout(job.timer); pending.delete(message.id);
-    if (message.error) job.reject(err(message.error, 'Runtime request failed'));
-    else job.resolve(message.result);
+    if (message.error) {
+      const failure = err(message.error, 'Runtime request failed');
+      if (job.route !== '/health') failure.diagnostic = diagnose(job, message.error);
+      job.reject(failure);
+    } else job.resolve(job.route !== '/health' && message.result && typeof message.result === 'object'
+      ? { ...message.result, request_diagnostic: requestDiagnostic(job) } : message.result);
   });
   worker.on('error', error => poison(error));
   worker.on('exit', () => poison(err('closed', 'Runtime exited')));
+  function expire(id, observedStart = false) {
+    const job = pending.get(id);
+    if (!job) return;
+    clearTimeout(job.timer); pending.delete(id); expired++;
+    const failure = err('deadline', 'Runtime absolute deadline expired');
+    if (job.route !== '/health') failure.diagnostic = diagnose(job, 'deadline');
+    job.reject(failure);
+    if (job.fatalOnTimeout && (job.started || observedStart)) poison();
+    else if (job.fatalOnTimeout) {
+      // Keep a bounded tombstone until the runtime acknowledges/removes the
+      // job. A late started message closes the cancellation/start race.
+      expiredJobs.set(id, job);
+      worker.postMessage({ cancel_id: String(id) });
+    }
+  }
   function dispatch(route, body, deadline, fatalOnTimeout) {
     if (poisoned) return Promise.reject(err('poisoned', 'Runtime requires restart'));
     const id = ++serial;
     return new Promise((resolveJob, reject) => {
-      const timer = setTimeout(() => {
-        const job = pending.get(id);
-        pending.delete(id); expired++; reject(err('deadline', 'Runtime absolute deadline expired'));
-        if (fatalOnTimeout && job?.started) poison();
-        else if (fatalOnTimeout) {
-          // Keep a bounded tombstone until the runtime acknowledges/removes the
-          // job. A late started message closes the cancellation/start race.
-          expiredJobs.set(id, job);
-          worker.postMessage({ cancel_id: String(id) });
-        }
-      }, Math.max(1, deadline - Date.now()));
-      pending.set(id, { resolve: resolveJob, reject, timer, route, started: false });
+      const timer = setTimeout(() => expire(id), Math.max(1, deadline - Date.now()));
+      pending.set(id, { resolve: resolveJob, reject, timer, route, deadline, fatalOnTimeout, started: false, id,
+        externalId: typeof body.request_id === 'string' && /^[0-9a-f]{24}$/.test(body.request_id) ? body.request_id : undefined,
+        created: monotonic(), phase: null, phaseMs: {}, phaseStarts: new Map(), counters: {}, events: 0, eventsDropped: 0, diagnosed: false });
       worker.postMessage({ id, route, body: { ...body, request_id: String(id) }, deadline });
     });
   }
@@ -746,15 +1013,21 @@ async function main() {
   if (!sdkPath) throw new Error('usage: node recall_server.mjs <qmd-sdk-index.js> [port=8182] [index-db] [index-yml]');
   const dbPath = dbArg || join(process.env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'qmd', 'index.sqlite');
   const configPath = ymlArg || join(process.env.QMD_CONFIG_DIR || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'qmd'), 'index.yml');
-  const worker = new Worker(new URL(import.meta.url), { workerData: { kind: 'claude-note-runtime', sdkPath, dbPath,
+  // The daemon serializes requests. QMD's automatic pools otherwise retain up
+  // to eight embed/four ranking contexts; the supported SDK override caps both
+  // pools and is local to this Worker, leaving other QMD processes unchanged.
+  const startupDeadline = performance.now() + STARTUP_MS;
+  const worker = new Worker(new URL(import.meta.url), { env: { ...process.env, QMD_EMBED_PARALLELISM: '1' },
+    workerData: { kind: 'claude-note-runtime', sdkPath, dbPath, startupDeadline,
     configPath, indexId: process.env.CLAUDE_NOTE_INDEX_ID || 'default' } });
-  const service = createRuntimeProxy(worker, { retireOwner: createProcessRetirement() });
+  const service = createRuntimeProxy(worker, { startupDeadline, retireOwner: createProcessRetirement(),
+    onDiagnostic: diagnostic => console.error(`claude-note recall request failure: ${JSON.stringify(diagnostic)}`) });
   let server;
   process.once('SIGTERM', () => { service.close(); server?.close(); });
   await service.ready;
   server = createHttpServer(service);
   server.requestTimeout = 10000; server.headersTimeout = 10000;
-  server.listen(Number(portArg || 8182), '127.0.0.1', () => console.error(`claude-note recall server on 127.0.0.1:${server.address().port} (QMD ${PIN}; models load from existing cache on demand)`));
+  server.listen(Number(portArg || 8182), '127.0.0.1', () => console.error(`claude-note recall server on 127.0.0.1:${server.address().port} (QMD ${PIN}; cached models warmed at startup and retained)`));
 }
 
 if (isMainThread && process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

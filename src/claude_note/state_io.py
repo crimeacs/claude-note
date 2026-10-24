@@ -1,5 +1,6 @@
 """Private, bounded descriptor-relative state IO; Markdown uses mutation.py."""
 
+import errno
 import json
 import os
 import stat
@@ -82,18 +83,38 @@ def append_line(path, body):
     if len(body) > 4 * 1024 * 1024 or not body.endswith(b'\n'):
         raise ValueError('Queue line exceeds bounded capture payload')
     with _parent(path, True) as (parent, name):
-        descriptor = _open_or_create(parent, name, os.O_WRONLY | os.O_APPEND)
-        try:
+        def current(descriptor):
             info = os.fstat(descriptor)
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                raise ValueError('Queue must be a singly linked regular file')
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-            remaining = memoryview(body)
-            while remaining:
-                remaining = remaining[os.write(descriptor, remaining):]
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+            try:
+                named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                return False
+            return (stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                    and stat.S_ISREG(named.st_mode) and named.st_nlink == 1
+                    and (info.st_dev, info.st_ino) == (named.st_dev, named.st_ino))
+
+        for _ in range(3):
+            descriptor = _open_or_create(parent, name, os.O_WRONLY | os.O_APPEND)
+            try:
+                info = os.fstat(descriptor)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink > 1:
+                    raise ValueError('Queue must be a singly linked regular file')
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                # Retention may have owned the lock while this descriptor
+                # waited. Its now-unlinked inode cannot acknowledge an append.
+                if not current(descriptor):
+                    continue
+                remaining = memoryview(body)
+                while remaining:
+                    remaining = remaining[os.write(descriptor, remaining):]
+                os.fsync(descriptor)
+                if current(descriptor):
+                    return
+                # A non-cooperating path replacement may leave another copy;
+                # retain it and retry the same event identity at the live path.
+            finally:
+                os.close(descriptor)
+        raise OSError(errno.EAGAIN, 'Queue changed during append; event not acknowledged')
 
 
 def _open_or_create(parent, name, flags):
