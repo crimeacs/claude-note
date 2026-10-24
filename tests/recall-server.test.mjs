@@ -135,6 +135,29 @@ test('startup deadline retires its owner and late native completion cannot warm 
   assert.equal(ranking, 0); assert.equal(models.embed.warmed, false); assert.equal(models.rerank.warmed, false);
 });
 
+test('startup deadline remains terminal after a late cached-model rejection', async () => {
+  const held = deferred(), models = { embed: { id: 'embed-id', cached: true }, rerank: { id: rerankModel, cached: true } };
+  let fatal = 0, ranking = 0;
+  await assert.rejects(prepareCachedModels({ embed: () => held.promise, rerank() { ranking++; } }, models,
+    { deadline: Date.now() + 20, onFatal: () => fatal++ }), error => error.code === 'deadline');
+  const terminal = structuredClone(models);
+  held.reject(Object.assign(new Error('Public delayed failure'), { code: 'public_late_failure' })); await sleep(5);
+  assert.deepEqual(models, terminal); assert.equal(ranking, 0); assert.equal(fatal, 1);
+});
+
+test('startup model and page preparation consume one shared absolute deadline', async () => {
+  let clock = 100, fatal = 0;
+  const deadline = 120, now = () => clock;
+  const models = { embed: { id: 'embed-id', cached: true }, rerank: { id: rerankModel, cached: true } };
+  await prepareCachedModels({ async embed() { clock += 12; return { model: 'embed-id', embedding: [.2] }; },
+    async rerank(_, docs) { clock += 7; return { model: rerankModel, results: docs.map(doc => ({ file: doc.file, score: .5 })) }; } },
+  models, { deadline, now });
+  assert.equal(clock, 119);
+  await assert.rejects(prepareVectorPages({ async searchVector() { clock += 2; throw new Error('Public late page failure'); } },
+    { deadline, now, onFatal: () => fatal++ }), error => error.code === 'deadline');
+  assert.equal(fatal, 1);
+});
+
 test('vector hydration batches exact indexed keys and retains trailing scope parameters', () => {
   const prepared = [], hash = 'a'.repeat(64), keys = Array.from({ length: 201 }, (_, i) => `${hash}_${i}`);
   const db = indexedVectorDatabase({ prepare(sql) { return { all(...parameters) { prepared.push({ sql, parameters }); return []; } }; } });
@@ -203,6 +226,25 @@ test('scope is sent structurally to both lanes; rank sees and identifies exactly
   assert.deepEqual(ranked.scored_passage_ids, [p.passage_id]);
   assert.equal(ranked.passage_scores[p.passage_id], .8);
   service.close();
+});
+
+test('late model completion before timer delivery cannot publish retrieval readiness', async () => {
+  for (const route of ['/search', '/rerank']) {
+    let clock = 100, fatal = 0;
+    const service = createRecallService({ now: () => clock, lexical: lex(), onFatal: () => fatal++,
+      store: { async searchVector() { clock = 111; return [row]; } },
+      manifest: { models: { embed: { id: 'embed-id' }, rerank: { id: rerankModel } } },
+      llm: { embedModel: {}, async rerank(_, docs) { clock = 111; return { model: rerankModel,
+        results: docs.map(doc => ({ file: doc.file, score: .8 })) }; } } });
+    try {
+      const pending = service.request(route, { ...rankRequest(), question: 'retry', rungs: ['retry'], deadline_at_ms: 110 });
+      if (route === '/search') assert.equal((await pending).coverage.semantic, 'partial_deadline');
+      else await assert.rejects(pending, error => error.code === 'deadline');
+      assert.equal(fatal, 1); assert.equal(service.capabilities().ok, false);
+      assert.equal(service.capabilities().vector_ready, false); assert.equal(service.capabilities().rerank_ready, false);
+      await assert.rejects(service.request('/search', {}), error => error.code === 'poisoned');
+    } finally { service.close(); }
+  }
 });
 
 test('lexical evidence remains available without cached models or vectors', async () => {
@@ -683,7 +725,7 @@ test('runtime proxy startup has one monotonic readiness lifetime', async t => {
       }
       wall += target - mono; mono = target; await flush();
     };
-    const make = () => {
+    const make = (options = {}) => {
       class FakeWorker extends EventEmitter {
         sent = []; terminations = 0;
         postMessage(message) { this.sent.push(message); }
@@ -691,11 +733,11 @@ test('runtime proxy startup has one monotonic readiness lifetime', async t => {
         terminate() { this.terminations++; return new Promise(() => {}); }
       }
       const worker = new FakeWorker(); let fatal = 0;
-      const proxy = createRuntimeProxy(worker, { startupMs: 20, onFatal: () => fatal++ });
+      const proxy = createRuntimeProxy(worker, { startupMs: 20, onFatal: () => fatal++, ...options });
       proxies.push(proxy);
       return { worker, proxy, ready: observe(proxy.ready), fatal: () => fatal };
     };
-    try { await run({ make, advance, wallNow: () => wall, changeWall: delta => { wall += delta; } }); }
+    try { await run({ make, advance, monoNow: () => mono, wallNow: () => wall, changeWall: delta => { wall += delta; } }); }
     finally {
       for (const proxy of proxies) proxy.close();
       await flush(); assert.equal(timers.size, 0, 'no startup or request timer survives close');
@@ -797,6 +839,17 @@ test('runtime proxy startup has one monotonic readiness lifetime', async t => {
     await advance(30); const { worker, ready } = make(); await advance(5);
     worker.emit('message', { ready: true, manifest: initial }); await flush(); assert.equal(ready.state, 'fulfilled');
   });
+  await run('default readiness lifetime is exactly fifteen seconds', async ({ make, advance }) => {
+    const { ready } = make({ startupMs: undefined }); await advance(14999);
+    assert.equal(ready.state, 'pending'); await advance(1);
+    assert.deepEqual(ready, { state: 'rejected', code: 'deadline', settlements: 1 });
+  });
+  await run('a precomputed startup deadline includes Worker-construction time', async ({ make, advance, monoNow }) => {
+    const startupDeadline = monoNow() + 20;
+    await advance(7); const { ready } = make({ startupDeadline });
+    await advance(12); assert.equal(ready.state, 'pending'); await advance(1);
+    assert.equal(ready.code, 'deadline');
+  });
   await run('ready at deadline rejects even before timer callback', async ({ make, advance }) => {
     const { worker, proxy, ready } = make(); await advance(20, false);
     worker.emit('message', { ready: true, manifest: late }); await flush();
@@ -805,6 +858,27 @@ test('runtime proxy startup has one monotonic readiness lifetime', async t => {
   await run('delayed timer cannot accept late ready', async ({ make, advance }) => {
     const { worker, ready } = make(); await advance(21, false);
     worker.emit('message', { ready: true, manifest: initial }); await flush(); assert.equal(ready.code, 'deadline');
+  });
+  for (const event of ['result', 'phase', 'started']) {
+    await run(`late ${event} expires the query before delayed timer or manifest mutation`, async ({ make, advance, wallNow }) => {
+      const { worker, proxy, fatal } = make(); worker.emit('message', { ready: true, manifest: initial }); await flush();
+      const job = observe(proxy.request('/search', { deadline_at_ms: wallNow() + 10 })), id = worker.sent[0].id;
+      if (event !== 'started') worker.emit('message', { started: String(id) });
+      await advance(10, false);
+      worker.emit('message', event === 'phase' ? { phase: { request_id: String(id), stage: 'vector_search', state: 'end' }, manifest: late }
+        : event === 'started' ? { started: String(id), manifest: late } : { id, result: { vec: [row] }, manifest: late });
+      await flush();
+      assert.deepEqual(job, { state: 'rejected', code: 'deadline', settlements: 1 });
+      assert.equal(proxy.capabilities().index.generation, 'initial'); assert.equal(proxy.capabilities().vector_ready, false);
+      assert.equal(proxy.capabilities().ok, false); assert.equal(fatal(), 1); assert.equal(worker.terminations, 1);
+    });
+  }
+  await run('late health response expires only its waiter and cannot publish a manifest', async ({ make, advance, wallNow }) => {
+    const { worker, proxy, fatal } = make(); worker.emit('message', { ready: true, manifest: initial }); await flush();
+    const health = observe(proxy.refresh(wallNow() + 10)), id = worker.sent[0].id;
+    await advance(10, false); worker.emit('message', { id, result: late, manifest: late }); await flush();
+    assert.equal(health.state, 'fulfilled'); assert.equal(proxy.capabilities().index.generation, 'initial');
+    assert.equal(proxy.capabilities().ok, true); assert.equal(fatal(), 0); assert.equal(worker.terminations, 0);
   });
   await run('wall-clock jumps do not extend or expire monotonic startup', async ({ make, advance, changeWall }) => {
     const { worker, ready } = make(); changeWall(3600000); await advance(5);
@@ -1162,6 +1236,20 @@ test('metadata ownership: the first short health waiter cannot set the shared bo
     assert.equal(calls, 1); assert.equal(closed, 0);
     assert.equal(service.capabilities().degradation.includes('deadline'), false);
   } finally { held.resolve(); await Promise.allSettled([short, longer]); service.close(); }
+});
+
+test('startup metadata borrow is capped by the remaining shared lifetime', async () => {
+  const held = deferred(); let closed = 0, borrowed;
+  const service = createRecallService({ store: {}, llm: {}, lexical: {
+    request(_, deadline) { borrowed = deadline; return held.promise; }, close() { closed++; },
+  } });
+  const deadline = Date.now() + 20;
+  try {
+    const health = await service.refresh(deadline, { operationDeadline: deadline });
+    assert.equal(borrowed, deadline); assert.equal(closed, 1); assert.equal(health.lexical_ready, false);
+    held.resolve({ rows: [], metadata }); await new Promise(setImmediate);
+    assert.equal(service.capabilities().lexical_ready, false);
+  } finally { held.resolve({ rows: [], metadata }); service.close(); }
 });
 
 test('metadata ownership: an unresolved adapter is bounded and late success is ignored', async () => {
