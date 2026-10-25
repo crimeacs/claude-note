@@ -94,6 +94,32 @@ class SourceImportError(RuntimeError):
         super().__init__(f'{source}: {self.failed} failed item(s); {queued} queued; {problems[0]}'[:1024])
 
 
+# Authored primary error names only; no exception-supplied names or messages.
+_SQLITE_PRIMARY_ERROR_NAMES = {
+    1: "SQLITE_ERROR", 2: "SQLITE_INTERNAL", 3: "SQLITE_PERM", 4: "SQLITE_ABORT",
+    5: "SQLITE_BUSY", 6: "SQLITE_LOCKED", 7: "SQLITE_NOMEM", 8: "SQLITE_READONLY",
+    9: "SQLITE_INTERRUPT", 10: "SQLITE_IOERR", 11: "SQLITE_CORRUPT", 12: "SQLITE_NOTFOUND",
+    13: "SQLITE_FULL", 14: "SQLITE_CANTOPEN", 15: "SQLITE_PROTOCOL", 16: "SQLITE_EMPTY",
+    17: "SQLITE_SCHEMA", 18: "SQLITE_TOOBIG", 19: "SQLITE_CONSTRAINT", 20: "SQLITE_MISMATCH",
+    21: "SQLITE_MISUSE", 22: "SQLITE_NOLFS", 23: "SQLITE_AUTH", 24: "SQLITE_FORMAT",
+    25: "SQLITE_RANGE", 26: "SQLITE_NOTADB", 27: "SQLITE_NOTICE", 28: "SQLITE_WARNING",
+}
+_SQLITE_ERROR_TYPES = (sqlite3.Error, sqlite3.InterfaceError, sqlite3.DatabaseError,
+    sqlite3.DataError, sqlite3.OperationalError, sqlite3.IntegrityError,
+    sqlite3.InternalError, sqlite3.ProgrammingError, sqlite3.NotSupportedError)
+
+
+def _sqlite_error_detail(error):
+    # Custom subclasses can execute arbitrary attribute properties. Ignore them,
+    # and omit unknown/extended codes rather than coercing untrusted attributes.
+    if not any(type(error) is allowed for allowed in _SQLITE_ERROR_TYPES):
+        return ""
+    code = getattr(error, "sqlite_errorcode", None)
+    if type(code) is not int or not 1 <= code <= 28:
+        return ""
+    return f": sqlite_errorcode={code}; sqlite_primary_name={_SQLITE_PRIMARY_ERROR_NAMES[code]}"
+
+
 def _source_problem(source, path, error):
     from .transcript_reader import TRANSCRIPT_LIMIT_ERROR, METADATA_LIMIT_ERROR
     safe_messages = {TRANSCRIPT_LIMIT_ERROR, METADATA_LIMIT_ERROR,
@@ -113,7 +139,7 @@ def _source_problem(source, path, error):
     label = json.dumps(str(path), ensure_ascii=True)
     if len(label) > 500:
         label = label[:450] + '...#' + hashlib.sha256(str(path).encode('utf-8', 'surrogatepass')).hexdigest()[:16]
-    return f'{source}: {label}: {type(error).__name__}{detail}'[:MAX_IMPORT_PROBLEM_CHARS]
+    return f'{source}: {label}: {type(error).__name__}{detail}{_sqlite_error_detail(error)}'[:MAX_IMPORT_PROBLEM_CHARS]
 
 
 def _finish_source(source, queued, errors, problems, report=None):
