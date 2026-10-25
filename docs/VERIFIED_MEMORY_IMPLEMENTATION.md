@@ -145,6 +145,13 @@ contracts establish these mechanisms, not production cold reliability, the
 cause of prior native failures, or learned-memory benefit. Any installed public
 query, host delivery and paired task outcomes need their own source-bound proof.
 
+Version 2.1.25 adds fixed primary SQLite error codes to capture failure reports.
+Only exact built-in SQLite exception classes with recognized integer primary
+codes receive authored names; exception-supplied names and messages stay redacted.
+This makes future failures distinguishable without replaying private imports.
+It does not identify the cause of an older unclassified DataError, change capture
+limits, or turn a partial import sweep into a clean heartbeat.
+
 The original 15-workstream research and A–F deliverables remain broader than
 these implementation contracts. Full task outcomes, each baseline's own learned
 memory across phases, dense-only comparison, evidence × extraction and
