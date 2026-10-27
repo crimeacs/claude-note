@@ -158,6 +158,12 @@ memory across phases, dense-only comparison, evidence × extraction and
 consolidation-quality experiments are still open. Authored phase memories and
 selection fixtures are not a longitudinal learning result.
 
+Version 2.1.26 preserves bounded failure aggregates for every recovery source,
+even after the global diagnostic detail limit is full. Per-source omitted
+counts describe that source's own cap rather than its visibility in the global
+list. This diagnostic change neither reconstructs older omitted details nor
+changes capture admission, privacy, retention or clean-heartbeat semantics.
+
 The settled source passed 341 isolated Python 3.11 regressions and all 12 Node server contracts using the installed QMD SDK. The Sweat Assistant release checkout passed both TypeScript checks, 8,625 frontend tests and 714 Swift tests. Independent review fixes include source-origin privacy, claim dependency/conflict propagation, canonical passage anchors, index-generation acknowledgement and failed-answer denominators.
 
 The 2.1.2 patch passed 372 isolated Python 3.11 regressions, including artifact audience intersection, alternate claim formatting, concurrent lineage writers and catalog metadata exclusion. No provider calls or private fixtures were used for these checks. The retrieval and task-outcome measurements below remain the separate 2.1.0 experiment.
