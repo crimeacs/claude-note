@@ -1,5 +1,20 @@
 # Developments
 
+## 2.1.26 — retain import failure totals by source (27 October 2026)
+
+Codex and Claude Code now report queued sessions, failed items and locally
+omitted diagnostic details, including when another source fills the global
+100-detail limit first. Escaped source errors retain their recorded failure
+count and partial queued count. Reports keep numeric aggregates without adding
+source bodies or exception messages.
+
+Local omitted counts describe each source's own detail cap; the top-level count
+also includes details hidden by earlier sources. Queued counts are not failure
+counts. A failed sweep still leaves the last clean heartbeat unchanged. Capture
+limits, source policy, history retention and worker mode are unchanged; these
+diagnostics do not recover previously omitted details or identify which shared
+resource guard fired.
+
 ## 2.1.24 — reconcile recall and capture repairs (24 October 2026)
 
 Prepared-model and vector-page startup share the original 15-second lifetime;

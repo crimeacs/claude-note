@@ -658,7 +658,8 @@ def sweep_cursor(seen: dict, since_ts: float, db_path: Path = None, *, problems=
 # Codex rollouts not delivered by the hook
 # --------------------------------------------------------------------------
 
-def sweep_codex(seen: dict, since_ts: float, sessions_dir: Path = None, *, problems=None) -> int:
+def sweep_codex(seen: dict, since_ts: float, sessions_dir: Path = None, *, problems=None,
+                report=None) -> int:
     from .transcript_reader import capture_native_transcript, codex_session_meta, read_transcript
     from . import session_tracker, import_publication
 
@@ -698,7 +699,7 @@ def sweep_codex(seen: dict, since_ts: float, sessions_dir: Path = None, *, probl
             seen[key] = mtime
         except Exception as error:
             errors.append(_source_problem('codex', path, error))
-    return _finish_source('codex', queued, errors, problems)
+    return _finish_source('codex', queued, errors, problems, report)
 
 
 def _claude_code_meta(path: Path, raw=None) -> dict:
@@ -723,7 +724,7 @@ def _claude_code_meta(path: Path, raw=None) -> dict:
 
 
 def sweep_claude_code(seen: dict, since_ts: float, projects_dir: Path = None,
-                      limit: int = CLAUDE_CODE_MAX_PER_SWEEP, *, problems=None) -> int:
+                      limit: int = CLAUDE_CODE_MAX_PER_SWEEP, *, problems=None, report=None) -> int:
     """Queue interactive Claude Code sessions the hook did not deliver.
 
     Scripted runs (`claude -p`, the SDK: entrypoint `sdk-*`) are skipped: they
@@ -776,7 +777,7 @@ def sweep_claude_code(seen: dict, since_ts: float, projects_dir: Path = None,
             seen[key] = mtime
         except Exception as error:
             errors.append(_source_problem('claude-code', path, error))
-    return _finish_source('claude-code', queued, errors, problems)
+    return _finish_source('claude-code', queued, errors, problems, report)
 
 
 # --------------------------------------------------------------------------
@@ -799,15 +800,17 @@ def _sweep(since: Optional[datetime] = None, zips: Iterable[Path] = ()) -> dict:
     seen = _load_seen()
     since_ts = _since(seen, since)
     counts, problems = {}, ImportProblems()
-    reports = {'zips': {}, 'cursor': {}}
+    reports = {name: {} for name in ('zips', 'cursor', 'codex', 'claude-code')}
     for name, fn in (("zips", lambda: sweep_zips(seen, problems, report=reports['zips'])),
                      ("cursor", lambda: sweep_cursor(seen, since_ts, problems=problems, report=reports['cursor'])),
-                     ("codex", lambda: sweep_codex(seen, since_ts, problems=problems)),
-                     ("claude-code", lambda: sweep_claude_code(seen, since_ts, problems=problems))):
+                     ("codex", lambda: sweep_codex(seen, since_ts, problems=problems, report=reports['codex'])),
+                     ("claude-code", lambda: sweep_claude_code(seen, since_ts, problems=problems, report=reports['claude-code']))):
         try:
             counts[name] = fn()
         except SourceImportError as error:
             counts[name] = error.queued
+            reports[name].update(queued_sessions=error.queued, failed_items=error.failed,
+                                 problem_details_omitted=error.omitted_problem_details)
             failures = ImportProblems()
             failures.extend(error.problems)
             failures.total = error.failed
@@ -815,6 +818,9 @@ def _sweep(since: Optional[datetime] = None, zips: Iterable[Path] = ()) -> dict:
         except Exception as error:  # one broken source must not stop the others
             counts[name] = 0
             problems.append(_source_problem(name, name, error))
+            # This records the one escaped source error, not an estimate of
+            # unexamined items. Keep it visible even after detail saturation.
+            reports[name].update(queued_sessions=0, failed_items=1, problem_details_omitted=0)
         _save_seen(seen)
     for zip_path in zips:
         reports[str(zip_path)] = {}
