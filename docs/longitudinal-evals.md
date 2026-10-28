@@ -141,3 +141,37 @@ binding; a budget-admitted public provider pilot after quota availability; actua
 isolated host hook/delivery evidence; and sealed project/topic/time-separated
 confirmatory tasks with paired cluster-level outcome analysis. None follows from
 a green journal test or a source checksum.
+
+
+## Native-free own-capture persistence contract
+
+The test-only adapter in `tests/support/public_own_learning.py` connects the
+journal to real immutable import publication, capture-only worker processing,
+verified transcript snapshots, extraction parsing/cache/checkpoints and confined
+managed mutation. The next-phase dense adapter checks the actual learned-file
+revision and passage. `tests/test_own_learning_carry_forward.py` is independently
+discoverable and uses fresh public fixture roots; it preserves the inherited
+`HOME` value and restores home/config/cwd/transport patches after each test.
+
+The provider transport is injected deterministically from each phase's captured
+public assistant text. Index coverage, freshness acknowledgement and vector rows
+are explicitly simulated inside the owned test vault. None is a production
+indexing or retrieval path, and no provider, QMD, SQL, service or native query is
+invoked. The public JSON task outputs are authored plumbing inputs, not observed
+agent responses, executable task scores or measured learning.
+
+The contracts include same-arm carry-forward, authenticated transitive producer
+closure before the journal's non-reentrant callback lock, exact current bytes,
+cache/stage replay, tamper and cross-arm/run/future denials, preauthored-file
+preservation, inactive/different simulated revisions, unchanged self-capture
+policy and learning-disabled controls. The correction remains another proposed
+source; it does not establish consolidation or conflict-resolution quality.
+Terminal capture can dirty the generation after the last delivery check; the
+fixture does not claim final whole-vault acknowledgement.
+
+This source regression covers the dense-only adapter plus no-memory, static and
+bounded-history controls. Remaining learning arms, actual native indexing and
+host delivery, model extraction quality/cost, executable-verifier paired task
+outcomes and each arm's own learned-memory benefit remain open. Full original
+15-workstream and A–F objectives are unchanged. An actual public provider study
+still requires both runtime and reviewed harness gates and a $2 total-run cap.
