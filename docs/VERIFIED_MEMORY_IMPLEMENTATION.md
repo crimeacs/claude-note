@@ -173,3 +173,34 @@ The final corrected public synthetic hybrid preflight returned the current contr
 Six fresh-context Codex responses, one public development task across six baselines, passed the trusted parent-side executable verifier (four generated inputs per response). All six baselines passed, including no memory; this smoke test establishes no measured memory benefit. Its provider/model identity and cost are unknown, so it is kept separate from Claude outcome history and cannot support trend comparisons.
 
 Two real Claude CLI pilots failed at the account's weekly quota before producing a structured answer. Those failures remain in the scheduled denominator. No unchanged provider retries will run before the reported October 17 reset. Full development/holdout task outcomes, real extraction, and actual host delivery remain rollout checks; simulated policy fixtures and direct process invocation do not establish them. A daily continuation checks the release, runs isolated regressions, and resumes the bounded public Claude evaluation when the account is available.
+
+
+Version 2.1.27 adds bounded supervisor attempt telemetry, separate from the last
+completed importer report and last clean `import-sweep.ok`. Fixed reasons expose
+admission deferral, child exit, resource stops and unconfirmed cleanup without
+source paths, exception messages or transcript content. Owner/thread observations
+and the latest actual attempt have separate times; shutdown cannot make an old
+attempt fresh. A recent record does not prove a live owner, an idle machine,
+retrieval or successful capture. Expected disk-measurement and child-start errors
+retain the original retry interval instead of ending the supervisor thread.
+
+The telemetry file is a small generated latest view with bounded counters per
+reported owner instance, not an all-attempt ledger. Strict schema and checksums
+refuse unknown/corrupt records and ordinary edits; checksums detect accidental
+changes, not a same-user actor recomputing a valid envelope. Unknown existing
+files remain untouched. Stop and cleanup status publication follows the control attempt. Admission and
+running updates use synchronous best-effort IO; filesystem calls have no hard OS
+latency guarantee. A persistence failure cannot establish a reap or clear the
+child handle. Stop reasons survive cleanup failures. Offline health reads are
+bounded and config-free. The 6 GiB reserve, 256 MiB sampled child-RSS threshold,
+30-second stop threshold and two-second cleanup grace remain unchanged. These
+contracts neither explain the original observed RSS nor establish total-memory
+bounds, all-source clean completion, native readiness or learned-memory benefit.
+
+The supervisor view uses one fixed exclusive pending slot, alongside its main
+snapshot and lock. Unknown crash residue or replaced/edited pending files remain
+untouched and make publication unavailable; ordinary write-failure cleanup can
+remove only the inode and exact bytes created by that write. Repeated interrupted
+attempts cannot add per-write UUID staging names. Lifecycle logging is also best
+effort: a failed log sink cannot turn an expected admission/start failure into a
+supervisor failure or skip owned-child cleanup.

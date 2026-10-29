@@ -1,7 +1,9 @@
-"""The import child cannot exhaust hook capture's heap or outlive its owner."""
+"""Public child supervision contracts; sampled thresholds are not OS heap caps."""
 
 import logging
+from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -10,6 +12,9 @@ from claude_note import capture_sweep as sweep
 
 class BoundedSweepTests(unittest.TestCase):
     def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="public-sweep-unit-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
         self.enterContext(mock.patch.object(sweep.shutil, "disk_usage", return_value=mock.Mock(free=8 * 1024 ** 3)))
         self.clock = self.enterContext(mock.patch.object(sweep.time, "monotonic", return_value=0))
         self.spawn = self.enterContext(mock.patch.object(sweep.subprocess, "Popen"))
@@ -17,7 +22,8 @@ class BoundedSweepTests(unittest.TestCase):
         self.child.poll.return_value = None
         self.child.pid = 12345
         self.rss = self.enterContext(mock.patch.object(sweep, "rss_bytes", return_value=20 * 1024 ** 2))
-        self.job = sweep.Sweep(logging.getLogger("bounded-sweep-test"))
+        self.job = sweep.Sweep(logging.getLogger("bounded-sweep-test"),
+                               status_path=self.root / "import-supervisor.json")
 
     def test_one_child_until_reaped_then_interval_before_retry(self):
         self.job.tick()

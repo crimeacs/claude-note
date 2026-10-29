@@ -398,3 +398,26 @@ The film and its receipts preserve the reviewed source snapshot from PR #8, incl
 The repository test suite uses synthetic transcripts, disposable vaults, mocked model/API calls, and fake installer executables. Local CLI help and the installed QMD keyword interface are checked separately. Repository validation does not exercise private accounts, upload personal notes, install this branch over a running service, or publish a release tag.
 
 The demo's offline recall probe checks context formatting with synthetic input and mocked retrieval; it does not test host delivery, retrieval quality, or latency. Its SQLite replay verifies one controlled retry boundary, not a production backend or customer outcome. The delivered MP4 passed full decode, playback review, and audio/video checks described in its manifest (retired in 2.0; see git history at `61d1415`).
+
+
+## 2.1.27 — distinguish supervised import attempts from clean completion
+
+Capture-only recovery now publishes a bounded machine-readable supervisor view.
+Disk deferrals, child-start failures, observed exits, resource stops and cleanup
+outcomes remain distinct from the importer's completed-source report and clean
+heartbeat. Expected admission/start failures leave the supervisor available for
+the next unchanged interval. Child ownership remains until exact wait/reap; a
+stopped thread's retained child gets a bounded final cleanup attempt at shutdown.
+
+Health reads this offline view without loading vault configuration or invoking
+models. Fixed schema/reasons and checksums protect ordinary edits and refuse
+unknown files; the view is self-reported telemetry, not authority or live-owner
+proof. Status IO cannot replace capture evidence or a clean heartbeat. Resource
+limits, source audiences, capture-only mode and retained history are unchanged.
+The original RSS cause, native retrieval, host delivery and measured memory
+benefit remain open.
+
+Supervisor publication uses a fixed exclusive pending slot and refuses unknown
+residue. Failed writes clean only their own verified inode/bytes. No append-only
+status history or per-write staging-name growth is introduced. Fixed lifecycle
+logging cannot interrupt admission retry or exact-child cleanup if its sink fails.

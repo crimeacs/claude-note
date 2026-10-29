@@ -17,7 +17,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, provenance
+from . import __version__, provenance, capture_sweep_status
 
 HOME = Path.home()
 LOGS = HOME / "Library/Logs/claude-note"
@@ -288,13 +288,20 @@ def report() -> dict:
     push = _push_health()
     sweep = _heartbeat(LOGS / "import-sweep.ok", IMPORT_STALE_SECONDS)
     sweep_counts = sweep.pop("counts")
+    sweep["last_completed_at"] = None
+    sweep["completion_age_seconds"] = None
     try:
         attempt = json.loads((LOGS / "import-sweep.json").read_text())
         if isinstance(attempt, dict) and isinstance(attempt.get("counts"), dict):
             sweep_counts = attempt["counts"]
+            completed = (LOGS / "import-sweep.json").stat().st_mtime
+            sweep["last_completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(completed))
+            sweep["completion_age_seconds"] = int(max(0, time.time() - completed))
     except (OSError, ValueError):
         pass
     sweep["problems"] = list(sweep_counts.get("problems", [])) if isinstance(sweep_counts, dict) else []
+    sweep["supervisor"] = capture_sweep_status.snapshot(LOGS / "import-supervisor.json",
+                                                        stale_after=IMPORT_STALE_SECONDS)
     queue_dir = vault / ".claude-note/queue" if vault else None
 
     out = {
@@ -372,6 +379,7 @@ def report() -> dict:
         else:
             problems.append(f"last clean import sweep {sweep['age_seconds'] // 60} min ago; see the worker log")
     problems.extend(f"import: {p}" for p in sweep["problems"])
+    problems.extend("import supervisor: " + p for p in sweep["supervisor"]["problems"])
     out["problems"] = problems
     out["ok"] = not problems
     fresh = out["freshness"] or {}
