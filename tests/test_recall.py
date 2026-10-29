@@ -139,6 +139,14 @@ class RecallTests(unittest.TestCase):
                 runner.assert_not_called()
                 post.assert_not_called()
 
+    def test_try_again_preserves_the_short_followup_keyword_lookup(self):
+        runner = mock.Mock(return_value=[])
+        result = recall.recall("try again", settings(), runner)
+        self.assertEqual(result.status, "miss")
+        self.assertIn("cli", result.attempted_engines)
+        runner.assert_called()
+        self.assertTrue(all("search" in call.args[0] for call in runner.call_args_list))
+
     def test_acknowledgement_words_do_not_hide_a_short_subject_or_explicit_query(self):
         for prompt in ("yes hooks", "no authentication", "okay OAuth", "THANKYOU_ERROR", "codex hooks"):
             with self.subTest(prompt=prompt):
@@ -853,6 +861,49 @@ class WrappedQmdTests(unittest.TestCase):
             exe.write_bytes(b"\xcf\xfa\xed\xfe\0\0 exec /usr/bin/node")
             self.assertEqual(setup_recall.wrapper_targets(str(exe)), [])
             self.assertIsNone(setup_recall.wrapper_node(str(exe)))
+
+    def test_quoted_and_escaped_spaces_preserve_the_package_and_pinned_node(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "External SSD"
+            node = root / "nvm" / "bin" / "node"
+            package = root / "nvm" / "lib" / "node_modules" / "@tobilu" / "qmd"
+            for path in (node, package / "bin" / "qmd", package / "dist" / "index.js", package / "dist" / "llm.js"):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("")
+            node.chmod(0o755)
+            wrapper = Path(tmp) / "qmd"
+            link = Path(tmp) / "qmd link"
+            link.symlink_to(wrapper)
+            for quoting in ('"', "'", "escaped"):
+                with self.subTest(quoting=quoting):
+                    def quote(path):
+                        return str(path).replace(" ", r"\ ") if quoting == "escaped" else quoting + str(path) + quoting
+                    wrapper.write_text(f'#!/bin/sh\nexec {quote(node)} {quote(package / "bin" / "qmd")} "$@"\n')
+                    for command in (wrapper, link):
+                        self.assertEqual(setup_recall.wrapper_node(str(command)), str(node))
+                        self.assertEqual(setup_recall.qmd_sdk(str(command)), (package / "dist" / "index.js").resolve())
+
+    def test_partial_expanded_comment_and_truncated_paths_are_not_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            existing = root / "existing"
+            existing.write_text("")
+            wrapper = root / "qmd"
+            for line in (
+                f'exec "{existing} missing"',
+                f'exec "{existing}',
+                f'exec {existing}\\',
+                f'exec "{existing}$UNRESOLVED"',
+                f'exec "$NODE" "{existing}" "$@"',
+                f'exec node "$@" # {existing}',
+                f'// exec "{existing}"',
+                f'exec {existing}; /bin/true',
+            ):
+                with self.subTest(line=line):
+                    wrapper.write_text(f'#!/bin/sh\n{line}\n')
+                    self.assertEqual(setup_recall.wrapper_targets(str(wrapper)), [])
+            wrapper.write_text(f'#!/bin/sh\nexec "{existing}" ' + " " * 4096)
+            self.assertEqual(setup_recall.wrapper_targets(str(wrapper)), [])
 
 
 class RealNodeTests(unittest.TestCase):

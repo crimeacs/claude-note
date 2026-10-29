@@ -23,6 +23,7 @@ import json
 import os
 import plistlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -527,12 +528,33 @@ def wrapper_targets(qmd: str) -> list[Path]:
     if not head.startswith(b"#!") or b"\0" in head:
         return []
     out = []
-    for line in head.decode("utf-8", "replace").splitlines()[1:]:
-        if re.match(r"\s*exec\s", line):
-            for raw in re.findall(r"""["']?(/[^\s"'$]+)["']?""", line):
-                target = Path(raw)
-                if target.is_file() and target not in out:
-                    out.append(target)
+    lines = head.decode("utf-8", "replace").splitlines()
+    if len(head) == 4096 and not head.endswith((b"\n", b"\r")):
+        lines = lines[:-1]  # never interpret a command fragment cut off by the read limit
+    for line in lines[1:]:
+        if not re.match(r"\s*exec\s", line):
+            continue
+        # Read literal arguments, never evaluate a shell. In particular, a quoted
+        # installation directory may contain spaces. Unsupported expansion cannot
+        # establish either the package or its ABI-compatible executable.
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|<>()")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        arguments = []
+        try:
+            for argument in lexer:
+                if argument.startswith("#"):
+                    break
+                if (any(c in argument for c in "$`") and argument != "$@"
+                        or argument and all(c in ";&|<>()" for c in argument)):
+                    raise ValueError("nonliteral launcher argument")
+                arguments.append(argument)
+        except ValueError:
+            continue
+        for raw in arguments[1:]:
+            target = Path(raw)
+            if target.is_absolute() and target.is_file() and target not in out:
+                out.append(target)
     return out
 
 

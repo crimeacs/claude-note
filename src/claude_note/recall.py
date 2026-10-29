@@ -214,7 +214,8 @@ UNRESOLVED_FOLLOWUP = re.compile(
     r"(?:[.!?]+\s*|\s+and\s+|\s*;\s*|$))+$", re.IGNORECASE)
 # What is left of "yeah do it, the goal is to fix everything for good" once filler
 # goes: an action with no object. Alone it is the same subject-free follow-up.
-GENERIC_ACTIONS = frozenset("fix repair check handle update install run test try retry start "
+# Keep `try` searchable: the existing short-follow-up contract includes "try again".
+GENERIC_ACTIONS = frozenset("fix repair check handle update install run test retry start "
                             "finish work works working solve resolve improve".split())
 SUBJECT_FREE_ACKNOWLEDGEMENT = re.compile(
     r"^(?:(?:yes|no|yep|nope|ok|okay|sure)(?:[\s,]+(?:please|thanks|thank\s+you))?"
