@@ -134,6 +134,8 @@ def eligible(rel: Path, text: str) -> Optional[str]:
     """The note type if this note may leave the laptop, else None."""
     if any(p.startswith(".") or p == "private" for p in rel.parts[:-1]):
         return None
+    if rel.parts[:1] == ("templates",):
+        return None  # the vault template's note skeletons (`created: {{date}}`), not knowledge
     if rel.name.startswith("claude-session-"):
         return None  # a raw session log, whatever its frontmatter says
     fm = frontmatter(text)

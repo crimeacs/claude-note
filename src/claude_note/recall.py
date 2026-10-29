@@ -191,6 +191,8 @@ whom why will with would you your
 lets need really maybe sure find best thing things stuff bit lot ok okay thanks hello
 summarise summarize explain describe review look looking stands status
 evaluate integrate produce define assess explore create draft build wire ship
+yeah yes yep yup nope everything anything something nothing everyone good great fine nice
+goal goals proceed continue ahead going done fixed again
 """.split())
 
 WORD = re.compile(r"[^\W_][\w./-]*", re.UNICODE)
@@ -210,6 +212,10 @@ UNRESOLVED_FOLLOWUP = re.compile(
     r"^(?:(?:please\s+)?(?:(?:fix|repair|check|handle|do)\s+(?:it|this|that)"
     r"|get\s+(?:it|this|that)\s+to\s+work)(?:\s+please)?"
     r"(?:[.!?]+\s*|\s+and\s+|\s*;\s*|$))+$", re.IGNORECASE)
+# What is left of "yeah do it, the goal is to fix everything for good" once filler
+# goes: an action with no object. Alone it is the same subject-free follow-up.
+GENERIC_ACTIONS = frozenset("fix repair check handle update install run test try retry start "
+                            "finish work works working solve resolve improve".split())
 SUBJECT_FREE_ACKNOWLEDGEMENT = re.compile(
     r"^(?:(?:yes|no|yep|nope|ok|okay|sure)(?:[\s,]+(?:please|thanks|thank\s+you))?"
     r"|thanks|thank\s+you)[.!?]*$", re.IGNORECASE)
@@ -1215,6 +1221,9 @@ def _recall(prompt, settings, runner, result, started, prefer_types, extra_rungs
     # Bound lexical CPU as well as semantic input. Huge wrappers cannot consume
     # the entire hook budget before the first deadline check.
     terms = _bounded(lambda: content_terms(prompt, max(1, settings.max_terms)), deadline)
+    if not extra_rungs and terms and all(t.casefold() in GENERIC_ACTIONS for t in terms):
+        result.reason = "follow-up has no retrieval subject; use the preceding conversation"
+        return
     meaningful = any(w.casefold() not in STOPWORDS and not DATEISH.match(w)
                      for w in WORD.findall(prompt))
     if not terms and not extra_rungs and not meaningful:

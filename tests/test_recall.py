@@ -110,7 +110,8 @@ class RecallTests(unittest.TestCase):
 
     def test_subject_free_followup_never_searches_generic_action_notes(self):
         for prompt in ("fix it", "Please repair this!", "check that please", "get it to work! fix it",
-                       "get this to work", "please fix it and check that"):
+                       "get this to work", "please fix it and check that",
+                       "yeah do it, goal is to fix everything for good", "great, update everything again"):
             with self.subTest(prompt=prompt), mock.patch.object(recall, "server_post") as post:
                 runner = mock.Mock(return_value=[item("qmd://notes/random-fix.md", "Old incident fix")])
                 result = recall.recall(prompt, settings(engine="auto"), runner)
