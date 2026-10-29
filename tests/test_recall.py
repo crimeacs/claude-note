@@ -800,6 +800,60 @@ class ServerTransportTests(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(row))
 
 
+class SentinelOrdinaryOutputTests(unittest.TestCase):
+    """Claude Code puts a failed command's whole output in `error`; ordinary output in it is not the error."""
+
+    def test_config_keys_are_not_errors_or_transient(self):
+        payload = {"tool_name": "Bash", "tool_input": {"command": "for f in a b; do [ -f $f ] && jq .hooks $f; done"},
+                   "error": 'Exit code 1\n=== a\n{\n  "timeout": 10,\n  "type": "command"\n}'}
+        found = sentinel.analyse(payload, settings(), lambda c, t: [])
+        self.assertEqual(found["line"], "Exit code 1")
+        self.assertNotEqual(found["classification"]["class"], "transient")
+
+    def test_shell_diagnostic_beats_earlier_prose(self):
+        payload = {"tool_name": "Bash", "error": "Exit code 1\nThe user said permission is never needed for "
+                   "pushes to the demo branch, and it was merged.\n\n(eval):1: ======== not found"}
+        found = sentinel.analyse(payload, settings(), lambda c, t: [])
+        self.assertEqual(found["line"], "(eval):1: ======== not found")
+
+    def test_string_valued_error_keys_still_count(self):
+        text = 'Exit code 1\n{\n  "error": "invalid_grant",\n  "retries": 3\n}'
+        self.assertEqual(sentinel.error_line(text), '"error": "invalid_grant",')
+        self.assertEqual(sentinel.classify_failure({}, sentinel.evidence(text))["class"], "authentication")
+
+    def test_real_timeout_is_still_transient(self):
+        found = sentinel.analyse({"tool_name": "Bash", "error": "Exit code 28\ncurl: (28) Operation timed out after 10001 ms"},
+                                 settings(), lambda c, t: [])
+        self.assertIn("timed out", found["line"])
+        self.assertEqual(found["classification"]["class"], "transient")
+
+
+class WrappedQmdTests(unittest.TestCase):
+    """A `qmd` on PATH may be a shell script that execs nvm's node and the real CLI."""
+
+    def test_sdk_and_node_come_from_the_wrapper_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            node = root / "nvm" / "bin" / "node"
+            package = root / "nvm" / "lib" / "node_modules" / "@tobilu" / "qmd"
+            for path in (node, package / "bin" / "qmd", package / "dist" / "index.js", package / "dist" / "llm.js"):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("")
+            node.chmod(0o755)
+            wrapper = root / "local" / "bin" / "qmd"
+            wrapper.parent.mkdir(parents=True)
+            wrapper.write_text(f'#!/usr/bin/env bash\nexec "{node}" "{package / "bin" / "qmd"}" "$@"\n')
+            self.assertEqual(setup_recall.qmd_sdk(str(wrapper)), (package / "dist" / "index.js").resolve())
+            self.assertEqual(setup_recall.wrapper_node(str(wrapper)), str(node))
+
+    def test_a_binary_qmd_has_no_wrapper_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "qmd"
+            exe.write_bytes(b"\xcf\xfa\xed\xfe\0\0 exec /usr/bin/node")
+            self.assertEqual(setup_recall.wrapper_targets(str(exe)), [])
+            self.assertIsNone(setup_recall.wrapper_node(str(exe)))
+
+
 class RealNodeTests(unittest.TestCase):
     """setup must record node itself, not a nodenv/nvm/asdf shim that fails under launchd."""
 
