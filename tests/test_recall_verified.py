@@ -213,15 +213,115 @@ print(json.dumps({'status':r.status,'kinds':[h.revision_kind for h in r.hits],
         time.sleep(.03)
 
     def test_expired_judge_process_group_cannot_finish_child_side_effect(self):
+        if os.name != "posix":
+            self.skipTest("requires POSIX process groups")
+        import signal
+        from types import SimpleNamespace
+
         marker = self.root / "child-finished"
-        child = f"import time; from pathlib import Path; time.sleep(.18); Path({str(marker)!r}).write_text('late')"
-        program = f"import subprocess,time; subprocess.Popen([{sys.executable!r},'-c',{child!r}]); time.sleep(3)"
-        began = time.monotonic()
-        with self.assertRaises(subprocess.TimeoutExpired):
-            recall._process([sys.executable, "-c", program], .06)
-        self.assertLess(time.monotonic() - began, .2)
-        time.sleep(.22)
-        self.assertFalse(marker.exists())
+        ready = self.root / "child-ready.json"
+        release = self.root / "release-child-effect"
+        child = r"""
+import json, os, sys, time
+from pathlib import Path
+root = Path(sys.argv[1])
+ready = root / "child-ready.json"
+with (root / "child-ready.tmp").open("x") as stream:
+    json.dump({"pid": os.getpid(), "ppid": os.getppid(), "pgid": os.getpgrp()}, stream)
+os.replace(root / "child-ready.tmp", ready)
+while not (root / "release-child-effect").exists():
+    time.sleep(.005)
+(root / "child-finished").write_text("public released effect")
+"""
+        program = r"""
+import subprocess, sys, time
+subprocess.Popen([sys.executable, "-I", "-S", "-B", "-c", sys.argv[2], sys.argv[1]])
+while True:
+    time.sleep(1)
+"""
+        command = [sys.executable, "-I", "-S", "-B", "-c", program, str(self.root), child]
+        public_env = {key: value for key, value in os.environ.items()
+                      if key in ("HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ")}
+        public_env.update(XDG_CONFIG_HOME=str(self.root / "config"),
+                          XDG_CACHE_HOME=str(self.root / "cache"),
+                          XDG_DATA_HOME=str(self.root / "data"))
+        real_popen, real_monotonic = subprocess.Popen, time.monotonic
+        owned, identity = [], {}
+        clock = {"expired": False}
+
+        def spawn_ready(argv, **kwargs):
+            self.assertEqual(argv, command)
+            self.assertTrue(kwargs.get("start_new_session"))
+            proc = real_popen(argv, cwd=self.root, **kwargs)
+            # Capture ownership before any readiness assertion can raise: the
+            # product has not assigned its local proc until this wrapper returns.
+            owned.append(proc)
+            self.assertNotEqual(proc.pid, os.getpgrp())
+            self.assertEqual(os.getpgid(proc.pid), proc.pid)
+            until = real_monotonic() + 5
+            while not ready.exists():
+                self.assertIsNone(proc.poll(), "public parent exited before readiness")
+                self.assertLess(real_monotonic(), until, "public descendant readiness unavailable")
+                time.sleep(.005)  # Poll readiness; effect is gated by a file, not time.
+            raw = ready.read_bytes()
+            self.assertLessEqual(len(raw), 256)
+            value = json.loads(raw)
+            self.assertEqual(set(value), {"pid", "ppid", "pgid"})
+            self.assertTrue(all(type(item) is int and item > 0 for item in value.values()))
+            self.assertNotEqual(value["pid"], proc.pid)
+            self.assertEqual((value["ppid"], value["pgid"]), (proc.pid, proc.pid))
+            self.assertEqual(os.getpgid(value["pid"]), proc.pid)
+            self.assertFalse(release.exists())
+            self.assertFalse(marker.exists())
+            identity.update(value)
+            # Expire only the product's logical clock AFTER positive admission.
+            # Global stdlib/subprocess clocks remain real for bounded cleanup.
+            clock["expired"] = True
+            return proc
+
+        def exists(pid, *, group=False):
+            try:
+                (os.killpg if group else os.kill)(pid, 0)
+            except ProcessLookupError:
+                return False
+            return True
+
+        try:
+            self.assertFalse(release.exists())
+            proxy = SimpleNamespace(monotonic=lambda: 1.0 if clock["expired"] else 0.0)
+            with mock.patch.object(recall, "time", proxy), \
+                    mock.patch.object(recall.subprocess, "Popen", side_effect=spawn_ready):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    recall._process(command, .06, env=public_env)
+            self.assertTrue(clock["expired"])
+            self.assertEqual(len(owned), 1)
+            self.assertFalse(release.exists())
+            # The child cannot perform its effect before _process has returned
+            # through cleanup, however slow real startup/cleanup happened to be.
+            release.write_text("release public effect after cleanup")
+            until = real_monotonic() + 2
+            while (exists(identity["pid"]) or exists(owned[0].pid, group=True)) and real_monotonic() < until:
+                time.sleep(.005)
+            self.assertFalse(exists(identity["pid"]), "owned descendant survived process-group cleanup")
+            self.assertFalse(exists(owned[0].pid, group=True), "owned process group survived cleanup")
+            self.assertFalse(marker.exists())
+            self.assertIsNotNone(owned[0].returncode)
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(owned[0].pid, os.WNOHANG)
+        finally:
+            # Also handles a wrapper failure before _process receives its proc.
+            # Only the captured public session is eligible for fallback signals.
+            for proc in owned:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    proc.wait(timeout=2)
+                finally:
+                    for stream in (proc.stdin, proc.stdout, proc.stderr):
+                        if stream and not stream.closed:
+                            stream.close()
 
     def test_adapter_output_capture_is_bounded_before_completion(self):
         with self.assertRaises(ValueError):

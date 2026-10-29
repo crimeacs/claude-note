@@ -97,7 +97,8 @@ class SweepLifecycleTests(unittest.TestCase):
         self.children = []
         self.mode = "sleep"
         self.enterContext(mock.patch.object(capture_sweep.subprocess, "Popen", side_effect=self.spawn_public_child))
-        self.job = capture_sweep.Sweep(logging.getLogger("public-sweep-lifecycle"))
+        self.job = capture_sweep.Sweep(logging.getLogger("public-sweep-lifecycle"),
+            status_path=self.root / "heartbeat/import-supervisor.json")
         self.addCleanup(self.cleanup_children)
 
     def spawn_public_child(self, command, **kwargs):
@@ -145,6 +146,11 @@ class SweepLifecycleTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 3)
         self.assertFalse(self.job.thread.is_alive())
         self.assert_reaped(child)
+        from claude_note import capture_sweep_status
+        report = capture_sweep_status.read(self.root / "heartbeat/import-supervisor.json")
+        self.assertEqual(report["owner_state"], "stopped")
+        self.assertTrue(report["attempt"]["child_reaped"])
+        self.assertEqual(report["attempt"]["reason"], "shutdown")
 
     def test_deadline_interrupts_import_intent_and_exact_replay_recovers(self):
         self.mode = "publication"
@@ -166,6 +172,10 @@ class SweepLifecycleTests(unittest.TestCase):
         self.job.tick()
         self.assertLess(time.monotonic() - started, 3)
         self.assert_reaped(child)
+        from claude_note import capture_sweep_status
+        report = capture_sweep_status.read(self.root / "heartbeat/import-supervisor.json")
+        self.assertEqual(report["attempt"]["reason"], "deadline")
+        self.assertTrue(report["attempt"]["child_reaped"])
         self.assertEqual(intent.read_bytes(), intent_bytes)
         self.assertEqual(snapshot.read_bytes(), first_snapshot)
         self.assertEqual(list(queue_manager.read_pending_events()), [])

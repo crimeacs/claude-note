@@ -239,7 +239,8 @@ class CaptureSweepProfileTests(unittest.TestCase):
             time.sleep(.02)
         self.assertTrue(marker.exists())
         self.assertGreater(capture_sweep.rss_bytes(child.pid), 16 * 1024 ** 2)
-        job = capture_sweep.Sweep(logging.getLogger("public-real-child"))
+        job = capture_sweep.Sweep(logging.getLogger("public-real-child"),
+                                  status_path=self.root / "import-supervisor.json")
         job.child, job.started = child, time.monotonic()
         with mock.patch.object(config, "VAULT_ROOT", self.vault), \
              mock.patch.object(capture_sweep, "MIN_FREE_BYTES", 0), \
