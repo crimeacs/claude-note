@@ -28,6 +28,10 @@ def note(note_type, body="", extra=""):
     return f"---\ntype: {note_type}\n{extra}---\n\n{body}{FILLER}\n"
 
 
+
+def pathlib_root():
+    return Path(__file__).resolve().parent.parent
+
 class FakeClient:
     def __init__(self, base="https://vault.example.com", org="org-a"):
         self.calls = []
@@ -473,6 +477,9 @@ class InferTypeTests(unittest.TestCase):
         self.assertIsNone(push.eligible(Path("claude-note-inbox.md"), self.synth(["log", "claude-note", "inbox"])))
         self.assertIsNone(push.eligible(Path("claude-session-2026-10-05-ab.md"), self.synth(["pattern"])))
         self.assertIsNone(push.eligible(Path("a.md"), self.synth(["pattern"], "assistant: codex\nshare: false\n")))
+        template = (pathlib_root() / "vault-template" / "templates" / "decision.md").read_text()
+        self.assertIsNone(push.eligible(Path("templates/decision.md"), template))
+        self.assertEqual(push.eligible(Path("notes/templates.md"), self.synth(["pattern"])), "pattern")
         self.assertIsNone(push.eligible(Path("private/a.md"), self.synth(["pattern"])))
 
     def test_a_persons_untyped_note_is_not_inferred(self):

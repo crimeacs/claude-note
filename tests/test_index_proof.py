@@ -181,7 +181,8 @@ print(json.dumps({'growth':after-before,'status':status}))
         self.assertNotEqual(python_result['status'], 'unexpected_success')
         self.assertLess(python_result['growth'], 24 * 1024 * 1024)
         self.assertFalse(self.verify()['lexical'])
-        node, qmd = shutil.which('node'), shutil.which('qmd')
+        qmd = shutil.which('qmd')
+        node = (setup_recall.wrapper_node(qmd) if qmd else None) or shutil.which('node')
         sdk = setup_recall.qmd_sdk(qmd) if qmd else None
         if node and sdk:
             script = '''
@@ -246,7 +247,8 @@ console.log(JSON.stringify({result,growth:after-before,heap}));
         self.assertTrue(answer['lexical'])
 
     def test_native_synthetic_vector_contracts(self):
-        node, qmd = shutil.which('node'), shutil.which('qmd')
+        qmd = shutil.which('qmd')
+        node = (setup_recall.wrapper_node(qmd) if qmd else None) or shutil.which('node')
         sdk = setup_recall.qmd_sdk(qmd) if qmd else None
         if not node or not sdk:
             self.skipTest('Installed pinned optional QMD SDK is required for native synthetic contracts')
@@ -259,7 +261,8 @@ console.log(JSON.stringify({result,growth:after-before,heap}));
         self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
 
     def test_vector_process_protocol_proves_real_prebuilt_vectors_read_only(self):
-        node, qmd = shutil.which('node'), shutil.which('qmd')
+        qmd = shutil.which('qmd')
+        node = (setup_recall.wrapper_node(qmd) if qmd else None) or shutil.which('node')
         sdk = setup_recall.qmd_sdk(qmd) if qmd else None
         if not node or not sdk:
             self.skipTest('Installed pinned optional QMD SDK is required for native proof')

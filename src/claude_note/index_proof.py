@@ -265,7 +265,8 @@ def verify(*, database: str, configuration: str, qmd: str, references: tuple, ve
         lexical = text['lexical']
         if lexical and not vector:
             return _result(True)
-        sdk, node = setup_recall.qmd_sdk(qmd) if qmd else None, shutil.which('node')
+        sdk = setup_recall.qmd_sdk(qmd) if qmd else None
+        node = (setup_recall.wrapper_node(qmd) if qmd else None) or shutil.which('node')
         if not sdk or not node:
             return _result(lexical, reason='proof_native_unavailable' if lexical else text['reason'])
         result = _observer({'database': str(database), 'configuration': str(configuration),

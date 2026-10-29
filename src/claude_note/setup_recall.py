@@ -23,6 +23,7 @@ import json
 import os
 import plistlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -515,13 +516,65 @@ def qmd_major(exe: str) -> int:
         return 0
 
 
+def wrapper_targets(qmd: str) -> list[Path]:
+    """Absolute paths a small shell wrapper execs. Installers often put a script such as
+    `exec "/…/nvm/…/bin/node" "/…/node_modules/@tobilu/qmd/bin/qmd" "$@"` on PATH; the SDK
+    and the node QMD's native modules were built for are where it points, not beside it."""
+    try:
+        with Path(qmd).resolve().open("rb") as handle:
+            head = handle.read(4096)
+    except OSError:
+        return []
+    if not head.startswith(b"#!") or b"\0" in head:
+        return []
+    out = []
+    lines = head.decode("utf-8", "replace").splitlines()
+    if len(head) == 4096 and not head.endswith((b"\n", b"\r")):
+        lines = lines[:-1]  # never interpret a command fragment cut off by the read limit
+    for line in lines[1:]:
+        if not re.match(r"\s*exec\s", line):
+            continue
+        # Read literal arguments, never evaluate a shell. In particular, a quoted
+        # installation directory may contain spaces. Unsupported expansion cannot
+        # establish either the package or its ABI-compatible executable.
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|<>()")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        arguments = []
+        try:
+            for argument in lexer:
+                if argument.startswith("#"):
+                    break
+                if (any(c in argument for c in "$`") and argument != "$@"
+                        or argument and all(c in ";&|<>()" for c in argument)):
+                    raise ValueError("nonliteral launcher argument")
+                arguments.append(argument)
+        except ValueError:
+            continue
+        for raw in arguments[1:]:
+            target = Path(raw)
+            if target.is_absolute() and target.is_file() and target not in out:
+                out.append(target)
+    return out
+
+
+def wrapper_node(qmd: str) -> Optional[str]:
+    """The node a QMD wrapper runs, when it names one."""
+    for target in wrapper_targets(qmd):
+        if target.name == "node" and os.access(target, os.X_OK):
+            return str(target)
+    return None
+
+
 def qmd_sdk(qmd: str) -> Optional[Path]:
-    """The QMD 2.x SDK entry (dist/index.js) of the installed `qmd`, found from its executable."""
+    """The QMD 2.x SDK entry (dist/index.js) of the installed `qmd`, found from its executable
+    or, for a wrapper script, from what it execs."""
     try:
         real = Path(qmd).resolve()
     except OSError:
         return None
-    for parent in [real.parent, *real.parents][:6]:
+    starts = [real] + [t.resolve() for t in wrapper_targets(qmd) if t.name != "node"]
+    for parent in [p for start in starts for p in [start.parent, *start.parents][:6]]:
         for cand in (parent / "node_modules" / "@tobilu" / "qmd" / "dist" / "index.js", parent / "dist" / "index.js"):
             if cand.is_file() and (cand.parent / "llm.js").is_file():
                 return cand
@@ -577,7 +630,7 @@ def install_server_agent(qmd: str, port: int = 8182, dry_run: bool = False, *, p
     if qmd_major(qmd) < 2:
         return "skipped: QMD 2.x needed for search by meaning (`npm i -g @tobilu/qmd`); recall uses keywords only"
     sdk = qmd_sdk(qmd)
-    node = real_node()
+    node = wrapper_node(qmd) or real_node()
     if not sdk or not node:
         return "skipped: could not find QMD's SDK or node; recall uses keywords only"
     server = Path(__file__).with_name("recall_server.mjs")

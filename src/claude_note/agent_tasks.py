@@ -757,7 +757,8 @@ def isolated_hybrid_backends(*, embed_model=None, rerank_model=None, baseline_ch
                 except (OSError, ValueError) as exc:
                     rank_error = bounded_diagnostic(f'{type(exc).__name__}: {exc}')[:200]
                     events.append({'event':'optional_dependency_unavailable','dependency':'rerank_model','error':rank_error})
-            qmd, node = setup_recall.qmd_exe(), setup_recall.real_node()
+            qmd = setup_recall.qmd_exe()
+            node = (setup_recall.wrapper_node(qmd) if qmd else None) or setup_recall.real_node()
             sdk = setup_recall.qmd_sdk(qmd) if qmd else None
             if not node or not sdk or not (sdk.parent / "cli/qmd.js").is_file():
                 raise RuntimeError("inspected QMD SDK and Node are required")

@@ -54,6 +54,15 @@ DEFAULT_RULES = [
                "it in System Settings > Privacy & Security, for the exact binary that runs."},
 ]
 
+# A structured key with a non-string value ("timeout": 10, retries = 3, "failed": 0) is
+# data the command printed, not an error, even when its key is an error word. String
+# values stay: `"error": "invalid_grant"` is how providers report failures.
+DATA_LINE = re.compile(r"""^\s*["']?[\w.-]+["']?\s*[:=]\s*(?:-?[\d.]+|true|false|null|none|[\[{])\s*,?\s*$""", re.I)
+# A diagnostic a tool wrote about itself (`zsh:1: ... not found`, `(eval):1: ...`,
+# `fatal: ...`, `TypeError: ...`) outranks prose that merely mentions an error word.
+DIAGNOSTIC = re.compile(r"^(?:\(eval\)|[\w.+/-]+)(?::\d+)*:\s|^(?:error|fatal|panic|E[A-Z]{2,})\b|^[A-Z]\w*(?:Error|Exception)\b")
+EXIT_HEADER = re.compile(r"^Exit code \d+$")
+
 PATH_OR_NOISE = re.compile(r"(/[^\s:'\"]+)|(\b0x[0-9a-f]+\b)|(\b[0-9a-f]{12,}\b)|(\d{4,})", re.I)
 # Exception class names and exit-code boilerplate rank as rare proper nouns and
 # zero a conjunctive query; the words AFTER them carry the meaning.
@@ -96,15 +105,21 @@ def failure_text(payload: dict) -> str:
     return stderr if ERROR_LINE.search(stderr) else ""
 
 
+def evidence(text: str) -> str:
+    """The output without structured data lines, for classification and rules."""
+    return "\n".join(l for l in text.splitlines() if not DATA_LINE.match(l))
+
+
 def error_line(text: str) -> str:
-    """The most specific error line: matching, wordy, and late (errors come last)."""
+    """The most specific error line: a tool's own diagnostic first, then matching, wordy,
+    and late (errors come last). Data lines never count."""
     best, best_score = "", -1
     lines = [l.strip() for l in text.splitlines() if l.strip()][-60:]
     for i, line in enumerate(lines):
-        if not ERROR_LINE.search(line):
+        if not ERROR_LINE.search(line) or DATA_LINE.match(line):
             continue
         words = len(re.findall(r"[A-Za-z]{3,}", line))
-        score = min(words, 12) * 2 + i / max(len(lines), 1)
+        score = min(words, 12) * 2 + i / max(len(lines), 1) + (100 if DIAGNOSTIC.search(line) else 0)
         if score > best_score:
             best, best_score = line, score
     return best[:300]
@@ -232,16 +247,24 @@ def _generation(payload: dict, cfg: dict) -> str:
         sort_keys=True).encode()).hexdigest()
 
 
+def fallback_line(text: str) -> str:
+    """No error line: Claude Code's `Exit code N` header says more than the output's last line."""
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    if not lines:
+        return ""
+    return (lines[0] if EXIT_HEADER.match(lines[0]) else lines[-1])[:300]
+
+
 def analyse(payload: dict, settings: Optional[recall_mod.Settings] = None,
             runner=recall_mod._run_qmd) -> Optional[dict]:
     text = failure_text(payload)
     if not text:
         return None
-    line = error_line(text) or text.strip().splitlines()[-1][:300]
+    line = error_line(text) or fallback_line(text)
     cfg = _settings()
-    classification = classify_failure(payload, text[-6000:])
+    classification = classify_failure(payload, evidence(text)[-6000:])
     advice = [classification["advice"]] if recall_mod._as_bool(cfg.get("default_rules"), True) else []
-    advice += matching_advice(text[-6000:], [r for r in cfg.get("rules", []) if isinstance(r, dict)])
+    advice += matching_advice(evidence(text)[-6000:], [r for r in cfg.get("rules", []) if isinstance(r, dict)])
     stripped = DOTTED.sub(" ", URL.sub(" ", line))
     query_text = ERROR_NOISE.sub(" ", PATH_OR_NOISE.sub(" ", stripped)).lower()
     ids = []
@@ -289,8 +312,8 @@ def hook_main(stdin=None) -> int:
         text = failure_text(payload)
         if not text:
             return 0
-        line = error_line(text) or text.strip().splitlines()[-1][:300]
-        classification = classify_failure(payload, text[-6000:])
+        line = error_line(text) or fallback_line(text)
+        classification = classify_failure(payload, evidence(text)[-6000:])
         if classification["class"] == "expected_nonzero":
             return 0
         sig = hashlib.sha1((classification["class"] + "\n" + re.sub(r"\d+", "#", line)).encode()).hexdigest()[:12]
