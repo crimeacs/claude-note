@@ -113,10 +113,13 @@ class LearningLoop:
         self.scope.update(extra)
         self.extractor, self.max_memory_chars = extractor, max_memory_chars
         supplied = Path(root)
-        if not supplied.is_absolute() or supplied.is_symlink():
+        if (not supplied.is_absolute() or ".." in supplied.parts or
+                any(part.is_symlink() for part in (supplied, *supplied.parents))):
             raise LearningLoopError("Explicit unlinked absolute root required")
         self.root = supplied.resolve()
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if any(part.is_symlink() for part in (supplied, *supplied.parents)):
+            raise LearningLoopError("Learning root ancestor changed")
         if not self.root.is_dir():
             raise LearningLoopError("Learning root is not a directory")
         self._mutex, self._fd = threading.Lock(), None
@@ -162,6 +165,18 @@ class LearningLoop:
         finally:
             self._mutex.release()
 
+    def _live_lock(self):
+        """An open descriptor for an unlinked lock cannot admit another effect."""
+        try:
+            opened = os.fstat(self._fd)
+            current = (self.root / ".learning-loop.lock").lstat()
+            if (not stat.S_ISREG(current.st_mode) or not stat.S_ISREG(opened.st_mode) or
+                    opened.st_nlink != 1 or current.st_nlink != 1 or
+                    (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)):
+                raise LearningLoopError("Learning lock was retired or replaced")
+        except (OSError, TypeError) as exc:
+            raise LearningLoopError("Learning lock is unavailable") from exc
+
     @contextmanager
     def _locked(self, *, check_manifest=True):
         if not self._mutex.acquire(blocking=False):
@@ -174,11 +189,13 @@ class LearningLoop:
             if (not stat.S_ISDIR(current.st_mode) or
                     (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)):
                 raise LearningLoopError("Learning root changed")
+            self._live_lock()
             try:
                 fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 acquired = True
             except BlockingIOError as exc:
                 raise LearningLoopError("Learning loop is in use") from exc
+            self._live_lock()
             if check_manifest and self._read("manifest.json") != self._manifest:
                 raise LearningLoopError("Learning manifest changed")
             yield
@@ -198,6 +215,7 @@ class LearningLoop:
 
     def _write(self, relative, text):
         """Only create immutable artifacts, using the actual mutation ledger."""
+        self._live_lock()
         expected = hashlib.sha256(text.encode()).hexdigest()
         op = mutation.operation_id("public-learning-loop-v1", self.run_id,
                                    self.arm_id, relative, expected)
@@ -206,7 +224,8 @@ class LearningLoop:
         if prior is not None:
             key = mutation.operation_id(mutation.operation_id(relative), op)
             effect = mutation._metadata(self.root, "effects", key)
-            if prior != text or not effect or effect.get("revision") != expected:
+            if (prior != text or not effect or effect.get("status") != "applied" or
+                    effect.get("revision") != expected):
                 raise LearningLoopError("Existing artifact is not the exact owned effect")
             return expected
 
@@ -357,11 +376,29 @@ class LearningLoop:
                         entry["source_revision"] != observation["source_revision"] or
                         not set(entry["source_spans"]).issubset(observation["source_spans"])):
                     raise LearningLoopError("Learned revision or provenance changed")
+                inputs = entry.get("input_revisions")
+                if type(inputs) is not list or not inputs:
+                    raise LearningLoopError("Learned revision lacks exact extraction inputs")
+                for item in inputs:
+                    content = self._text(item["relative_path"])
+                    if content is None or hashlib.sha256(content.encode()).hexdigest() != item["revision"]:
+                        raise LearningLoopError("An extraction input revision changed")
                 scope_key = _digest(entry["scope"])
                 for key in entry["supersedes"]:
                     active.pop((scope_key, key), None)
                 active[(scope_key, entry["key"])] = entry
         return list(active.values())
+
+    def _revalidate_inputs(self, records, observation, prior):
+        """Recheck precisely the evidence exposed to the callback, without replay."""
+        self._live_lock()
+        current = self._observations()
+        if current != records:
+            raise LearningLoopError("Observation journal changed during extraction")
+        self._verified(observation)
+        actual = self._applicable(self._entries(current, observation["sequence"]), observation["scope"])
+        if actual != prior:
+            raise LearningLoopError("Supplied memory changed during extraction")
 
     @staticmethod
     def _applicable(entries, scope):
@@ -428,19 +465,24 @@ class LearningLoop:
                    for n in range(sequence + 1, len(records))):
                 raise LearningLoopError("Cannot learn an earlier observation after a later one")
             prior = self._applicable(self._entries(records, sequence), observation["scope"])
+            input_revisions = [{"relative_path": source.relative_to(self.root).as_posix(),
+                                "revision": observation["source_revision"]},
+                               *({"relative_path": entry["relative_path"], "revision": entry["revision"]}
+                                 for entry in prior)]
             request = {"run_id": self.run_id, "arm_id": self.arm_id,
                 "task_id": observation["task_id"], "sequence": sequence,
                 "scope": observation["scope"], "source_revision": observation["source_revision"],
                 "source_spans": observation["source_spans"], "experience": observation["experience"],
                 "current_memory": prior}
             self._save(prefix + ".intent.json", {"run_id": self.run_id, "arm_id": self.arm_id,
-                       "observation_receipt_digest": _digest(observation), "request_digest": _digest(request)})
+                       "observation_receipt_digest": _digest(observation), "request_digest": _digest(request),
+                       "input_revisions": input_revisions})
             outcome = {"kind": "learning", "run_id": self.run_id, "arm_id": self.arm_id,
                 "sequence": sequence, "status": "failed", "created": [], "updated": [],
                 "superseded": [], "reason": "extraction_failed", "entries": [],
                 "observation_receipt_digest": _digest(observation)}
             try:
-                sources = [str(source), *(str(self.root / e["relative_path"]) for e in prior)]
+                sources = [str(self.root / item["relative_path"]) for item in input_revisions]
                 rules = {"default": ["host", "local"], "rules": [{"source": str(self.root) + "/*",
                          "audiences": ["host", "local", "model"]}]}
                 prompt = _encoded(request).decode()
@@ -449,24 +491,28 @@ class LearningLoop:
                 if egress.prepare(prompt, audience="model", sources=sources, rules=rules) != prompt:
                     raise LearningLoopError("Public experience requires secret redaction")
                 response = self.extractor(_freeze(json.loads(_encoded(request))))
-                if self._verified(observation) != source:
-                    raise LearningLoopError("Capture changed during extraction")
+                self._revalidate_inputs(records, observation, prior)
                 lessons = self._proposals(response, observation, prior)
                 known = {entry["key"] for entry in prior}
                 entries = []
                 for number, lesson in enumerate(lessons):
                     metadata = {"source_revision": observation["source_revision"],
-                        "source_spans": lesson["source_spans"], "derivation_sources": [str(source)]}
+                        "source_spans": lesson["source_spans"], "derivation_sources": sources,
+                        "input_revisions": input_revisions, "scope": lesson["scope"]}
                     content = (mutation.serialize_frontmatter({"type": "gotcha", "verification": "proposed",
-                        "derivation_sources": [str(source)], "source_revision": observation["source_revision"]})
+                        "derivation_sources": sources, "source_revision": observation["source_revision"]})
                         + "\n\n# " + lesson["key"] + "\n\n" + lesson["text"]
                         + "\n\n<!-- claude-note:provenance " + json.dumps(metadata, ensure_ascii=False).replace("-->", "\\u002d\\u002d>") + " -->\n")
                     relative = f"memory/{sequence:05d}-{number:02d}-{lesson['key']}.md"
                     revision = self._write(relative, content)
+                    egress.capture_restrictions(self.root / relative, origins=sources,
+                        captured_text=content, vault_root=self.root)
                     entries.append({**lesson, "run_id": self.run_id, "arm_id": self.arm_id,
                         "sequence": sequence, "source_revision": observation["source_revision"],
                         "revision": revision, "relative_path": relative, "verification": "proposed",
+                        "input_revisions": input_revisions,
                         "observation_receipt_digest": _digest(observation)})
+                self._revalidate_inputs(records, observation, prior)
                 outcome.update(status="completed", reason="", entries=entries,
                     created=[e["key"] for e in lessons if e["key"] not in known],
                     updated=[e["key"] for e in lessons if e["key"] in known],
