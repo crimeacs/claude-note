@@ -1,0 +1,28 @@
+{
+  "components": {
+    "egress.py": {
+      "installed_sha256": "72e931758c44f5fa84565886a3fb0fc2124e7666a88f2aac1f80941f90a5ee54",
+      "main_sha256": "72e931758c44f5fa84565886a3fb0fc2124e7666a88f2aac1f80941f90a5ee54"
+    },
+    "freshness.py": {
+      "installed_sha256": "c206c38112cc99cebf66e5085d1d27e99bcc6afa2324182da9bf7decb03b3402",
+      "main_sha256": "c206c38112cc99cebf66e5085d1d27e99bcc6afa2324182da9bf7decb03b3402"
+    },
+    "mutation.py": {
+      "installed_sha256": "e2d9082b6240723550763c0dfa09ea4febde25416bb937a1a2293ce0ef84f284",
+      "main_sha256": "e2d9082b6240723550763c0dfa09ea4febde25416bb937a1a2293ce0ef84f284"
+    },
+    "state_io.py": {
+      "installed_sha256": "30967ab5b111141f0d277685f3472bab89f76d77999cb58fc8a32e4e9bbcdbc1",
+      "main_sha256": "30967ab5b111141f0d277685f3472bab89f76d77999cb58fc8a32e4e9bbcdbc1"
+    },
+    "verified_claims.py": {
+      "installed_sha256": "6077c4ef28078e755b54cea485b0c3506e99c6aec17bdade2ad8220e34cb04ec",
+      "main_sha256": "6077c4ef28078e755b54cea485b0c3506e99c6aec17bdade2ad8220e34cb04ec"
+    }
+  },
+  "installed_source_commit": "74375fa22002b0500002b4e18de342a61716ec2c",
+  "installed_version": "2.1.26",
+  "scope": "Same admission components; installed services not modified.",
+  "source_main": "8fbd0fb7690460637d05a906b71b36d9ce48956b"
+}

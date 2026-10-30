@@ -1,0 +1,61 @@
+name: Public proof-carrying pilot
+on:
+  pull_request:
+    paths:
+      - 'experiments/proof_pilot/**'
+      - '.github/workflows/proof-pilot.yml'
+permissions:
+  contents: read
+concurrency:
+  group: proof-pilot-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  public-pilot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Install pinned public build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pilot-results"
+          python3 -c 'import json,os,pathlib,subprocess;pathlib.Path(os.environ["RUNNER_TEMP"],"pilot-results","preparation.json").write_text(json.dumps({"head":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),"trigger_sha":os.environ["GITHUB_SHA"],"run_id":os.environ["GITHUB_RUN_ID"],"scope":"public synthetic fixtures only","provider_calls":0,"case_execution":"not started"}))'
+          python3 -c 'import sys; assert sys.version_info[:2] == (3,12), sys.version'
+          python3 -m venv "$RUNNER_TEMP/pilot-python"
+          "$RUNNER_TEMP/pilot-python/bin/python" -m pip install --no-deps --only-binary=:all: --require-hashes -r experiments/proof_pilot/requirements-ci.txt
+          curl --fail --location --max-time 60 --output "$RUNNER_TEMP/elan.tar.gz" https://github.com/leanprover/elan/releases/download/v4.2.4/elan-x86_64-unknown-linux-gnu.tar.gz
+          printf '%s  %s\n' 42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63 "$RUNNER_TEMP/elan.tar.gz" | sha256sum --check
+          mkdir "$RUNNER_TEMP/elan-init"
+          tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP/elan-init"
+          ELAN_HOME="$RUNNER_TEMP/pilot-elan" "$RUNNER_TEMP/elan-init/elan-init" -y --no-modify-path --default-toolchain none
+      - name: Build the exact upstream Lean checker
+        shell: bash
+        run: |
+          set -euo pipefail
+          export ELAN_HOME="$RUNNER_TEMP/pilot-elan"
+          export PATH="$ELAN_HOME/bin:$PATH"
+          bash experiments/proof_pilot/setup_lean.sh "$RUNNER_TEMP/open-ontologies" 2>&1 | tee "$RUNNER_TEMP/pilot-results/build.log"
+      - name: Run all three arms on the same 100 cases
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/pilot-python/bin/python" -I -B experiments/proof_pilot/test_pilot.py 2>&1 | tee "$RUNNER_TEMP/pilot-results/contracts.log"
+          /usr/bin/time -v "$RUNNER_TEMP/pilot-python/bin/python" -I -B experiments/proof_pilot/run_pilot.py \
+            --upstream "$RUNNER_TEMP/open-ontologies" \
+            --checker "$RUNNER_TEMP/open-ontologies/lean/.lake/build/bin/oo-horn" \
+            --output "$RUNNER_TEMP/pilot-results/cases" \
+            2>&1 | tee "$RUNNER_TEMP/pilot-results/run.log"
+      - name: Retain successful, failed and unavailable attempts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: proof-pilot-${{ github.run_id }}
+          path: ${{ runner.temp }}/pilot-results
+          if-no-files-found: error
+          retention-days: 30

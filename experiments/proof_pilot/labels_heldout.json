@@ -1,0 +1,228 @@
+{
+  "heldout-81": {
+    "target_admitted": true,
+    "eligible_fact_ids": [
+      "f1",
+      "f2"
+    ],
+    "entailed": false,
+    "goal_supported": false,
+    "certificate_valid": true,
+    "authorized_use": false,
+    "why": "Both observations are admitted, but personP and personQ are different URNs. There is no shared binding for ?p, so the requested conclusion is not derived under these rules; it is not thereby refuted."
+  },
+  "heldout-82": {
+    "target_admitted": true,
+    "eligible_fact_ids": [
+      "f2"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "certificate_valid": true,
+    "authorized_use": true,
+    "why": "Revocation removes only f1 from admitted input. f2 independently supplies r2; the target has no dependency on the revoked claim. This is a valid alternative derivation, not reuse of f1's authority."
+  },
+  "heldout-83": {
+    "target_admitted": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": false,
+    "goal_supported": false,
+    "certificate_valid": true,
+    "authorized_use": false,
+    "why": "The unrelated audit observation is admitted, but neither recursive predicate has a seed. Positive Horn least-fixpoint derivation cannot invent one."
+  },
+  "heldout-84": {
+    "target_admitted": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "certificate_valid": true,
+    "authorized_use": true,
+    "why": "f1 seeds r1, which directly derives the goal. Cycling r2 adds no unsupported facts; a rule cycle is not the same as a claim-authority dependency cycle."
+  },
+  "heldout-85": {
+    "target_admitted": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "certificate_valid": true,
+    "authorized_use": true,
+    "why": "f1 enables r1, then r2, then r3. Input rule order does not remove this finite entailment."
+  },
+  "heldout-86": {
+    "target_admitted": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": false,
+    "goal_supported": false,
+    "certificate_valid": true,
+    "authorized_use": false,
+    "why": "No one value of ?x equals both entityA and entityB. Overwriting a variable binding would be an inference error."
+  },
+  "heldout-87": {
+    "target_admitted": true,
+    "eligible_fact_ids": [
+      "f1",
+      "f2",
+      "f3",
+      "f4"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "certificate_valid": true,
+    "authorized_use": true,
+    "why": "The c=company,p=person,l=list1 binding satisfies all three body patterns. The unrelated otherPerson/list2 observation neither blocks nor supplies the proof."
+  },
+  "heldout-88": {
+    "target_admitted": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "certificate_valid": true,
+    "authorized_use": true,
+    "why": "The ground triple binds ?x=record1 and ?p=capturedStatus. All head variables are body-bound, so the goal follows in the stated positive triple-rule profile."
+  },
+  "heldout-89": {
+    "target_admitted": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": false,
+    "goal_supported": false,
+    "certificate_valid": true,
+    "authorized_use": false,
+    "why": "Acme and acme are distinct exact URNs. A lexical lowercasing or label matcher would improperly manufacture the premise."
+  },
+  "heldout-90": {
+    "target_admitted": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "certificate_valid": true,
+    "authorized_use": true,
+    "why": "f1 is exactly the goal. An empty derivation list can be valid while the nonempty goal is supported by assertion. This must not be counted as a new rule-derived fact."
+  },
+  "heldout-91": {
+    "target_admitted": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "certificate_valid": true,
+    "authorized_use": true,
+    "why": "Applicability rejects now before valid_from, not equality. The exact-boundary premise and target are currently admitted."
+  },
+  "heldout-92": {
+    "target_admitted": false,
+    "eligible_fact_ids": [
+      "f2"
+    ],
+    "entailed": false,
+    "goal_supported": false,
+    "certificate_valid": true,
+    "authorized_use": false,
+    "why": "now>=valid_until excludes f1. The target's explicit dependency is consequently not governing. The audit record does not derive the review goal."
+  },
+  "heldout-93": {
+    "target_admitted": false,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "certificate_valid": true,
+    "authorized_use": false,
+    "why": "The environment-only fact is eligible and proves the atom, but the target's required public-demo repository is unknown. Logical derivation cannot supply scope authority."
+  },
+  "heldout-94": {
+    "target_admitted": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": false,
+    "goal_supported": false,
+    "certificate_valid": true,
+    "authorized_use": false,
+    "why": "The target and f1 allow model use, but f2 does not. Excluding f2 breaks the conjunctive derivation. A permissive target cannot widen a premise's audience."
+  },
+  "heldout-95": {
+    "target_admitted": true,
+    "eligible_fact_ids": [
+      "f1",
+      "f3",
+      "f4"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "certificate_valid": true,
+    "authorized_use": true,
+    "why": "f3 relies on f4 outside the conflicting pair and supersedes f2. f1 can govern, f2 is superseded, and the target's f1 dependency and r1 remain supported."
+  },
+  "heldout-96": {
+    "target_admitted": false,
+    "eligible_fact_ids": [
+      "f4"
+    ],
+    "entailed": false,
+    "goal_supported": false,
+    "certificate_valid": true,
+    "authorized_use": false,
+    "why": "f3 assumes f1, one endpoint of the dispute, so it cannot resolve f1 versus f2. Both endpoints lose governing effects, f3 loses its prerequisite, and the target cannot borrow f1's authority."
+  },
+  "heldout-97": {
+    "target_admitted": true,
+    "eligible_fact_ids": [
+      "f2"
+    ],
+    "entailed": false,
+    "goal_supported": false,
+    "certificate_valid": true,
+    "authorized_use": false,
+    "why": "The actual validator can resolve f1's current canonical attestation for target governance, so target admission is true. f1 is nevertheless not injected as a retrieved fact; only the audit record is available to r1, so the goal is not supported by this slice."
+  },
+  "heldout-98": {
+    "target_admitted": false,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "certificate_valid": true,
+    "authorized_use": false,
+    "why": "f1 remains eligible, and r1 still proves the goal. The exact target's authority receipt no longer validates, so neither a valid proof nor the source fact authorizes current use."
+  },
+  "heldout-99": {
+    "target_admitted": false,
+    "eligible_fact_ids": [
+      "f2"
+    ],
+    "entailed": false,
+    "goal_supported": false,
+    "certificate_valid": true,
+    "authorized_use": false,
+    "why": "The exact evidence file for f1 is absent, so its attestation no longer authorizes it. The target depends on f1 and also loses admission. The surviving audit record cannot derive the goal."
+  },
+  "heldout-100": {
+    "target_admitted": false,
+    "eligible_fact_ids": [
+      "f3"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "certificate_valid": true,
+    "authorized_use": false,
+    "why": "f1 and f2 have circular authority prerequisites and do not govern. Independent f3 supplies a valid proof of the atom, but the target explicitly depends on f1. Its authority cannot silently switch to f3."
+  }
+}
