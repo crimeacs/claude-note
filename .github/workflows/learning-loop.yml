@@ -27,6 +27,8 @@ jobs:
       - name: Record immutable preparation
         run: |
           mkdir -p "$RUNNER_TEMP/learning-results"
+          mkdir -p "$RUNNER_TEMP/public-empty-vault"
+          printf 'CLAUDE_NOTE_VAULT=%s\n' "$RUNNER_TEMP/public-empty-vault" >> "$GITHUB_ENV"
           git rev-parse HEAD > "$RUNNER_TEMP/learning-results/source-commit.txt"
           python3 --version > "$RUNNER_TEMP/learning-results/python.txt"
           node --version > "$RUNNER_TEMP/learning-results/node.txt"
