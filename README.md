@@ -144,6 +144,7 @@ what each number means: [docs/evals.md](docs/evals.md).
 An opt-in [captured-experience learning loop and public comparison](experiments/learning_curve/README.md)
 also tests whether model-extracted, consolidated lessons help later tasks compared with frozen
 memory and growing raw history. Its public study is separate from installed private-data workers.
+The [first measured study](docs/learning-loop-public-study-2026-10-30.md) did not pass the learning-benefit gate.
 
 ## Why recall finds things
 

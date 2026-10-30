@@ -2,6 +2,8 @@
 
 This experiment measures whether an explicit Claude Note learning loop helps later tasks under a fixed memory-context budget. It uses actual model actor and extractor calls on fictional public workflows. It does not enable installed capture/synthesis workers or use personal history.
 
+The [first completed study](../../docs/learning-loop-public-study-2026-10-30.md) measured 52% first-action transfer success for learned memory, 60% for raw history and 12% for frozen memory. The adoption gate failed; this loop remains experimental and opt-in.
+
 The reusable API is `claude_note.learning_loop.LearningLoop`. An explicit caller supplies an owned root, run/arm/scope identity and an extractor callback. Call `observe(task_id, task, actual_response, verifier_feedback)` after a real task, `learn(observation)` to extract proposed lessons, and `retrieve(next_task)` before the next task. The real capture parser, restrictive source lineage and mutation writer retain evidence. Consolidation records current capture and prior supplied memory revisions; superseded versions remain immutable. Scope, temporal cutoffs and exact evidence anchors constrain reuse. Proposed text is not verified semantic truth or authority.
 
 ## Frozen comparison
