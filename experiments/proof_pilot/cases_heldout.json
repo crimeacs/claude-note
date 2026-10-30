@@ -1,0 +1,1359 @@
+[
+  {
+    "id": "heldout-81",
+    "split": "heldout",
+    "category": "cross_subject_join",
+    "description": "A controller and a matched person have different exact identities.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:supplierA>",
+          "<urn:pilot:hasController>",
+          "<urn:pilot:personP>"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:personQ>",
+          "<urn:pilot:hasPotentialMatch>",
+          "<urn:pilot:list1>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:supplierA>",
+        "<urn:pilot:requiresHumanReview>",
+        "<urn:pilot:yes>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "rules": [
+      {
+        "id": "r1",
+        "body": [
+          [
+            "?c",
+            "<urn:pilot:hasController>",
+            "?p"
+          ],
+          [
+            "?p",
+            "<urn:pilot:hasPotentialMatch>",
+            "<urn:pilot:list1>"
+          ]
+        ],
+        "head": [
+          "?c",
+          "<urn:pilot:requiresHumanReview>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "heldout-82",
+    "split": "heldout",
+    "category": "alternative_valid_route",
+    "description": "A revoked premise has an independent accepted alternative leading to the same goal.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:registryConflict>",
+          "<urn:pilot:yes>"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:unresolvedIdentity>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:company>",
+        "<urn:pilot:requiresHumanReview>",
+        "<urn:pilot:yes>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [
+      {
+        "op": "revoke",
+        "id": "f1"
+      }
+    ],
+    "rules": [
+      {
+        "id": "r1",
+        "body": [
+          [
+            "?c",
+            "<urn:pilot:registryConflict>",
+            "<urn:pilot:yes>"
+          ]
+        ],
+        "head": [
+          "?c",
+          "<urn:pilot:requiresHumanReview>",
+          "<urn:pilot:yes>"
+        ]
+      },
+      {
+        "id": "r2",
+        "body": [
+          [
+            "?c",
+            "<urn:pilot:unresolvedIdentity>",
+            "<urn:pilot:yes>"
+          ]
+        ],
+        "head": [
+          "?c",
+          "<urn:pilot:requiresHumanReview>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "heldout-83",
+    "split": "heldout",
+    "category": "unseeded_horn_cycle",
+    "description": "Two mutually recursive rules have no matching admitted seed.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasAuditRecord>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:company>",
+        "<urn:pilot:queuedForReview>",
+        "<urn:pilot:yes>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "rules": [
+      {
+        "id": "r1",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:flaggedForReview>",
+            "<urn:pilot:yes>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:queuedForReview>",
+          "<urn:pilot:yes>"
+        ]
+      },
+      {
+        "id": "r2",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:queuedForReview>",
+            "<urn:pilot:yes>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:flaggedForReview>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "heldout-84",
+    "split": "heldout",
+    "category": "seeded_horn_cycle",
+    "description": "The same recursive rule shape now has a real admitted seed.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:flaggedForReview>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:company>",
+        "<urn:pilot:queuedForReview>",
+        "<urn:pilot:yes>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "rules": [
+      {
+        "id": "r1",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:flaggedForReview>",
+            "<urn:pilot:yes>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:queuedForReview>",
+          "<urn:pilot:yes>"
+        ]
+      },
+      {
+        "id": "r2",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:queuedForReview>",
+            "<urn:pilot:yes>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:flaggedForReview>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "heldout-85",
+    "split": "heldout",
+    "category": "multi_round_fixpoint",
+    "description": "Three reverse-ordered implications require more than one evaluation pass.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:isApplicant>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:company>",
+        "<urn:pilot:reviewPacketReady>",
+        "<urn:pilot:yes>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "rules": [
+      {
+        "id": "r3",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:reviewQueued>",
+            "<urn:pilot:yes>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:reviewPacketReady>",
+          "<urn:pilot:yes>"
+        ]
+      },
+      {
+        "id": "r2",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:needsReview>",
+            "<urn:pilot:yes>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:reviewQueued>",
+          "<urn:pilot:yes>"
+        ]
+      },
+      {
+        "id": "r1",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:isApplicant>",
+            "<urn:pilot:yes>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:needsReview>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "heldout-86",
+    "split": "heldout",
+    "category": "repeated_variable_consistency",
+    "description": "A non-reflexive relation must not match a reflexive body pattern.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:entityA>",
+          "<urn:pilot:linkedTo>",
+          "<urn:pilot:entityB>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:entityA>",
+        "<urn:pilot:hasReflexiveWitness>",
+        "<urn:pilot:yes>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "rules": [
+      {
+        "id": "r1",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:linkedTo>",
+            "?x"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:hasReflexiveWitness>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "heldout-87",
+    "split": "heldout",
+    "category": "three_way_join",
+    "description": "A three-way source join has one complete path and one distracting partial path.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasController>",
+          "<urn:pilot:person>"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:person>",
+          "<urn:pilot:hasPotentialMatch>",
+          "<urn:pilot:list1>"
+        ]
+      },
+      {
+        "id": "f3",
+        "atom": [
+          "<urn:pilot:list1>",
+          "<urn:pilot:requiresReviewUnder>",
+          "<urn:pilot:playbook1>"
+        ]
+      },
+      {
+        "id": "f4",
+        "atom": [
+          "<urn:pilot:otherPerson>",
+          "<urn:pilot:hasPotentialMatch>",
+          "<urn:pilot:list2>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:company>",
+        "<urn:pilot:requiresHumanReview>",
+        "<urn:pilot:yes>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "rules": [
+      {
+        "id": "r1",
+        "body": [
+          [
+            "?c",
+            "<urn:pilot:hasController>",
+            "?p"
+          ],
+          [
+            "?p",
+            "<urn:pilot:hasPotentialMatch>",
+            "?l"
+          ],
+          [
+            "?l",
+            "<urn:pilot:requiresReviewUnder>",
+            "<urn:pilot:playbook1>"
+          ]
+        ],
+        "head": [
+          "?c",
+          "<urn:pilot:requiresHumanReview>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "heldout-88",
+    "split": "heldout",
+    "category": "predicate_variable_binding",
+    "description": "The variable in predicate position is carried to object position in the conclusion.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:record1>",
+          "<urn:pilot:capturedStatus>",
+          "<urn:pilot:Flagged>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:record1>",
+        "<urn:pilot:observedPredicate>",
+        "<urn:pilot:capturedStatus>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "rules": [
+      {
+        "id": "r1",
+        "body": [
+          [
+            "?x",
+            "?p",
+            "<urn:pilot:Flagged>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:observedPredicate>",
+          "?p"
+        ]
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "heldout-89",
+    "split": "heldout",
+    "category": "case_sensitive_iri_identity",
+    "description": "Two differently cased URNs are not the same RDF term.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:Acme>",
+          "<urn:pilot:hasFlag>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:acme>",
+        "<urn:pilot:requiresHumanReview>",
+        "<urn:pilot:yes>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "rules": [
+      {
+        "id": "r1",
+        "body": [
+          [
+            "<urn:pilot:acme>",
+            "<urn:pilot:hasFlag>",
+            "<urn:pilot:yes>"
+          ]
+        ],
+        "head": [
+          "<urn:pilot:acme>",
+          "<urn:pilot:requiresHumanReview>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "heldout-90",
+    "split": "heldout",
+    "category": "asserted_goal_membership",
+    "description": "The goal is an admitted assertion and needs no derivation rule.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:requiresHumanReview>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:company>",
+        "<urn:pilot:requiresHumanReview>",
+        "<urn:pilot:yes>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "rules": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "heldout-91",
+    "split": "heldout",
+    "category": "valid_from_inclusive_boundary",
+    "description": "Both premise and target become valid at the exact fixed clock instant.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:record1>",
+          "<urn:pilot:isRegistryDocument>",
+          "<urn:pilot:yes>"
+        ],
+        "authority": "verified",
+        "valid_from": "2026-10-30T12:00:00+00:00"
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:record1>",
+        "<urn:pilot:isOfficialRecord>",
+        "<urn:pilot:yes>"
+      ],
+      "valid_from": "2026-10-30T12:00:00+00:00"
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "rules": [
+      {
+        "id": "r1",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:isRegistryDocument>",
+            "<urn:pilot:yes>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:isOfficialRecord>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "heldout-92",
+    "split": "heldout",
+    "category": "valid_until_exclusive_boundary",
+    "description": "A governing dependency expires exactly at now, while an unrelated record remains.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasCurrentFlag>",
+          "<urn:pilot:yes>"
+        ],
+        "valid_until": "2026-10-30T12:00:00+00:00"
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasAuditRecord>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:company>",
+        "<urn:pilot:requiresHumanReview>",
+        "<urn:pilot:yes>"
+      ],
+      "depends_on": [
+        "f1"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "rules": [
+      {
+        "id": "r1",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:hasCurrentFlag>",
+            "<urn:pilot:yes>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:requiresHumanReview>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "heldout-93",
+    "split": "heldout",
+    "category": "unknown_required_repository",
+    "description": "Facts need only the known environment; target requires a repository the request does not establish.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasFlag>",
+          "<urn:pilot:yes>"
+        ],
+        "scope": {
+          "environment": "test"
+        }
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:company>",
+        "<urn:pilot:requiresHumanReview>",
+        "<urn:pilot:yes>"
+      ]
+    },
+    "context": {
+      "repository": "",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "rules": [
+      {
+        "id": "r1",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:hasFlag>",
+            "<urn:pilot:yes>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:requiresHumanReview>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "heldout-94",
+    "split": "heldout",
+    "category": "premise_audience_intersection",
+    "description": "The requested model audience may read one required premise but not the second.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasFlag>",
+          "<urn:pilot:yes>"
+        ],
+        "audiences": [
+          "host",
+          "model"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasReviewedIdentity>",
+          "<urn:pilot:yes>"
+        ],
+        "audiences": [
+          "host"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:company>",
+        "<urn:pilot:requiresHumanReview>",
+        "<urn:pilot:yes>"
+      ],
+      "audiences": [
+        "host",
+        "model"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "model"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "rules": [
+      {
+        "id": "r1",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:hasFlag>",
+            "<urn:pilot:yes>"
+          ],
+          [
+            "?x",
+            "<urn:pilot:hasReviewedIdentity>",
+            "<urn:pilot:yes>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:requiresHumanReview>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "heldout-95",
+    "split": "heldout",
+    "category": "independent_conflict_resolution",
+    "description": "An independent correction supersedes one side of a conflict.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasFlag>",
+          "<urn:pilot:yes>"
+        ],
+        "contradicts": [
+          "f2"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasOpposedFlag>",
+          "<urn:pilot:yes>"
+        ],
+        "contradicts": [
+          "f1"
+        ]
+      },
+      {
+        "id": "f3",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasIndependentCorrection>",
+          "<urn:pilot:yes>"
+        ],
+        "supersedes": [
+          "f2"
+        ],
+        "depends_on": [
+          "f4"
+        ]
+      },
+      {
+        "id": "f4",
+        "atom": [
+          "<urn:pilot:registryRecord>",
+          "<urn:pilot:isCaptured>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:company>",
+        "<urn:pilot:requiresHumanReview>",
+        "<urn:pilot:yes>"
+      ],
+      "depends_on": [
+        "f1"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "rules": [
+      {
+        "id": "r1",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:hasFlag>",
+            "<urn:pilot:yes>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:requiresHumanReview>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "heldout-96",
+    "split": "heldout",
+    "category": "circular_conflict_resolution",
+    "description": "The same correction claim now depends on a disputed endpoint.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasFlag>",
+          "<urn:pilot:yes>"
+        ],
+        "contradicts": [
+          "f2"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasOpposedFlag>",
+          "<urn:pilot:yes>"
+        ],
+        "contradicts": [
+          "f1"
+        ]
+      },
+      {
+        "id": "f3",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasDependentCorrection>",
+          "<urn:pilot:yes>"
+        ],
+        "supersedes": [
+          "f2"
+        ],
+        "depends_on": [
+          "f1"
+        ]
+      },
+      {
+        "id": "f4",
+        "atom": [
+          "<urn:pilot:registryRecord>",
+          "<urn:pilot:isCaptured>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:company>",
+        "<urn:pilot:requiresHumanReview>",
+        "<urn:pilot:yes>"
+      ],
+      "depends_on": [
+        "f1"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "rules": [
+      {
+        "id": "r1",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:hasFlag>",
+            "<urn:pilot:yes>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:requiresHumanReview>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "heldout-97",
+    "split": "heldout",
+    "category": "nonretrieved_governing_premise",
+    "description": "A canonical dependency remains valid but is absent from the retrieved reasoning slice.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasFlag>",
+          "<urn:pilot:yes>"
+        ],
+        "retrieved": false
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasAuditRecord>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:company>",
+        "<urn:pilot:requiresHumanReview>",
+        "<urn:pilot:yes>"
+      ],
+      "depends_on": [
+        "f1"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "rules": [
+      {
+        "id": "r1",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:hasFlag>",
+            "<urn:pilot:yes>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:requiresHumanReview>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "heldout-98",
+    "split": "heldout",
+    "category": "tampered_target_receipt",
+    "description": "The facts still prove the atom after the target's detached receipt is tampered.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasFlag>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:company>",
+        "<urn:pilot:requiresHumanReview>",
+        "<urn:pilot:yes>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [
+      {
+        "op": "tamper_receipt",
+        "id": "goal"
+      }
+    ],
+    "rules": [
+      {
+        "id": "r1",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:hasFlag>",
+            "<urn:pilot:yes>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:requiresHumanReview>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "heldout-99",
+    "split": "heldout",
+    "category": "deleted_evidence_dependency",
+    "description": "The source file backing a required governing dependency is deleted.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasFlag>",
+          "<urn:pilot:yes>"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasAuditRecord>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:company>",
+        "<urn:pilot:requiresHumanReview>",
+        "<urn:pilot:yes>"
+      ],
+      "depends_on": [
+        "f1"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [
+      {
+        "op": "delete_evidence",
+        "id": "f1"
+      }
+    ],
+    "rules": [
+      {
+        "id": "r1",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:hasFlag>",
+            "<urn:pilot:yes>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:requiresHumanReview>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "heldout-100",
+    "split": "heldout",
+    "category": "claim_governance_cycle",
+    "description": "An independent source proves the same atom but cannot validate a target tied to cyclic claims.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasFlag>",
+          "<urn:pilot:yes>"
+        ],
+        "depends_on": [
+          "f2"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasCyclePartner>",
+          "<urn:pilot:yes>"
+        ],
+        "depends_on": [
+          "f1"
+        ]
+      },
+      {
+        "id": "f3",
+        "atom": [
+          "<urn:pilot:company>",
+          "<urn:pilot:hasFlag>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:company>",
+        "<urn:pilot:requiresHumanReview>",
+        "<urn:pilot:yes>"
+      ],
+      "depends_on": [
+        "f1"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "rules": [
+      {
+        "id": "r1",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:hasFlag>",
+            "<urn:pilot:yes>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:requiresHumanReview>",
+          "<urn:pilot:yes>"
+        ]
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  }
+]

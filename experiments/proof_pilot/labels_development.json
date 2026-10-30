@@ -1,0 +1,855 @@
+{
+  "dev-001": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "One admitted source entails one conclusion."
+  },
+  "dev-002": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "A conclusion of the first rule is the second rule's premise."
+  },
+  "dev-003": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1",
+      "f2"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "Two independent properties of one subject jointly establish review."
+  },
+  "dev-004": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1",
+      "f2",
+      "f3"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "A three-way join requires all three independently admitted facts."
+  },
+  "dev-005": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1",
+      "f2"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "The account on the transfer must be the same account with a flag."
+  },
+  "dev-006": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1",
+      "f2",
+      "f3"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "Three ancestor links yield a recursive transitive conclusion."
+  },
+  "dev-007": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "A supplied symmetric relation permits reversing a known relation."
+  },
+  "dev-008": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1",
+      "f2"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "Two edges entail a transitive edge, with no equality shortcut."
+  },
+  "dev-009": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1",
+      "f2"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "Explicit type and class relation derive a wider type."
+  },
+  "dev-010": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "The inverse rule preserves subject/object identity."
+  },
+  "dev-011": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1",
+      "f2"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "A predicate variable is bound consistently in a two-body rule."
+  },
+  "dev-012": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "A self relation satisfies the repeated-variable pattern."
+  },
+  "dev-013": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "A fully ground rule head is allowed under the supplied rule."
+  },
+  "dev-014": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "A bound source object may appear in the conclusion."
+  },
+  "dev-015": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1",
+      "f2"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "Duplicate source facts retain two claims but one logical triple."
+  },
+  "dev-016": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1",
+      "f2"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "Either of two proof paths may establish the same goal."
+  },
+  "dev-017": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1",
+      "f2"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "An unrelated admitted source must not change the result."
+  },
+  "dev-018": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "An inapplicable rule must not manufacture an unrelated conclusion."
+  },
+  "dev-019": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "A fully ground premise and conclusion can be checked."
+  },
+  "dev-020": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "An exact admitted goal needs no inference step."
+  },
+  "dev-021": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "A seeded positive cycle can derive the other state."
+  },
+  "dev-022": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "An asserted goal stays established when a rule points back to itself."
+  },
+  "dev-023": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "Circular rules alone establish neither member."
+  },
+  "dev-024": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "A two-premise rule cannot fire with only one premise."
+  },
+  "dev-025": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1",
+      "f2"
+    ],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "Facts about different accounts do not satisfy one joined variable."
+  },
+  "dev-026": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "An edge does not entail its reverse without a rule."
+  },
+  "dev-027": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "Two unequal terms cannot satisfy a repeated variable."
+  },
+  "dev-028": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "A valid rule about another predicate does not prove the requested goal."
+  },
+  "dev-029": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "No facts and a positive rule do not establish the goal."
+  },
+  "dev-030": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "The chain stops before the requested final state."
+  },
+  "dev-031": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": false,
+    "why": "Target expired before the evaluation time."
+  },
+  "dev-032": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": false,
+    "why": "valid_until is exclusive at the exact evaluation instant."
+  },
+  "dev-033": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "One second before expiry is within the target validity window."
+  },
+  "dev-034": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": false,
+    "why": "Target's validity window has not begun."
+  },
+  "dev-035": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "valid_from is inclusive at the exact evaluation instant."
+  },
+  "dev-036": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": false,
+    "why": "A target for another repository is inapplicable."
+  },
+  "dev-037": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": false,
+    "why": "A production target does not apply to test."
+  },
+  "dev-038": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": false,
+    "why": "Absent required repository context admits neither source nor target."
+  },
+  "dev-039": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": false,
+    "why": "Absent required environment context admits neither source nor target."
+  },
+  "dev-040": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": false,
+    "why": "A host request cannot borrow a model-only target."
+  },
+  "dev-041": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "A host+model request requires both audiences on every used claim."
+  },
+  "dev-042": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "Matching host+model labels satisfy the applicability contract."
+  },
+  "dev-043": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "An expired premise is excluded before proof generation."
+  },
+  "dev-044": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "A future premise is excluded before proof generation."
+  },
+  "dev-045": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "A premise from another repository cannot support this goal."
+  },
+  "dev-046": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "A premise from another environment cannot support this goal."
+  },
+  "dev-047": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "Authored approved text without a receipt is not a premise."
+  },
+  "dev-048": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "Changed source bytes invalidate the premise receipt."
+  },
+  "dev-049": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "Deleted source evidence invalidates the premise receipt."
+  },
+  "dev-050": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "Edited canonical claim bytes cannot borrow the old receipt."
+  },
+  "dev-051": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "Deleted canonical claim removes its authority."
+  },
+  "dev-052": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "A changed receipt cannot pass its detached HMAC."
+  },
+  "dev-053": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "A missing receipt confers no authority."
+  },
+  "dev-054": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "Explicit revocation removes premise authority."
+  },
+  "dev-055": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": false,
+    "why": "Replacing the key invalidates both old receipts."
+  },
+  "dev-056": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": false,
+    "why": "A logically supported target still needs unchanged attestation evidence."
+  },
+  "dev-057": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": false,
+    "why": "An attested target depending on an absent claim is inapplicable."
+  },
+  "dev-058": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "An applicable attested premise can govern a dependent target."
+  },
+  "dev-059": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": false,
+    "why": "An expired premise cannot govern the dependent target."
+  },
+  "dev-060": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": false,
+    "why": "Circular dependencies invalidate source and target governance."
+  },
+  "dev-061": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "An unresolved contradiction invalidates both otherwise attested premises."
+  },
+  "dev-062": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f2"
+    ],
+    "entailed": false,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "An applicable replacement demotes the old premise."
+  },
+  "dev-063": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": false,
+    "why": "An attested superseded target cannot be used."
+  },
+  "dev-064": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": false,
+    "why": "An observed target without a detached receipt remains observed."
+  },
+  "dev-065": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": false,
+    "why": "A proposed target without a receipt remains proposed."
+  },
+  "dev-066": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": false,
+    "why": "A supported goal with a deleted target receipt is not admitted."
+  },
+  "dev-067": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": false,
+    "why": "A supported goal with a tampered target receipt is not admitted."
+  },
+  "dev-068": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": false,
+    "why": "A receipt alone cannot retain a deleted target's authority."
+  },
+  "dev-069": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "Deleting irrelevant evidence must not block an independent valid proof."
+  },
+  "dev-070": {
+    "authorized_use": true,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f2"
+    ],
+    "entailed": true,
+    "goal_supported": true,
+    "target_admitted": true,
+    "why": "One remaining valid proof path survives revocation of another."
+  },
+  "dev-071": {
+    "authorized_use": false,
+    "certificate_valid": false,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "A step referring to a nonexistent rule is rejected."
+  },
+  "dev-072": {
+    "authorized_use": false,
+    "certificate_valid": false,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "A variable binding inconsistent with the premises is rejected."
+  },
+  "dev-073": {
+    "authorized_use": false,
+    "certificate_valid": false,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "An unlicensed conclusion cannot borrow a valid step."
+  },
+  "dev-074": {
+    "authorized_use": false,
+    "certificate_valid": false,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "An unstated premise cannot be cited by a step."
+  },
+  "dev-075": {
+    "authorized_use": false,
+    "certificate_valid": false,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "An incomplete step is not a valid derivation."
+  },
+  "dev-076": {
+    "authorized_use": false,
+    "certificate_valid": false,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "A premise established only by a later step is not established yet."
+  },
+  "dev-077": {
+    "authorized_use": false,
+    "certificate_valid": false,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "A forged asserted goal cannot change the expected admitted snapshot."
+  },
+  "dev-078": {
+    "authorized_use": false,
+    "certificate_valid": false,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "A swapped rule table cannot change the approved rules snapshot."
+  },
+  "dev-079": {
+    "authorized_use": false,
+    "certificate_valid": false,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "An artifact for another target cannot satisfy the request."
+  },
+  "dev-080": {
+    "authorized_use": false,
+    "certificate_valid": true,
+    "eligible_fact_ids": [
+      "f1"
+    ],
+    "entailed": true,
+    "goal_supported": false,
+    "target_admitted": true,
+    "why": "A valid empty proof does not establish a derived target."
+  }
+}

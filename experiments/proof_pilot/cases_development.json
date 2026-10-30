@@ -1,0 +1,4661 @@
+[
+  {
+    "id": "dev-001",
+    "split": "development",
+    "category": "one-hop",
+    "description": "One admitted source entails one conclusion.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-002",
+    "split": "development",
+    "category": "two-hop",
+    "description": "A conclusion of the first rule is the second rule's premise.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "middle",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:middle>"
+        ]
+      },
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:middle>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-003",
+    "split": "development",
+    "category": "conjunction",
+    "description": "Two independent properties of one subject jointly establish review.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:risk>",
+          "<urn:pilot:high>"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:amount>",
+          "<urn:pilot:large>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "review",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:risk>",
+            "<urn:pilot:high>"
+          ],
+          [
+            "?x",
+            "<urn:pilot:amount>",
+            "<urn:pilot:large>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:review>",
+          "<urn:pilot:required>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:review>",
+        "<urn:pilot:required>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-004",
+    "split": "development",
+    "category": "three-premise",
+    "description": "A three-way join requires all three independently admitted facts.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:risk>",
+          "<urn:pilot:high>"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:amount>",
+          "<urn:pilot:large>"
+        ]
+      },
+      {
+        "id": "f3",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:country>",
+          "<urn:pilot:external>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "review",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:risk>",
+            "<urn:pilot:high>"
+          ],
+          [
+            "?x",
+            "<urn:pilot:amount>",
+            "<urn:pilot:large>"
+          ],
+          [
+            "?x",
+            "<urn:pilot:country>",
+            "<urn:pilot:external>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:review>",
+          "<urn:pilot:required>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:review>",
+        "<urn:pilot:required>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-005",
+    "split": "development",
+    "category": "relational-join",
+    "description": "The account on the transfer must be the same account with a flag.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:transfer>",
+          "<urn:pilot:account>",
+          "<urn:pilot:acct>"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:acct>",
+          "<urn:pilot:flag>",
+          "<urn:pilot:watch>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "review",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:account>",
+            "?a"
+          ],
+          [
+            "?a",
+            "<urn:pilot:flag>",
+            "<urn:pilot:watch>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:review>",
+          "<urn:pilot:required>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:transfer>",
+        "<urn:pilot:review>",
+        "<urn:pilot:required>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-006",
+    "split": "development",
+    "category": "recursive-chain",
+    "description": "Three ancestor links yield a recursive transitive conclusion.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:a>",
+          "<urn:pilot:parent>",
+          "<urn:pilot:b>"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:b>",
+          "<urn:pilot:parent>",
+          "<urn:pilot:c>"
+        ]
+      },
+      {
+        "id": "f3",
+        "atom": [
+          "<urn:pilot:c>",
+          "<urn:pilot:parent>",
+          "<urn:pilot:d>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "base",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:parent>",
+            "?y"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:ancestor>",
+          "?y"
+        ]
+      },
+      {
+        "id": "step",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:ancestor>",
+            "?y"
+          ],
+          [
+            "?y",
+            "<urn:pilot:parent>",
+            "?z"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:ancestor>",
+          "?z"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:a>",
+        "<urn:pilot:ancestor>",
+        "<urn:pilot:d>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-007",
+    "split": "development",
+    "category": "symmetry",
+    "description": "A supplied symmetric relation permits reversing a known relation.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:a>",
+          "<urn:pilot:peer>",
+          "<urn:pilot:b>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "sym",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:peer>",
+            "?y"
+          ]
+        ],
+        "head": [
+          "?y",
+          "<urn:pilot:peer>",
+          "?x"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:b>",
+        "<urn:pilot:peer>",
+        "<urn:pilot:a>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-008",
+    "split": "development",
+    "category": "transitivity",
+    "description": "Two edges entail a transitive edge, with no equality shortcut.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:a>",
+          "<urn:pilot:before>",
+          "<urn:pilot:b>"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:b>",
+          "<urn:pilot:before>",
+          "<urn:pilot:c>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "trans",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:before>",
+            "?y"
+          ],
+          [
+            "?y",
+            "<urn:pilot:before>",
+            "?z"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:before>",
+          "?z"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:a>",
+        "<urn:pilot:before>",
+        "<urn:pilot:c>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-009",
+    "split": "development",
+    "category": "classification-chain",
+    "description": "Explicit type and class relation derive a wider type.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:type>",
+          "<urn:pilot:highRisk>"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:highRisk>",
+          "<urn:pilot:subclass>",
+          "<urn:pilot:reviewable>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "sub",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:type>",
+            "?c"
+          ],
+          [
+            "?c",
+            "<urn:pilot:subclass>",
+            "?d"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:type>",
+          "?d"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:type>",
+        "<urn:pilot:reviewable>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-010",
+    "split": "development",
+    "category": "inverse",
+    "description": "The inverse rule preserves subject/object identity.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:alice>",
+          "<urn:pilot:owns>",
+          "<urn:pilot:account>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "inverse",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:owns>",
+            "?y"
+          ]
+        ],
+        "head": [
+          "?y",
+          "<urn:pilot:ownedBy>",
+          "?x"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:account>",
+        "<urn:pilot:ownedBy>",
+        "<urn:pilot:alice>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-011",
+    "split": "development",
+    "category": "variable-predicate",
+    "description": "A predicate variable is bound consistently in a two-body rule.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:flag>",
+          "<urn:pilot:watch>"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:flag>",
+          "<urn:pilot:kind>",
+          "<urn:pilot:signal>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "signal",
+        "body": [
+          [
+            "?x",
+            "?p",
+            "<urn:pilot:watch>"
+          ],
+          [
+            "?p",
+            "<urn:pilot:kind>",
+            "<urn:pilot:signal>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:review>",
+          "<urn:pilot:required>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:review>",
+        "<urn:pilot:required>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-012",
+    "split": "development",
+    "category": "repeated-variable",
+    "description": "A self relation satisfies the repeated-variable pattern.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:same>",
+          "<urn:pilot:item>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "self",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:same>",
+            "?x"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-013",
+    "split": "development",
+    "category": "constant-head",
+    "description": "A fully ground rule head is allowed under the supplied rule.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "constant",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-014",
+    "split": "development",
+    "category": "copied-object",
+    "description": "A bound source object may appear in the conclusion.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:assigned>",
+          "<urn:pilot:desk>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "copy",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:assigned>",
+            "?y"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:reviewDesk>",
+          "?y"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:reviewDesk>",
+        "<urn:pilot:desk>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-015",
+    "split": "development",
+    "category": "duplicate-assertion",
+    "description": "Duplicate source facts retain two claims but one logical triple.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-016",
+    "split": "development",
+    "category": "alternative-paths",
+    "description": "Either of two proof paths may establish the same goal.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:flag>",
+          "<urn:pilot:watch>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "seed",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      },
+      {
+        "id": "flag",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:flag>",
+            "<urn:pilot:watch>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-017",
+    "split": "development",
+    "category": "irrelevant-fact",
+    "description": "An unrelated admitted source must not change the result.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:other>",
+          "<urn:pilot:state>",
+          "<urn:pilot:blocked>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-018",
+    "split": "development",
+    "category": "irrelevant-rule",
+    "description": "An inapplicable rule must not manufacture an unrelated conclusion.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      },
+      {
+        "id": "other",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:risk>",
+            "<urn:pilot:high>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:review>",
+          "<urn:pilot:required>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-019",
+    "split": "development",
+    "category": "ground-rule",
+    "description": "A fully ground premise and conclusion can be checked.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ground",
+        "body": [
+          [
+            "<urn:pilot:item>",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-020",
+    "split": "development",
+    "category": "asserted-goal",
+    "description": "An exact admitted goal needs no inference step.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "rules": [],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-021",
+    "split": "development",
+    "category": "seeded-cycle",
+    "description": "A seeded positive cycle can derive the other state.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "forth",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      },
+      {
+        "id": "back",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:ready>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-022",
+    "split": "development",
+    "category": "asserted-goal-cycle",
+    "description": "An asserted goal stays established when a rule points back to itself.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "loop",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:ready>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-023",
+    "split": "development",
+    "category": "unseeded-cycle",
+    "description": "Circular rules alone establish neither member.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:other>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "forth",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      },
+      {
+        "id": "back",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:ready>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-024",
+    "split": "development",
+    "category": "missing-conjunct",
+    "description": "A two-premise rule cannot fire with only one premise.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "join",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ],
+          [
+            "?x",
+            "<urn:pilot:risk>",
+            "<urn:pilot:high>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-025",
+    "split": "development",
+    "category": "disconnected-join",
+    "description": "Facts about different accounts do not satisfy one joined variable.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:transfer>",
+          "<urn:pilot:account>",
+          "<urn:pilot:acct1>"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:acct2>",
+          "<urn:pilot:flag>",
+          "<urn:pilot:watch>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "join",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:account>",
+            "?a"
+          ],
+          [
+            "?a",
+            "<urn:pilot:flag>",
+            "<urn:pilot:watch>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:transfer>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-026",
+    "split": "development",
+    "category": "directionality",
+    "description": "An edge does not entail its reverse without a rule.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:a>",
+          "<urn:pilot:before>",
+          "<urn:pilot:b>"
+        ]
+      }
+    ],
+    "rules": [],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:b>",
+        "<urn:pilot:before>",
+        "<urn:pilot:a>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-027",
+    "split": "development",
+    "category": "repeated-variable-mismatch",
+    "description": "Two unequal terms cannot satisfy a repeated variable.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:a>",
+          "<urn:pilot:same>",
+          "<urn:pilot:b>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "self",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:same>",
+            "?x"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:a>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-028",
+    "split": "development",
+    "category": "unreachable-head",
+    "description": "A valid rule about another predicate does not prove the requested goal.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "other",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:middle>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-029",
+    "split": "development",
+    "category": "empty-facts",
+    "description": "No facts and a positive rule do not establish the goal.",
+    "facts": [],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-030",
+    "split": "development",
+    "category": "partial-chain",
+    "description": "The chain stops before the requested final state.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "middle",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:middle>"
+        ]
+      },
+      {
+        "id": "end",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:missing>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-031",
+    "split": "development",
+    "category": "expired-target",
+    "description": "Target expired before the evaluation time.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ],
+      "valid_until": "2026-10-29T12:00:00Z"
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-032",
+    "split": "development",
+    "category": "expiry-boundary",
+    "description": "valid_until is exclusive at the exact evaluation instant.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ],
+      "valid_until": "2026-10-30T12:00:00Z"
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-033",
+    "split": "development",
+    "category": "before-expiry",
+    "description": "One second before expiry is within the target validity window.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ],
+      "valid_until": "2026-10-30T12:00:01Z"
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-034",
+    "split": "development",
+    "category": "future-target",
+    "description": "Target's validity window has not begun.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ],
+      "valid_from": "2026-10-30T12:00:01Z"
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-035",
+    "split": "development",
+    "category": "valid-from-boundary",
+    "description": "valid_from is inclusive at the exact evaluation instant.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ],
+      "valid_from": "2026-10-30T12:00:00Z"
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-036",
+    "split": "development",
+    "category": "target-repository",
+    "description": "A target for another repository is inapplicable.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ],
+      "scope": {
+        "repository": "another",
+        "environment": "test"
+      }
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-037",
+    "split": "development",
+    "category": "target-environment",
+    "description": "A production target does not apply to test.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ],
+      "scope": {
+        "repository": "public-demo",
+        "environment": "prod"
+      }
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-038",
+    "split": "development",
+    "category": "missing-repository",
+    "description": "Absent required repository context admits neither source nor target.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-039",
+    "split": "development",
+    "category": "missing-environment",
+    "description": "Absent required environment context admits neither source nor target.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-040",
+    "split": "development",
+    "category": "target-audience",
+    "description": "A host request cannot borrow a model-only target.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ],
+      "audiences": [
+        "model"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-041",
+    "split": "development",
+    "category": "audience-intersection",
+    "description": "A host+model request requires both audiences on every used claim.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ],
+      "audiences": [
+        "host",
+        "model"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host",
+        "model"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-042",
+    "split": "development",
+    "category": "allowed-audiences",
+    "description": "Matching host+model labels satisfy the applicability contract.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ],
+        "audiences": [
+          "host",
+          "model"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ],
+      "audiences": [
+        "host",
+        "model"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host",
+        "model"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-043",
+    "split": "development",
+    "category": "expired-premise",
+    "description": "An expired premise is excluded before proof generation.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ],
+        "valid_until": "2026-10-30T12:00:00Z"
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-044",
+    "split": "development",
+    "category": "future-premise",
+    "description": "A future premise is excluded before proof generation.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ],
+        "valid_from": "2026-10-31T00:00:00Z"
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-045",
+    "split": "development",
+    "category": "cross-repository-premise",
+    "description": "A premise from another repository cannot support this goal.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ],
+        "scope": {
+          "repository": "another",
+          "environment": "test"
+        }
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-046",
+    "split": "development",
+    "category": "cross-environment-premise",
+    "description": "A premise from another environment cannot support this goal.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ],
+        "scope": {
+          "repository": "public-demo",
+          "environment": "prod"
+        }
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-047",
+    "split": "development",
+    "category": "unattested-premise",
+    "description": "Authored approved text without a receipt is not a premise.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ],
+        "authority": "none",
+        "status": "approved"
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-048",
+    "split": "development",
+    "category": "changed-evidence",
+    "description": "Changed source bytes invalidate the premise receipt.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [
+      {
+        "op": "tamper_evidence",
+        "id": "f1"
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-049",
+    "split": "development",
+    "category": "deleted-evidence",
+    "description": "Deleted source evidence invalidates the premise receipt.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [
+      {
+        "op": "delete_evidence",
+        "id": "f1"
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-050",
+    "split": "development",
+    "category": "changed-canonical",
+    "description": "Edited canonical claim bytes cannot borrow the old receipt.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [
+      {
+        "op": "tamper_canonical",
+        "id": "f1"
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-051",
+    "split": "development",
+    "category": "deleted-canonical",
+    "description": "Deleted canonical claim removes its authority.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [
+      {
+        "op": "delete_canonical",
+        "id": "f1"
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-052",
+    "split": "development",
+    "category": "tampered-receipt",
+    "description": "A changed receipt cannot pass its detached HMAC.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [
+      {
+        "op": "tamper_receipt",
+        "id": "f1"
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-053",
+    "split": "development",
+    "category": "deleted-receipt",
+    "description": "A missing receipt confers no authority.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [
+      {
+        "op": "delete_receipt",
+        "id": "f1"
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-054",
+    "split": "development",
+    "category": "revoked-premise",
+    "description": "Explicit revocation removes premise authority.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [
+      {
+        "op": "revoke",
+        "id": "f1"
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-055",
+    "split": "development",
+    "category": "replaced-key",
+    "description": "Replacing the key invalidates both old receipts.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [
+      {
+        "op": "replace_key",
+        "id": "f1"
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-056",
+    "split": "development",
+    "category": "changed-target-evidence",
+    "description": "A logically supported target still needs unchanged attestation evidence.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [
+      {
+        "op": "tamper_evidence",
+        "id": "goal"
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-057",
+    "split": "development",
+    "category": "missing-dependency",
+    "description": "An attested target depending on an absent claim is inapplicable.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ],
+      "depends_on": [
+        "missing"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-058",
+    "split": "development",
+    "category": "governing-dependency",
+    "description": "An applicable attested premise can govern a dependent target.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ],
+      "depends_on": [
+        "f1"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-059",
+    "split": "development",
+    "category": "invalid-dependency",
+    "description": "An expired premise cannot govern the dependent target.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ],
+        "valid_until": "2026-10-30T12:00:00Z"
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ],
+      "depends_on": [
+        "f1"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-060",
+    "split": "development",
+    "category": "dependency-cycle",
+    "description": "Circular dependencies invalidate source and target governance.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ],
+        "depends_on": [
+          "goal"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ],
+      "depends_on": [
+        "f1"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-061",
+    "split": "development",
+    "category": "conflicting-premises",
+    "description": "An unresolved contradiction invalidates both otherwise attested premises.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ],
+        "contradicts": [
+          "f2"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:other>",
+          "<urn:pilot:state>",
+          "<urn:pilot:different>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-062",
+    "split": "development",
+    "category": "superseded-premise",
+    "description": "An applicable replacement demotes the old premise.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:other>",
+          "<urn:pilot:state>",
+          "<urn:pilot:different>"
+        ],
+        "supersedes": [
+          "f1"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-063",
+    "split": "development",
+    "category": "superseded-target-status",
+    "description": "An attested superseded target cannot be used.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ],
+      "status": "superseded"
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-064",
+    "split": "development",
+    "category": "observed-not-attested",
+    "description": "An observed target without a detached receipt remains observed.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ],
+      "authority": "none",
+      "status": "observed"
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-065",
+    "split": "development",
+    "category": "proposed-not-attested",
+    "description": "A proposed target without a receipt remains proposed.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ],
+      "authority": "none",
+      "status": "proposed"
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-066",
+    "split": "development",
+    "category": "missing-target-receipt",
+    "description": "A supported goal with a deleted target receipt is not admitted.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [
+      {
+        "op": "delete_receipt",
+        "id": "goal"
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-067",
+    "split": "development",
+    "category": "tampered-target-receipt",
+    "description": "A supported goal with a tampered target receipt is not admitted.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [
+      {
+        "op": "tamper_receipt",
+        "id": "goal"
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-068",
+    "split": "development",
+    "category": "missing-target-canonical",
+    "description": "A receipt alone cannot retain a deleted target's authority.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [
+      {
+        "op": "delete_canonical",
+        "id": "goal"
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-069",
+    "split": "development",
+    "category": "irrelevant-invalid-premise",
+    "description": "Deleting irrelevant evidence must not block an independent valid proof.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:other>",
+          "<urn:pilot:state>",
+          "<urn:pilot:different>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [
+      {
+        "op": "delete_evidence",
+        "id": "f2"
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-070",
+    "split": "development",
+    "category": "alternative-after-revocation",
+    "description": "One remaining valid proof path survives revocation of another.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      },
+      {
+        "id": "f2",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:flag>",
+          "<urn:pilot:watch>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "seed",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      },
+      {
+        "id": "flag",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:flag>",
+            "<urn:pilot:watch>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [
+      {
+        "op": "revoke",
+        "id": "f1"
+      }
+    ],
+    "proof": {
+      "mutation": "none"
+    }
+  },
+  {
+    "id": "dev-071",
+    "split": "development",
+    "category": "certificate-rule_index_out_of_range",
+    "description": "A step referring to a nonexistent rule is rejected.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "rule_index_out_of_range"
+    }
+  },
+  {
+    "id": "dev-072",
+    "split": "development",
+    "category": "certificate-binding_value_changed",
+    "description": "A variable binding inconsistent with the premises is rejected.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "binding_value_changed"
+    }
+  },
+  {
+    "id": "dev-073",
+    "split": "development",
+    "category": "certificate-conclusion_changed",
+    "description": "An unlicensed conclusion cannot borrow a valid step.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "conclusion_changed"
+    }
+  },
+  {
+    "id": "dev-074",
+    "split": "development",
+    "category": "certificate-premise_changed",
+    "description": "An unstated premise cannot be cited by a step.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "premise_changed"
+    }
+  },
+  {
+    "id": "dev-075",
+    "split": "development",
+    "category": "certificate-truncated_step",
+    "description": "An incomplete step is not a valid derivation.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "truncated_step"
+    }
+  },
+  {
+    "id": "dev-076",
+    "split": "development",
+    "category": "certificate-forward-reference",
+    "description": "A premise established only by a later step is not established yet.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "middle",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:middle>"
+        ]
+      },
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:middle>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "forward_reference"
+    }
+  },
+  {
+    "id": "dev-077",
+    "split": "development",
+    "category": "binding-asserted_injection",
+    "description": "A forged asserted goal cannot change the expected admitted snapshot.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "asserted_injection"
+    }
+  },
+  {
+    "id": "dev-078",
+    "split": "development",
+    "category": "binding-rules_replacement",
+    "description": "A swapped rule table cannot change the approved rules snapshot.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "rules_replacement"
+    }
+  },
+  {
+    "id": "dev-079",
+    "split": "development",
+    "category": "binding-goal_binding_changed",
+    "description": "An artifact for another target cannot satisfy the request.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "goal_binding_changed"
+    }
+  },
+  {
+    "id": "dev-080",
+    "split": "development",
+    "category": "certificate-goal-omitted",
+    "description": "A valid empty proof does not establish a derived target.",
+    "facts": [
+      {
+        "id": "f1",
+        "atom": [
+          "<urn:pilot:item>",
+          "<urn:pilot:state>",
+          "<urn:pilot:seed>"
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "ready",
+        "body": [
+          [
+            "?x",
+            "<urn:pilot:state>",
+            "<urn:pilot:seed>"
+          ]
+        ],
+        "head": [
+          "?x",
+          "<urn:pilot:state>",
+          "<urn:pilot:ready>"
+        ]
+      }
+    ],
+    "target": {
+      "id": "goal",
+      "atom": [
+        "<urn:pilot:item>",
+        "<urn:pilot:state>",
+        "<urn:pilot:ready>"
+      ]
+    },
+    "context": {
+      "repository": "public-demo",
+      "environment": "test",
+      "audiences": [
+        "host"
+      ],
+      "now": "2026-10-30T12:00:00+00:00"
+    },
+    "mutations": [],
+    "proof": {
+      "mutation": "drop_all_steps"
+    }
+  }
+]
