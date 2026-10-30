@@ -1,0 +1,142 @@
+{
+  "arms": {
+    "frozen": {
+      "acquisition": "Capture and same real model extraction/consolidation of OWN actual episodes1-3.",
+      "freeze_after_episode": 3,
+      "later": "Use exact own learned-memory snapshot after episode3. Capture later outcomes for audit but never update selected memory or replace with another arm's acquisition."
+    },
+    "growing_raw": {
+      "acquisition": "Capture own actual task/action/outcome journals only, without extracted lesson artifacts.",
+      "later": "Grow own raw history and select it lexically under the same memory-context cap."
+    },
+    "learned": {
+      "acquisition": "Same extraction/consolidation algorithm as frozen, applied to own actual outcomes.",
+      "later": "Continue own real model extraction, real capture/mutation, consolidation and lexical retrieval after each completed episode. Do not inject authored gold lessons."
+    }
+  },
+  "budgets": {
+    "actor_model_and_output_cap": "Identical across arms, frozen before execution.",
+    "extraction_cost": "Extra learning/extraction calls explicitly counted and reported separately; this is not compute-identical.",
+    "memory_context_characters": 4096,
+    "per_episode_actor_actions": 2,
+    "provider_attempts": "Every success, failure, refusal, unavailable result and observed charge retained. No missing result converted into an invented model action.",
+    "total_model_run_usd_max": 2
+  },
+  "diagnostics": [
+    "same-arm provenance completeness",
+    "extraction validity and actual mutation receipts",
+    "correction retained without overscoping",
+    "memory growth and deduplication",
+    "raw versus learned selected-context occupancy",
+    "capture/extraction/consolidation/retrieval/actor latency",
+    "actor versus learning model tokens and charges"
+  ],
+  "executable_verifier": "tasks.evaluate_action returns only an actually attempted item's operational feedback; tasks.score_episode is evaluator-only. test_tasks.py checks manually reasoned roles for all60 inputs, priority/correction/old-route exceptions, no-gold/public-view and unavailable boundaries.",
+  "explicit_limits": [
+    "This is one small conditional-routing family, with two post-snapshot procedures, one scoped correction and one later precedence interaction; it does not establish general or monotonic improvement across domains or indefinite memory growth.",
+    "Time/episode index is confounded with task type, correction and noise. Do not interpret a fitted slope alone as causal compounding.",
+    "The same hidden causal structure repeats with independent opaque queue permutations. General-domain transfer and provider stochastic variability remain unmeasured.",
+    "No preauthored or deterministic gold extraction is counted as real learning.",
+    "No claim about production native readiness, private-data safety, all15 architecture workstreams, dense-only performance or actual installed host delivery."
+  ],
+  "independent_units": {
+    "arms": 3,
+    "companies": 5,
+    "episodes_per_company": 12,
+    "maximum_actor_actions": 360,
+    "meaning": "Five independently permuted fictional-company routing configurations; one workflow family, not five independent domains or five provider stochastic repeats.",
+    "paired_tasks": 60
+  },
+  "interference": {
+    "episodes": [
+      10,
+      11,
+      12
+    ],
+    "fairness": "No hidden raw-only flood. Record selected context bytes/characters, omitted/truncated records, duplicate counts, storage bytes and actual retrieval references by arm.",
+    "stale_memory": "Own real r1 action feedback remains in history after correction; no fabricated stale private notes.",
+    "stimulus": "Three bounded public facilities-workflow notifications per episode, with an exact duplicate delivery; same task stimuli for every arm."
+  },
+  "north_star": "Later work becomes more successful and needs fewer corrective actions because the system uses its own accumulated experience, while retaining corrections and resisting irrelevant or duplicate history.",
+  "primary_analysis": {
+    "ceiling": "One corrective retry receives the current-item required destination, so final success may saturate. Never substitute that ceiling for first-action transfer benefit.",
+    "comparisons": [
+      "learned minus frozen within each company and phase",
+      "learned minus growing_raw within each company and phase"
+    ],
+    "decision": "Positive later-phase benefit against BOTH frozen and growing raw at comparable context/action caps is initial evidence for useful learned state; a tie or loss must remain visible. Do not select only winning seeds or phases.",
+    "early": [
+      5
+    ],
+    "episode_ordinals": [
+      5,
+      8,
+      9,
+      10,
+      12
+    ],
+    "growth_interpretation": "The real learner acquires two additional conditional procedures after the frozen snapshot, then a precedence interaction. Report paired task benefit as useful acquired experience grows; do not infer causal compounding merely from episode index or number of notes.",
+    "late": [
+      10,
+      12
+    ],
+    "middle": [
+      8,
+      9
+    ],
+    "outcomes": [
+      "first_action_success",
+      "final_task_success",
+      "actual_action_count",
+      "stale_route_count",
+      "overscoped_correction_count",
+      "invalid_action_count",
+      "available_attempt_denominator"
+    ],
+    "population": "Primary transfer cells5,8,9,10,12 only. Exposure/teaching/correction cells1,2,3,4,6,7,11 remain separately reported.",
+    "reporting": "Show all five paired company differences and their mean/range. Any uncertainty estimate must treat company as the unit; do not pool180 dependent episodes as independent samples."
+  },
+  "scope": "Public synthetic local lexical learning-loop study. Not native QMD, seven-arm production, host delivery, or general productivity evidence.",
+  "status": "v2 curriculum/design candidate frozen before any actual provider outcome study.",
+  "tasks": {
+    "action_schema": {
+      "queue": "one of allowed_queues",
+      "request_id": "exact current request id"
+    },
+    "correction": "Episode7 announces r2 to all arms without the new mapping. Actual own action outcome supplies current-item correction. Erase/public mappings remain unchanged, testing bounded correction scope.",
+    "counterbalancing": "A-first for seeds0,2,4; B-first for seeds1,3. Each newly exposed procedure at4/6 has unseen-entity transfer at5/8.",
+    "new_procedures": "After frozen snapshot: legal-team export exception and external-region transfer exception. External exception keeps the OLD restricted destination valid after the base-route correction. Their overlap is first experienced11 and transferred12.",
+    "phases": [
+      [
+        "acquire",
+        1,
+        3
+      ],
+      [
+        "transfer",
+        4,
+        6
+      ],
+      [
+        "correct",
+        7,
+        7
+      ],
+      [
+        "corrected_transfer",
+        8,
+        9
+      ],
+      [
+        "interference",
+        10,
+        12
+      ]
+    ],
+    "provider_input": "Only tasks.public_view(task); never evaluator module/source, policy_configuration, score_episode, answer keys or future episodes.",
+    "transfer": "New entity and changed visibility or operation test each added procedure; restricted old destination remains valid for the external exception after base correction; legal-export precedence over external first experienced11 is transferred12.",
+    "wrong_action_feedback": "After a valid action, backend trace names only the applied routing constraint and matched CURRENT input fields. Wrong route additionally exposes current-item required destination. All arms learn from backend explanations, not from labels-only latent-policy discovery or authored memory documents."
+  },
+  "v1_history": "Original labels-only three-initial-category curriculum, original source/corpus/design/freeze and15 passing contracts preserved outside checkout in learning-curve-curriculum-v1-preserved.",
+  "version": 2
+}

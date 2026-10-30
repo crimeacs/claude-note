@@ -141,6 +141,10 @@ into dev and test by note, so a setting tuned on dev is reported on test. After 
 refresh re-scores the frozen probes once a day, and `doctor` shows the latest score. Details and
 what each number means: [docs/evals.md](docs/evals.md).
 
+An opt-in [captured-experience learning loop and public comparison](experiments/learning_curve/README.md)
+also tests whether model-extracted, consolidated lessons help later tasks compared with frozen
+memory and growing raw history. Its public study is separate from installed private-data workers.
+
 ## Why recall finds things
 
 Keyword search over notes is fast (≈0.3 s) but conjunctive: *"how should I organise obsidian note

@@ -1,0 +1,2251 @@
+{
+  "scope": "public synthetic simulator inputs only",
+  "sequences": {
+    "company-00": [
+      {
+        "allowed_queues": [
+          "Q-39",
+          "Q-56",
+          "Q-70",
+          "Q-93"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s00-e01",
+        "ordinal": 1,
+        "phase": "acquire",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-00",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Pinewick Studio",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s00-01",
+            "id": "req-s00-01",
+            "operation": "share",
+            "region": "north",
+            "team": "sales",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-39",
+          "Q-56",
+          "Q-70",
+          "Q-93"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s00-e02",
+        "ordinal": 2,
+        "phase": "acquire",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-00",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Pinewick Studio",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s00-02",
+            "id": "req-s00-02",
+            "operation": "share",
+            "region": "west",
+            "team": "support",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-39",
+          "Q-56",
+          "Q-70",
+          "Q-93"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s00-e03",
+        "ordinal": 3,
+        "phase": "acquire",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-00",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Pinewick Studio",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s00-03",
+            "id": "req-s00-03",
+            "operation": "erase",
+            "region": "east",
+            "team": "operations",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-39",
+          "Q-56",
+          "Q-70",
+          "Q-93"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s00-e04",
+        "ordinal": 4,
+        "phase": "transfer",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-00",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Pinewick Studio",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s00-04",
+            "id": "req-s00-04",
+            "operation": "export",
+            "region": "north",
+            "team": "legal",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-39",
+          "Q-56",
+          "Q-70",
+          "Q-93"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s00-e05",
+        "ordinal": 5,
+        "phase": "transfer",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-00",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Pinewick Studio",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s00-05",
+            "id": "req-s00-05",
+            "operation": "export",
+            "region": "west",
+            "team": "legal",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-39",
+          "Q-56",
+          "Q-70",
+          "Q-93"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s00-e06",
+        "ordinal": 6,
+        "phase": "transfer",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-00",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Pinewick Studio",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s00-06",
+            "id": "req-s00-06",
+            "operation": "share",
+            "region": "external",
+            "team": "operations",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-39",
+          "Q-56",
+          "Q-70",
+          "Q-93"
+        ],
+        "ambient_observations": [],
+        "announcement": "The customer-records routing configuration changed to revision r2 before this request.",
+        "id": "lc-s00-e07",
+        "ordinal": 7,
+        "phase": "correct",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-00",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Pinewick Studio",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s00-07",
+            "id": "req-s00-07",
+            "operation": "share",
+            "region": "east",
+            "team": "support",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-39",
+          "Q-56",
+          "Q-70",
+          "Q-93"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s00-e08",
+        "ordinal": 8,
+        "phase": "corrected_transfer",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-00",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Pinewick Studio",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s00-08",
+            "id": "req-s00-08",
+            "operation": "export",
+            "region": "external",
+            "team": "research",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-39",
+          "Q-56",
+          "Q-70",
+          "Q-93"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s00-e09",
+        "ordinal": 9,
+        "phase": "corrected_transfer",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-00",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Pinewick Studio",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s00-09",
+            "id": "req-s00-09",
+            "operation": "export",
+            "region": "south",
+            "team": "operations",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-39",
+          "Q-56",
+          "Q-70",
+          "Q-93"
+        ],
+        "ambient_observations": [
+          {
+            "observation_id": "facilities-00-1",
+            "scope": {
+              "company_id": "company-00",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work-order dispatch uses Q-39 for the loading dock."
+          },
+          {
+            "observation_id": "facilities-00-2",
+            "scope": {
+              "company_id": "company-00",
+              "workflow": "facilities"
+            },
+            "text": "Facilities dispatch sends key replacement to Q-56; customer-records routing is a separate workflow."
+          },
+          {
+            "observation_id": "facilities-00-1",
+            "scope": {
+              "company_id": "company-00",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work-order dispatch uses Q-39 for the loading dock."
+          }
+        ],
+        "announcement": "",
+        "id": "lc-s00-e10",
+        "ordinal": 10,
+        "phase": "interference",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-00",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Pinewick Studio",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s00-10",
+            "id": "req-s00-10",
+            "operation": "share",
+            "region": "external",
+            "team": "finance",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-39",
+          "Q-56",
+          "Q-70",
+          "Q-93"
+        ],
+        "ambient_observations": [
+          {
+            "observation_id": "facilities-00-2",
+            "scope": {
+              "company_id": "company-00",
+              "workflow": "facilities"
+            },
+            "text": "Facilities dispatch sends key replacement to Q-56; customer-records routing is a separate workflow."
+          },
+          {
+            "observation_id": "facilities-00-3",
+            "scope": {
+              "company_id": "company-00",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work order F-00 closed after a desk move; no customer record was routed."
+          },
+          {
+            "observation_id": "facilities-00-2",
+            "scope": {
+              "company_id": "company-00",
+              "workflow": "facilities"
+            },
+            "text": "Facilities dispatch sends key replacement to Q-56; customer-records routing is a separate workflow."
+          }
+        ],
+        "announcement": "",
+        "id": "lc-s00-e11",
+        "ordinal": 11,
+        "phase": "interference",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-00",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Pinewick Studio",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s00-11",
+            "id": "req-s00-11",
+            "operation": "export",
+            "region": "external",
+            "team": "legal",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-39",
+          "Q-56",
+          "Q-70",
+          "Q-93"
+        ],
+        "ambient_observations": [
+          {
+            "observation_id": "facilities-00-3",
+            "scope": {
+              "company_id": "company-00",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work order F-00 closed after a desk move; no customer record was routed."
+          },
+          {
+            "observation_id": "facilities-00-1",
+            "scope": {
+              "company_id": "company-00",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work-order dispatch uses Q-39 for the loading dock."
+          },
+          {
+            "observation_id": "facilities-00-3",
+            "scope": {
+              "company_id": "company-00",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work order F-00 closed after a desk move; no customer record was routed."
+          }
+        ],
+        "announcement": "",
+        "id": "lc-s00-e12",
+        "ordinal": 12,
+        "phase": "interference",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-00",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Pinewick Studio",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s00-12",
+            "id": "req-s00-12",
+            "operation": "export",
+            "region": "external",
+            "team": "legal",
+            "visibility": "public"
+          }
+        }
+      }
+    ],
+    "company-01": [
+      {
+        "allowed_queues": [
+          "Q-24",
+          "Q-36",
+          "Q-54",
+          "Q-78"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s01-e01",
+        "ordinal": 1,
+        "phase": "acquire",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-01",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Bellford Supply",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s01-01",
+            "id": "req-s01-01",
+            "operation": "share",
+            "region": "north",
+            "team": "sales",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-24",
+          "Q-36",
+          "Q-54",
+          "Q-78"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s01-e02",
+        "ordinal": 2,
+        "phase": "acquire",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-01",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Bellford Supply",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s01-02",
+            "id": "req-s01-02",
+            "operation": "share",
+            "region": "west",
+            "team": "support",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-24",
+          "Q-36",
+          "Q-54",
+          "Q-78"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s01-e03",
+        "ordinal": 3,
+        "phase": "acquire",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-01",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Bellford Supply",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s01-03",
+            "id": "req-s01-03",
+            "operation": "erase",
+            "region": "east",
+            "team": "operations",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-24",
+          "Q-36",
+          "Q-54",
+          "Q-78"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s01-e04",
+        "ordinal": 4,
+        "phase": "transfer",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-01",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Bellford Supply",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s01-04",
+            "id": "req-s01-04",
+            "operation": "share",
+            "region": "external",
+            "team": "operations",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-24",
+          "Q-36",
+          "Q-54",
+          "Q-78"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s01-e05",
+        "ordinal": 5,
+        "phase": "transfer",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-01",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Bellford Supply",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s01-05",
+            "id": "req-s01-05",
+            "operation": "export",
+            "region": "external",
+            "team": "research",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-24",
+          "Q-36",
+          "Q-54",
+          "Q-78"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s01-e06",
+        "ordinal": 6,
+        "phase": "transfer",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-01",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Bellford Supply",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s01-06",
+            "id": "req-s01-06",
+            "operation": "export",
+            "region": "north",
+            "team": "legal",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-24",
+          "Q-36",
+          "Q-54",
+          "Q-78"
+        ],
+        "ambient_observations": [],
+        "announcement": "The customer-records routing configuration changed to revision r2 before this request.",
+        "id": "lc-s01-e07",
+        "ordinal": 7,
+        "phase": "correct",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-01",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Bellford Supply",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s01-07",
+            "id": "req-s01-07",
+            "operation": "share",
+            "region": "east",
+            "team": "support",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-24",
+          "Q-36",
+          "Q-54",
+          "Q-78"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s01-e08",
+        "ordinal": 8,
+        "phase": "corrected_transfer",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-01",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Bellford Supply",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s01-08",
+            "id": "req-s01-08",
+            "operation": "export",
+            "region": "west",
+            "team": "legal",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-24",
+          "Q-36",
+          "Q-54",
+          "Q-78"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s01-e09",
+        "ordinal": 9,
+        "phase": "corrected_transfer",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-01",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Bellford Supply",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s01-09",
+            "id": "req-s01-09",
+            "operation": "export",
+            "region": "south",
+            "team": "operations",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-24",
+          "Q-36",
+          "Q-54",
+          "Q-78"
+        ],
+        "ambient_observations": [
+          {
+            "observation_id": "facilities-01-1",
+            "scope": {
+              "company_id": "company-01",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work-order dispatch uses Q-24 for the loading dock."
+          },
+          {
+            "observation_id": "facilities-01-2",
+            "scope": {
+              "company_id": "company-01",
+              "workflow": "facilities"
+            },
+            "text": "Facilities dispatch sends key replacement to Q-36; customer-records routing is a separate workflow."
+          },
+          {
+            "observation_id": "facilities-01-1",
+            "scope": {
+              "company_id": "company-01",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work-order dispatch uses Q-24 for the loading dock."
+          }
+        ],
+        "announcement": "",
+        "id": "lc-s01-e10",
+        "ordinal": 10,
+        "phase": "interference",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-01",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Bellford Supply",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s01-10",
+            "id": "req-s01-10",
+            "operation": "share",
+            "region": "external",
+            "team": "finance",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-24",
+          "Q-36",
+          "Q-54",
+          "Q-78"
+        ],
+        "ambient_observations": [
+          {
+            "observation_id": "facilities-01-2",
+            "scope": {
+              "company_id": "company-01",
+              "workflow": "facilities"
+            },
+            "text": "Facilities dispatch sends key replacement to Q-36; customer-records routing is a separate workflow."
+          },
+          {
+            "observation_id": "facilities-01-3",
+            "scope": {
+              "company_id": "company-01",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work order F-01 closed after a desk move; no customer record was routed."
+          },
+          {
+            "observation_id": "facilities-01-2",
+            "scope": {
+              "company_id": "company-01",
+              "workflow": "facilities"
+            },
+            "text": "Facilities dispatch sends key replacement to Q-36; customer-records routing is a separate workflow."
+          }
+        ],
+        "announcement": "",
+        "id": "lc-s01-e11",
+        "ordinal": 11,
+        "phase": "interference",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-01",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Bellford Supply",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s01-11",
+            "id": "req-s01-11",
+            "operation": "export",
+            "region": "external",
+            "team": "legal",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-24",
+          "Q-36",
+          "Q-54",
+          "Q-78"
+        ],
+        "ambient_observations": [
+          {
+            "observation_id": "facilities-01-3",
+            "scope": {
+              "company_id": "company-01",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work order F-01 closed after a desk move; no customer record was routed."
+          },
+          {
+            "observation_id": "facilities-01-1",
+            "scope": {
+              "company_id": "company-01",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work-order dispatch uses Q-24 for the loading dock."
+          },
+          {
+            "observation_id": "facilities-01-3",
+            "scope": {
+              "company_id": "company-01",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work order F-01 closed after a desk move; no customer record was routed."
+          }
+        ],
+        "announcement": "",
+        "id": "lc-s01-e12",
+        "ordinal": 12,
+        "phase": "interference",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-01",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Bellford Supply",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s01-12",
+            "id": "req-s01-12",
+            "operation": "export",
+            "region": "external",
+            "team": "legal",
+            "visibility": "public"
+          }
+        }
+      }
+    ],
+    "company-02": [
+      {
+        "allowed_queues": [
+          "Q-46",
+          "Q-55",
+          "Q-60",
+          "Q-85"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s02-e01",
+        "ordinal": 1,
+        "phase": "acquire",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-02",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cedarco Works",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s02-01",
+            "id": "req-s02-01",
+            "operation": "share",
+            "region": "north",
+            "team": "sales",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-46",
+          "Q-55",
+          "Q-60",
+          "Q-85"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s02-e02",
+        "ordinal": 2,
+        "phase": "acquire",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-02",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cedarco Works",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s02-02",
+            "id": "req-s02-02",
+            "operation": "share",
+            "region": "west",
+            "team": "support",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-46",
+          "Q-55",
+          "Q-60",
+          "Q-85"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s02-e03",
+        "ordinal": 3,
+        "phase": "acquire",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-02",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cedarco Works",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s02-03",
+            "id": "req-s02-03",
+            "operation": "erase",
+            "region": "east",
+            "team": "operations",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-46",
+          "Q-55",
+          "Q-60",
+          "Q-85"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s02-e04",
+        "ordinal": 4,
+        "phase": "transfer",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-02",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cedarco Works",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s02-04",
+            "id": "req-s02-04",
+            "operation": "export",
+            "region": "north",
+            "team": "legal",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-46",
+          "Q-55",
+          "Q-60",
+          "Q-85"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s02-e05",
+        "ordinal": 5,
+        "phase": "transfer",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-02",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cedarco Works",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s02-05",
+            "id": "req-s02-05",
+            "operation": "export",
+            "region": "west",
+            "team": "legal",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-46",
+          "Q-55",
+          "Q-60",
+          "Q-85"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s02-e06",
+        "ordinal": 6,
+        "phase": "transfer",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-02",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cedarco Works",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s02-06",
+            "id": "req-s02-06",
+            "operation": "share",
+            "region": "external",
+            "team": "operations",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-46",
+          "Q-55",
+          "Q-60",
+          "Q-85"
+        ],
+        "ambient_observations": [],
+        "announcement": "The customer-records routing configuration changed to revision r2 before this request.",
+        "id": "lc-s02-e07",
+        "ordinal": 7,
+        "phase": "correct",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-02",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cedarco Works",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s02-07",
+            "id": "req-s02-07",
+            "operation": "share",
+            "region": "east",
+            "team": "support",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-46",
+          "Q-55",
+          "Q-60",
+          "Q-85"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s02-e08",
+        "ordinal": 8,
+        "phase": "corrected_transfer",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-02",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cedarco Works",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s02-08",
+            "id": "req-s02-08",
+            "operation": "export",
+            "region": "external",
+            "team": "research",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-46",
+          "Q-55",
+          "Q-60",
+          "Q-85"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s02-e09",
+        "ordinal": 9,
+        "phase": "corrected_transfer",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-02",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cedarco Works",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s02-09",
+            "id": "req-s02-09",
+            "operation": "export",
+            "region": "south",
+            "team": "operations",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-46",
+          "Q-55",
+          "Q-60",
+          "Q-85"
+        ],
+        "ambient_observations": [
+          {
+            "observation_id": "facilities-02-1",
+            "scope": {
+              "company_id": "company-02",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work-order dispatch uses Q-46 for the loading dock."
+          },
+          {
+            "observation_id": "facilities-02-2",
+            "scope": {
+              "company_id": "company-02",
+              "workflow": "facilities"
+            },
+            "text": "Facilities dispatch sends key replacement to Q-55; customer-records routing is a separate workflow."
+          },
+          {
+            "observation_id": "facilities-02-1",
+            "scope": {
+              "company_id": "company-02",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work-order dispatch uses Q-46 for the loading dock."
+          }
+        ],
+        "announcement": "",
+        "id": "lc-s02-e10",
+        "ordinal": 10,
+        "phase": "interference",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-02",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cedarco Works",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s02-10",
+            "id": "req-s02-10",
+            "operation": "share",
+            "region": "external",
+            "team": "finance",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-46",
+          "Q-55",
+          "Q-60",
+          "Q-85"
+        ],
+        "ambient_observations": [
+          {
+            "observation_id": "facilities-02-2",
+            "scope": {
+              "company_id": "company-02",
+              "workflow": "facilities"
+            },
+            "text": "Facilities dispatch sends key replacement to Q-55; customer-records routing is a separate workflow."
+          },
+          {
+            "observation_id": "facilities-02-3",
+            "scope": {
+              "company_id": "company-02",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work order F-02 closed after a desk move; no customer record was routed."
+          },
+          {
+            "observation_id": "facilities-02-2",
+            "scope": {
+              "company_id": "company-02",
+              "workflow": "facilities"
+            },
+            "text": "Facilities dispatch sends key replacement to Q-55; customer-records routing is a separate workflow."
+          }
+        ],
+        "announcement": "",
+        "id": "lc-s02-e11",
+        "ordinal": 11,
+        "phase": "interference",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-02",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cedarco Works",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s02-11",
+            "id": "req-s02-11",
+            "operation": "export",
+            "region": "external",
+            "team": "legal",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-46",
+          "Q-55",
+          "Q-60",
+          "Q-85"
+        ],
+        "ambient_observations": [
+          {
+            "observation_id": "facilities-02-3",
+            "scope": {
+              "company_id": "company-02",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work order F-02 closed after a desk move; no customer record was routed."
+          },
+          {
+            "observation_id": "facilities-02-1",
+            "scope": {
+              "company_id": "company-02",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work-order dispatch uses Q-46 for the loading dock."
+          },
+          {
+            "observation_id": "facilities-02-3",
+            "scope": {
+              "company_id": "company-02",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work order F-02 closed after a desk move; no customer record was routed."
+          }
+        ],
+        "announcement": "",
+        "id": "lc-s02-e12",
+        "ordinal": 12,
+        "phase": "interference",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-02",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cedarco Works",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s02-12",
+            "id": "req-s02-12",
+            "operation": "export",
+            "region": "external",
+            "team": "legal",
+            "visibility": "public"
+          }
+        }
+      }
+    ],
+    "company-03": [
+      {
+        "allowed_queues": [
+          "Q-14",
+          "Q-20",
+          "Q-29",
+          "Q-31"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s03-e01",
+        "ordinal": 1,
+        "phase": "acquire",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-03",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cobalt Workshop",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s03-01",
+            "id": "req-s03-01",
+            "operation": "share",
+            "region": "north",
+            "team": "sales",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-14",
+          "Q-20",
+          "Q-29",
+          "Q-31"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s03-e02",
+        "ordinal": 2,
+        "phase": "acquire",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-03",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cobalt Workshop",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s03-02",
+            "id": "req-s03-02",
+            "operation": "share",
+            "region": "west",
+            "team": "support",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-14",
+          "Q-20",
+          "Q-29",
+          "Q-31"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s03-e03",
+        "ordinal": 3,
+        "phase": "acquire",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-03",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cobalt Workshop",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s03-03",
+            "id": "req-s03-03",
+            "operation": "erase",
+            "region": "east",
+            "team": "operations",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-14",
+          "Q-20",
+          "Q-29",
+          "Q-31"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s03-e04",
+        "ordinal": 4,
+        "phase": "transfer",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-03",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cobalt Workshop",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s03-04",
+            "id": "req-s03-04",
+            "operation": "share",
+            "region": "external",
+            "team": "operations",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-14",
+          "Q-20",
+          "Q-29",
+          "Q-31"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s03-e05",
+        "ordinal": 5,
+        "phase": "transfer",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-03",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cobalt Workshop",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s03-05",
+            "id": "req-s03-05",
+            "operation": "export",
+            "region": "external",
+            "team": "research",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-14",
+          "Q-20",
+          "Q-29",
+          "Q-31"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s03-e06",
+        "ordinal": 6,
+        "phase": "transfer",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-03",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cobalt Workshop",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s03-06",
+            "id": "req-s03-06",
+            "operation": "export",
+            "region": "north",
+            "team": "legal",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-14",
+          "Q-20",
+          "Q-29",
+          "Q-31"
+        ],
+        "ambient_observations": [],
+        "announcement": "The customer-records routing configuration changed to revision r2 before this request.",
+        "id": "lc-s03-e07",
+        "ordinal": 7,
+        "phase": "correct",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-03",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cobalt Workshop",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s03-07",
+            "id": "req-s03-07",
+            "operation": "share",
+            "region": "east",
+            "team": "support",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-14",
+          "Q-20",
+          "Q-29",
+          "Q-31"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s03-e08",
+        "ordinal": 8,
+        "phase": "corrected_transfer",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-03",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cobalt Workshop",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s03-08",
+            "id": "req-s03-08",
+            "operation": "export",
+            "region": "west",
+            "team": "legal",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-14",
+          "Q-20",
+          "Q-29",
+          "Q-31"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s03-e09",
+        "ordinal": 9,
+        "phase": "corrected_transfer",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-03",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cobalt Workshop",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s03-09",
+            "id": "req-s03-09",
+            "operation": "export",
+            "region": "south",
+            "team": "operations",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-14",
+          "Q-20",
+          "Q-29",
+          "Q-31"
+        ],
+        "ambient_observations": [
+          {
+            "observation_id": "facilities-03-1",
+            "scope": {
+              "company_id": "company-03",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work-order dispatch uses Q-14 for the loading dock."
+          },
+          {
+            "observation_id": "facilities-03-2",
+            "scope": {
+              "company_id": "company-03",
+              "workflow": "facilities"
+            },
+            "text": "Facilities dispatch sends key replacement to Q-20; customer-records routing is a separate workflow."
+          },
+          {
+            "observation_id": "facilities-03-1",
+            "scope": {
+              "company_id": "company-03",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work-order dispatch uses Q-14 for the loading dock."
+          }
+        ],
+        "announcement": "",
+        "id": "lc-s03-e10",
+        "ordinal": 10,
+        "phase": "interference",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-03",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cobalt Workshop",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s03-10",
+            "id": "req-s03-10",
+            "operation": "share",
+            "region": "external",
+            "team": "finance",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-14",
+          "Q-20",
+          "Q-29",
+          "Q-31"
+        ],
+        "ambient_observations": [
+          {
+            "observation_id": "facilities-03-2",
+            "scope": {
+              "company_id": "company-03",
+              "workflow": "facilities"
+            },
+            "text": "Facilities dispatch sends key replacement to Q-20; customer-records routing is a separate workflow."
+          },
+          {
+            "observation_id": "facilities-03-3",
+            "scope": {
+              "company_id": "company-03",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work order F-03 closed after a desk move; no customer record was routed."
+          },
+          {
+            "observation_id": "facilities-03-2",
+            "scope": {
+              "company_id": "company-03",
+              "workflow": "facilities"
+            },
+            "text": "Facilities dispatch sends key replacement to Q-20; customer-records routing is a separate workflow."
+          }
+        ],
+        "announcement": "",
+        "id": "lc-s03-e11",
+        "ordinal": 11,
+        "phase": "interference",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-03",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cobalt Workshop",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s03-11",
+            "id": "req-s03-11",
+            "operation": "export",
+            "region": "external",
+            "team": "legal",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-14",
+          "Q-20",
+          "Q-29",
+          "Q-31"
+        ],
+        "ambient_observations": [
+          {
+            "observation_id": "facilities-03-3",
+            "scope": {
+              "company_id": "company-03",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work order F-03 closed after a desk move; no customer record was routed."
+          },
+          {
+            "observation_id": "facilities-03-1",
+            "scope": {
+              "company_id": "company-03",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work-order dispatch uses Q-14 for the loading dock."
+          },
+          {
+            "observation_id": "facilities-03-3",
+            "scope": {
+              "company_id": "company-03",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work order F-03 closed after a desk move; no customer record was routed."
+          }
+        ],
+        "announcement": "",
+        "id": "lc-s03-e12",
+        "ordinal": 12,
+        "phase": "interference",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-03",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Cobalt Workshop",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s03-12",
+            "id": "req-s03-12",
+            "operation": "export",
+            "region": "external",
+            "team": "legal",
+            "visibility": "public"
+          }
+        }
+      }
+    ],
+    "company-04": [
+      {
+        "allowed_queues": [
+          "Q-17",
+          "Q-19",
+          "Q-48",
+          "Q-77"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s04-e01",
+        "ordinal": 1,
+        "phase": "acquire",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-04",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Driftline Services",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s04-01",
+            "id": "req-s04-01",
+            "operation": "share",
+            "region": "north",
+            "team": "sales",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-17",
+          "Q-19",
+          "Q-48",
+          "Q-77"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s04-e02",
+        "ordinal": 2,
+        "phase": "acquire",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-04",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Driftline Services",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s04-02",
+            "id": "req-s04-02",
+            "operation": "share",
+            "region": "west",
+            "team": "support",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-17",
+          "Q-19",
+          "Q-48",
+          "Q-77"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s04-e03",
+        "ordinal": 3,
+        "phase": "acquire",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-04",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Driftline Services",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s04-03",
+            "id": "req-s04-03",
+            "operation": "erase",
+            "region": "east",
+            "team": "operations",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-17",
+          "Q-19",
+          "Q-48",
+          "Q-77"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s04-e04",
+        "ordinal": 4,
+        "phase": "transfer",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-04",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Driftline Services",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s04-04",
+            "id": "req-s04-04",
+            "operation": "export",
+            "region": "north",
+            "team": "legal",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-17",
+          "Q-19",
+          "Q-48",
+          "Q-77"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s04-e05",
+        "ordinal": 5,
+        "phase": "transfer",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-04",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Driftline Services",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s04-05",
+            "id": "req-s04-05",
+            "operation": "export",
+            "region": "west",
+            "team": "legal",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-17",
+          "Q-19",
+          "Q-48",
+          "Q-77"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s04-e06",
+        "ordinal": 6,
+        "phase": "transfer",
+        "policy_revision": "r1",
+        "scope": {
+          "company_id": "company-04",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Driftline Services",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s04-06",
+            "id": "req-s04-06",
+            "operation": "share",
+            "region": "external",
+            "team": "operations",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-17",
+          "Q-19",
+          "Q-48",
+          "Q-77"
+        ],
+        "ambient_observations": [],
+        "announcement": "The customer-records routing configuration changed to revision r2 before this request.",
+        "id": "lc-s04-e07",
+        "ordinal": 7,
+        "phase": "correct",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-04",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Driftline Services",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s04-07",
+            "id": "req-s04-07",
+            "operation": "share",
+            "region": "east",
+            "team": "support",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-17",
+          "Q-19",
+          "Q-48",
+          "Q-77"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s04-e08",
+        "ordinal": 8,
+        "phase": "corrected_transfer",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-04",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Driftline Services",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s04-08",
+            "id": "req-s04-08",
+            "operation": "export",
+            "region": "external",
+            "team": "research",
+            "visibility": "public"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-17",
+          "Q-19",
+          "Q-48",
+          "Q-77"
+        ],
+        "ambient_observations": [],
+        "announcement": "",
+        "id": "lc-s04-e09",
+        "ordinal": 9,
+        "phase": "corrected_transfer",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-04",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Driftline Services",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s04-09",
+            "id": "req-s04-09",
+            "operation": "export",
+            "region": "south",
+            "team": "operations",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-17",
+          "Q-19",
+          "Q-48",
+          "Q-77"
+        ],
+        "ambient_observations": [
+          {
+            "observation_id": "facilities-04-1",
+            "scope": {
+              "company_id": "company-04",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work-order dispatch uses Q-17 for the loading dock."
+          },
+          {
+            "observation_id": "facilities-04-2",
+            "scope": {
+              "company_id": "company-04",
+              "workflow": "facilities"
+            },
+            "text": "Facilities dispatch sends key replacement to Q-19; customer-records routing is a separate workflow."
+          },
+          {
+            "observation_id": "facilities-04-1",
+            "scope": {
+              "company_id": "company-04",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work-order dispatch uses Q-17 for the loading dock."
+          }
+        ],
+        "announcement": "",
+        "id": "lc-s04-e10",
+        "ordinal": 10,
+        "phase": "interference",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-04",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Driftline Services",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s04-10",
+            "id": "req-s04-10",
+            "operation": "share",
+            "region": "external",
+            "team": "finance",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-17",
+          "Q-19",
+          "Q-48",
+          "Q-77"
+        ],
+        "ambient_observations": [
+          {
+            "observation_id": "facilities-04-2",
+            "scope": {
+              "company_id": "company-04",
+              "workflow": "facilities"
+            },
+            "text": "Facilities dispatch sends key replacement to Q-19; customer-records routing is a separate workflow."
+          },
+          {
+            "observation_id": "facilities-04-3",
+            "scope": {
+              "company_id": "company-04",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work order F-04 closed after a desk move; no customer record was routed."
+          },
+          {
+            "observation_id": "facilities-04-2",
+            "scope": {
+              "company_id": "company-04",
+              "workflow": "facilities"
+            },
+            "text": "Facilities dispatch sends key replacement to Q-19; customer-records routing is a separate workflow."
+          }
+        ],
+        "announcement": "",
+        "id": "lc-s04-e11",
+        "ordinal": 11,
+        "phase": "interference",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-04",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Driftline Services",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s04-11",
+            "id": "req-s04-11",
+            "operation": "export",
+            "region": "external",
+            "team": "legal",
+            "visibility": "restricted"
+          }
+        }
+      },
+      {
+        "allowed_queues": [
+          "Q-17",
+          "Q-19",
+          "Q-48",
+          "Q-77"
+        ],
+        "ambient_observations": [
+          {
+            "observation_id": "facilities-04-3",
+            "scope": {
+              "company_id": "company-04",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work order F-04 closed after a desk move; no customer record was routed."
+          },
+          {
+            "observation_id": "facilities-04-1",
+            "scope": {
+              "company_id": "company-04",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work-order dispatch uses Q-17 for the loading dock."
+          },
+          {
+            "observation_id": "facilities-04-3",
+            "scope": {
+              "company_id": "company-04",
+              "workflow": "facilities"
+            },
+            "text": "Facilities work order F-04 closed after a desk move; no customer record was routed."
+          }
+        ],
+        "announcement": "",
+        "id": "lc-s04-e12",
+        "ordinal": 12,
+        "phase": "interference",
+        "policy_revision": "r2",
+        "scope": {
+          "company_id": "company-04",
+          "environment": "public-study",
+          "workflow": "customer-records"
+        },
+        "task": {
+          "company": "Driftline Services",
+          "goal": "Route this request to an accepted destination using the current company workflow.",
+          "request": {
+            "entity_id": "entity-s04-12",
+            "id": "req-s04-12",
+            "operation": "export",
+            "region": "external",
+            "team": "legal",
+            "visibility": "public"
+          }
+        }
+      }
+    ]
+  },
+  "version": 2
+}
