@@ -1,0 +1,28 @@
+{
+  "author_model_spend_usd": 0,
+  "author_provider_calls": 0,
+  "backend_trace": "Only actual executed current item constraint ID and matched input fields, shared with every arm; not labels-only latent-policy learning.",
+  "contracts": {
+    "attempts": 1,
+    "command": "python3 -B experiments/learning_curve/test_tasks.py",
+    "status": "passed",
+    "tests": 20
+  },
+  "files": {
+    "corpus.json": "32a1032730f9f1a04bc3307676e85ce8ad49283c6424b9ac1750eb072335d8eb",
+    "study_design.json": "c9018e6d2524cddf56e1922c3d0fb763b357ec23318a31a2065465aaa0bed53e",
+    "tasks.py": "91148691b401070e2ccc0ebe685ea5a49cebf3ed61a5604bf2a5e935feb00329",
+    "test_tasks.py": "5ee76348cc6787317f0293af76cf2e85a2f3fc07e6c74cc3c3722572eab3157d"
+  },
+  "not_yet_run": "Actual model outcome study on v2 curriculum",
+  "primary_transfer_ordinals": [
+    5,
+    8,
+    9,
+    10,
+    12
+  ],
+  "prior_v1_preserved": "learning-curve-curriculum-v1-preserved/preservation.json",
+  "scope": "Independent public task curriculum/evaluator freeze before actual model study",
+  "version": 2
+}

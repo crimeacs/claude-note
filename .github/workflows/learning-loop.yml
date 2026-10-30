@@ -1,0 +1,58 @@
+name: Public learning loop contracts
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'experiments/learning_loop/**'
+      - 'experiments/learning_curve/**'
+      - '.github/workflows/learning-loop.yml'
+permissions:
+  contents: read
+concurrency:
+  group: learning-loop-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  public-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: src
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Record immutable preparation
+        run: |
+          mkdir -p "$RUNNER_TEMP/learning-results"
+          mkdir -p "$RUNNER_TEMP/public-empty-vault"
+          printf 'CLAUDE_NOTE_VAULT=%s\n' "$RUNNER_TEMP/public-empty-vault" >> "$GITHUB_ENV"
+          git rev-parse HEAD > "$RUNNER_TEMP/learning-results/source-commit.txt"
+          python3 --version > "$RUNNER_TEMP/learning-results/python.txt"
+          node --version > "$RUNNER_TEMP/learning-results/node.txt"
+      - name: Python source regressions
+        run: |
+          set -o pipefail
+          python3 -B -m unittest discover -s tests -v 2>&1 | tee "$RUNNER_TEMP/learning-results/python.log"
+      - name: Recall server contracts
+        run: |
+          set -o pipefail
+          node --test tests/recall-server.test.mjs 2>&1 | tee "$RUNNER_TEMP/learning-results/node.log"
+      - name: Public study offline contracts
+        run: |
+          set -euo pipefail
+          python3 -I -B experiments/learning_curve/test_tasks.py 2>&1 | tee "$RUNNER_TEMP/learning-results/tasks.log"
+          python3 -I -B experiments/learning_curve/test_provider.py 2>&1 | tee "$RUNNER_TEMP/learning-results/provider.log"
+          python3 -I -B experiments/learning_curve/test_study_runner.py 2>&1 | tee "$RUNNER_TEMP/learning-results/controller.log"
+          python3 -I -B experiments/learning_curve/test_analyze_study.py 2>&1 | tee "$RUNNER_TEMP/learning-results/analysis-artifacts.log"
+          python3 -I -B experiments/learning_curve/analyze_study.py --self-test 2>&1 | tee "$RUNNER_TEMP/learning-results/analysis.log"
+      - name: Retain passed, failed and unavailable evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: learning-loop-${{ github.run_id }}
+          path: ${{ runner.temp }}/learning-results
+          if-no-files-found: error
+          retention-days: 30

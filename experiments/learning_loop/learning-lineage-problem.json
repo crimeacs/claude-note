@@ -1,0 +1,35 @@
+{
+  "version": "sweat-development-problem.v1",
+  "id": "claude-note-learning-lineage",
+  "description": "Preserve all supplied own-memory ancestry across consolidation and reject changed parent inputs before completed learning; confine explicit root paths. Public injected-extractor contracts only, not learning benefit or release authorization.",
+  "baseRevision": "61769461a40b3b25bf44cad080cf6375551456e8",
+  "sourcePaths": ["src/claude_note"],
+  "trustedPaths": [
+    "tests/test_learning_loop_lineage_contract.py",
+    "tests/test_public_learning_loop_contract.py",
+    "tests/support/public_own_learning.py",
+    "tests/fixtures/public_own_learning.json"
+  ],
+  "editablePaths": ["src/claude_note/learning_loop.py"],
+  "requirements": [
+    {"id": "retain-supplied-ancestry-and-evidence", "checkIds": ["public-learning-loop"]},
+    {"id": "revalidate-parent-revisions-after-callback", "checkIds": ["public-learning-loop"]},
+    {"id": "refuse-linked-root-ancestors", "checkIds": ["public-learning-loop"]},
+    {"id": "refuse-retired-lock-ownership", "checkIds": ["public-learning-loop"]},
+    {"id": "preserve-frozen-26-loop-contracts", "checkIds": ["public-learning-loop"]}
+  ],
+  "checks": [
+    {
+      "id": "public-learning-loop",
+      "runner": "python-unittest",
+      "tests": ["tests/test_learning_loop_lineage_contract.py", "tests/test_public_learning_loop_contract.py"],
+      "expectedTests": 30,
+      "timeoutMs": 30000
+    }
+  ],
+  "redWitness": {
+    "checkId": "public-learning-loop",
+    "testId": "test_learning_loop_lineage_contract.LearningLoopLineageRegressionTests.test_consolidation_records_current_capture_and_supplied_prior_revision",
+    "assertionIncludes": "Consolidation must retain the supplied prior learned revision as a derivation source"
+  }
+}
