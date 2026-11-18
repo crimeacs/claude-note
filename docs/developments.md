@@ -1,5 +1,22 @@
 # Developments
 
+## 2.1.29 — owner reconciliation for notes changed outside claude-note (18 November 2026)
+
+Index proofs demand claude-note's last written revision of every tracked note. After
+2.1.28 let large vaults capture a lease, the real vault still failed with
+`proof_revision_absent`. 30 tracked notes had since been edited by other programs and 2
+had been deleted, so those revisions can never be in the index again. That is by design
+(2.1.14: never prune references automatically), but there was no supported way out.
+
+`claude-note index-refresh reconcile` lists them; nothing changes without `--apply`.
+`--apply` makes an edited note's current on-disk revision its retained revision, as a new
+saved and dirty generation, so the index must prove the current content before freshness
+is acknowledged. A deleted note stops being tracked. It writes an audit record
+(`.claude-note/mutations/freshness/owner-reconcile-*.json`) with every path and its old and
+new revision. Note content is never changed. Pending entries and symlinked or non-regular
+paths are reported and left alone. Automatic proofs are unchanged: an untracked edit still
+blocks acknowledgement until the owner reconciles it.
+
 ## 2.1.28 — freshness for vaults with more than 1000 tracked notes (18 November 2026)
 
 Every index-refresh lease re-proves the latest revision of each tracked note, so its
