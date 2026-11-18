@@ -4,9 +4,13 @@ An indexer must capture a saved generation before indexing and acknowledge only
 that generation after success. Work arriving during indexing remains dirty.
 Pending mutations stay dirty after a crash until their intent is reconciled.
 """
+import hashlib
 import math
+import os
 import re
+import stat
 import time
+import uuid
 
 from . import mutation
 
@@ -126,3 +130,70 @@ def acknowledge(generation, *, capability='lexical', vault_root=None, index_owne
                           if entry['generation'] > complete or entry['status'] != 'saved'}
         mutation._metadata(root, 'freshness', 'manifest', value)
         return value
+
+
+def _current_revision(path):
+    """sha256 of a regular file's bytes; None when it is missing, a link or not a regular file."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    with os.fdopen(descriptor, 'rb') as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            return None
+        digest = hashlib.sha256()
+        for block in iter(lambda: handle.read(1 << 20), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def reconcile_external(*, vault_root=None, apply=False):
+    """Owner-run reconciliation of tracked notes changed or deleted outside claude-note.
+
+    Index proofs demand claude-note's last written revision of every tracked note. A note
+    later edited by another program, or deleted, can never satisfy that, so freshness stays
+    unacknowledged by design until the owner reconciles it (2.1.14: never prune references
+    automatically). Dry run lists them. With apply=True, an edited note's retained revision
+    becomes its current on-disk revision as a new saved, dirty generation (the index must then
+    prove the current content), and a deleted note stops being tracked. Note content is never
+    changed, and an audit record lists every path with its old and new revision.
+    Pending entries and symlinked or non-regular paths are reported and left alone.
+    """
+    root = mutation._vault(vault_root)
+    lock_path = root / '.claude-note/mutations/freshness/manifest.json'
+    with mutation.note_lock(lock_path, vault_root=root):
+        value = snapshot(root)
+        retained = value.setdefault('retained_revisions', dict(value['dirty']))
+        report = {'edited': [], 'deleted': [], 'skipped': [], 'applied': False}
+        for relative, entry in sorted(retained.items()):
+            if entry.get('status') != 'saved':
+                report['skipped'].append({'path': relative, 'reason': 'pending mutation'})
+                continue
+            target = root / relative
+            current = _current_revision(target)
+            if current == entry.get('revision'):
+                continue
+            if current is None and (os.path.lexists(target)):
+                report['skipped'].append({'path': relative, 'reason': 'not a regular file'})
+            elif current is None:
+                report['deleted'].append({'path': relative, 'retained': entry.get('revision')})
+            else:
+                report['edited'].append({'path': relative, 'retained': entry.get('revision'), 'current': current})
+        if not apply or not (report['edited'] or report['deleted']):
+            return report
+        operation = 'owner-reconcile-' + uuid.uuid4().hex
+        for item in report['edited']:
+            generation = value['generation'] + 1
+            value['generation'] = generation
+            row = {'generation': generation, 'operation_id': operation, 'status': 'saved', 'revision': item['current']}
+            value['dirty'][item['path']] = row
+            retained[item['path']] = dict(row)
+            value['saved_generation'] = max(value['saved_generation'], generation)
+        for item in report['deleted']:
+            retained.pop(item['path'], None)
+            value['dirty'].pop(item['path'], None)
+        mutation._metadata(root, 'freshness', operation, {
+            'version': 1, 'at': time.time(), 'edited': report['edited'], 'deleted': report['deleted']})
+        mutation._metadata(root, 'freshness', 'manifest', value)
+        report.update(applied=True, operation_id=operation)
+        return report

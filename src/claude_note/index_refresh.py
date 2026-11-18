@@ -473,9 +473,25 @@ def add_parser(sub):
     end.add_argument('--token', required=True)
     end.add_argument('--lexical-ok', action='store_true')
     end.add_argument('--vector-ok', action='store_true')
+    rec = commands.add_parser('reconcile', help='List tracked notes changed or deleted outside claude-note; '
+                              '--apply records their current state (owner decision; note content is never changed)')
+    rec.add_argument('--vault', help='Vault root (default: the configured vault)')
+    rec.add_argument('--apply', action='store_true')
 
 
 def main(args):
+    if args.refresh_action == 'reconcile':
+        try:
+            report = freshness.reconcile_external(vault_root=Path(args.vault) if args.vault else None,
+                                                  apply=args.apply)
+        except (OSError, ValueError, TypeError) as exc:
+            print(f'index-refresh reconcile failed: {exc}', file=sys.stderr)
+            return 1
+        print(json.dumps(report, sort_keys=True))
+        if not args.apply and (report['edited'] or report['deleted']):
+            print(f"index-refresh: {len(report['edited'])} edited and {len(report['deleted'])} deleted outside "
+                  'claude-note; rerun with --apply to record their current state', file=sys.stderr)
+        return 0
     try:
         result = begin(args.index) if args.refresh_action == 'begin' else finish(
             args.token, lexical_ok=args.lexical_ok, vector_ok=args.vector_ok)
