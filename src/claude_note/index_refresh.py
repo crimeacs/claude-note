@@ -23,9 +23,14 @@ from . import freshness, setup_recall, state_io
 STATE_ROOT = Path.home() / '.local/share/claude-note/index-refresh'
 TTL_SECONDS = 2 * 60 * 60
 LOCK_TIMEOUT = 5.0
-MAX_LEASE_BYTES = 256 * 1024
+# Every lease re-proves the latest revision of each tracked note, so its size grows with
+# the vault, not with recent edits. A 1122-note vault exceeded the old 1000-reference cap
+# and could never acknowledge freshness again (crimeacs/claude-note#42). The lease now
+# holds a larger bounded set; finish() proves it in batches of index_proof.MAX_REFERENCES,
+# so every proof call keeps its own bounds.
+MAX_LEASE_BYTES = 8 * 1024 * 1024
 MAX_ROOTS = 256
-MAX_REFERENCES = 1000
+MAX_REFERENCES = 20000
 
 
 @dataclass(frozen=True)
@@ -349,6 +354,10 @@ def begin(index=''):
             generations = []
             break
         generations.append(CapturedGeneration(str(root), generation, tuple(references)))
+    if sum(len(captured.references) for captured in generations) > MAX_REFERENCES:
+        generations = []
+        warning = (f'More than {MAX_REFERENCES} tracked note revisions; this lease cannot prove them, '
+                   'so no freshness will be acknowledged.')
     if _scope(index)[0] != scope or (configuration and setup_recall._freshness_config(index)[1] != configuration):
         generations, configuration = [], ''
         warning = 'QMD scope changed during capture; no freshness will be acknowledged.'
@@ -392,6 +401,27 @@ def _validate_current(lease):
     return now
 
 
+def _prove_in_batches(index_proof, database, configuration, qmd, references, vector_ok):
+    """Prove references in slices of index_proof.MAX_REFERENCES, each with the proof's own
+    bounds. Text is proved only if every slice proves it, vectors only if every slice proves
+    vectors. The first text failure stops the run: nothing can be acknowledged after it."""
+    lexical, vector, reason = True, vector_ok, ''
+    size = index_proof.MAX_REFERENCES
+    for start in range(0, len(references), size):
+        result = index_proof.verify(database=str(database), configuration=str(configuration), qmd=qmd or '',
+                                    references=references[start:start + size], vector=vector)
+        if (type(result.get('lexical')) is not bool or type(result.get('vector')) is not bool
+                or (result['vector'] and not result['lexical'])):
+            raise ValueError('Invalid read-only index proof result')
+        if not result['lexical'] or (vector and not result['vector']):
+            reason = reason or str(result.get('reason', ''))
+        vector = vector and result['vector']
+        if not result['lexical']:
+            lexical, vector = False, False
+            break
+    return {'lexical': lexical, 'vector': vector, 'reason': reason}
+
+
 def finish(token, lexical_ok=False, vector_ok=False):
     """Acknowledge captured generations only for the caller's successful stages."""
     _token(token)
@@ -409,12 +439,8 @@ def finish(token, lexical_ok=False, vector_ok=False):
             database, configuration = _paths(lease.index)
             qmd = setup_recall.qmd_exe() if lexical_ok and lease.captured else ''
             references = tuple(asdict(ref) for captured in lease.captured for ref in captured.references)
-            result = index_proof.verify(database=str(database), configuration=str(configuration), qmd=qmd or '',
-                references=references, vector=vector_ok) if lexical_ok and lease.captured else {
-                    'lexical': False, 'vector': False, 'reason': ''}
-            if (type(result.get('lexical')) is not bool or type(result.get('vector')) is not bool
-                    or (result['vector'] and not result['lexical'])):
-                raise ValueError('Invalid read-only index proof result')
+            result = _prove_in_batches(index_proof, database, configuration, qmd, references, vector_ok) \
+                if lexical_ok and lease.captured else {'lexical': False, 'vector': False, 'reason': ''}
             proofs = [VerifiedStages(captured.root, result['lexical'], result['vector'] and vector_ok,
                                      str(result.get('reason', ''))[:512]) for captured in lease.captured]
             _validate_current(lease)
