@@ -1,5 +1,21 @@
 # Developments
 
+## 2.1.28 — freshness for vaults with more than 1000 tracked notes (18 November 2026)
+
+Every index-refresh lease re-proves the latest revision of each tracked note, so its
+size grows with the vault rather than with recent edits. A vault with 1122 tracked notes
+exceeded the 1000-reference lease cap. Every refresh then failed with "Too many captured
+index references" and freshness was never acknowledged again
+([#42](https://github.com/crimeacs/claude-note/issues/42)). Indexing itself kept working.
+
+Leases now hold up to 20,000 references within an 8 MiB bound. `finish` proves them in
+slices of the proof's own per-call limit (1000), so every proof call keeps its existing
+reference, input and byte bounds. Text freshness is acknowledged only when every slice
+proves it, vectors only when every slice proves vectors, and the first text failure stops
+the run. A vault beyond 20,000 tracked revisions gets an explicit unbound lease with a
+warning instead of an exception. Proof semantics, lease validation and the acknowledgement
+journal are otherwise unchanged.
+
 ## 2.1.26 — retain import failure totals by source (27 October 2026)
 
 Codex and Claude Code now report queued sessions, failed items and locally
